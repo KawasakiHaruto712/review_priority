@@ -1,0 +1,18 @@
+version: "3.9"
+services:
+  review_priority:
+    build:
+      context: .
+    container_name: review_priority
+    tty: true
+    volumes:
+      - type: bind
+        source: .
+        target: /work
+      - type: volume
+        source: packages
+        target: /usr/local/lib/python3.12/site-packages
+      - /mnt/data1/haruto-k/review_priority:/work/review_priority
+
+volumes:
+  packages:
