@@ -1,691 +1,719 @@
 """
-OpenStack Data Collector
+OpenStackのGerritからデータを収集するためのモジュール
 
-このモジュールはOpenStackのコアコンポーネントからコードレビュー関連データを収集します。
-期間: constants.pyで定義されたSTART_DATEからEND_DATEまで
+このモジュールはOpenStackのGerritからPull Request（PR）データとコミット情報を収集し、
+分析のためにローカルに保存します。PRとコミット情報は別々に保存され、関連付けるためのIDを持ちます。
 """
 
-import argparse
 import os
-import sys
 import json
-import csv
-import time
 import requests
 import logging
-import configparser
-from pathlib import Path
-from git import Repo, Git
-from tqdm import tqdm
+import time
+import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
-from config.path import DEFAULT_CONFIG, DEFAULT_DATA_DIR, DEFAULT_REPOS_DIR
-from utils.constants import OPENSTACK_CORE_COMPONENTS, START_DATE, END_DATE
+from src.config.path import DEFAULT_DATA_DIR
+from src.utils.constants import OPENSTACK_CORE_COMPONENTS, START_DATE, END_DATE
+from src.utils.lang_identifiyer import identify_lang_from_file
 
-# ロギング設定
+# ロギングの設定
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("openstack_data_collector.log"),
+        logging.FileHandler(f"{DEFAULT_DATA_DIR}/openstack_collector.log"),
         logging.StreamHandler()
     ]
 )
-
 logger = logging.getLogger(__name__)
 
-class OpenStackDataCollector:
-    """OpenStackコアコンポーネントからデータを収集するクラス"""
+class OpenStackGerritCollector:
+    """OpenStackのGerritからデータを収集するクラス"""
     
-    # Gerritのベースエンドポイント
-    GERRIT_API_BASE = "https://review.opendev.org/changes/"
-    
-    # GitHubのベースエンドポイント
-    GITHUB_API_BASE = "https://api.github.com/repos/openstack/"
-    
-    def __init__(self, config_path=None):
-        """
-        初期化メソッド
-        
-        Args:
-            config_path: 設定ファイルのパスを指定します
-        """
-        
-        # 設定ファイルの読み込み
-        self.config = self._load_config(DEFAULT_CONFIG)
-        
-        # 出力ディレクトリの設定
-        self.data_dir = Path(DEFAULT_DATA_DIR)
-        self.repos_dir = Path(DEFAULT_REPOS_DIR)
-        
-        # 出力ディレクトリの作成
-        self._ensure_directories()
-        
-        # GitHub API トークン
-        load_dotenv()
-        GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-        self.github_token = GITHUB_TOKEN
-        if self.github_token == "your_github_token_here" or not self.github_token:
-            self.github_token = self.config.get('API', 'github_token', fallback=None)
+    BASE_URL = "https://review.opendev.org/a"
 
-        # OpenStackコアコンポーネントのリストを初期化
-        self.openstack_core_components = OPENSTACK_CORE_COMPONENTS
-        
-    def _load_config(self, config_path=None):
+    def __init__(self, components=None, start_date=None, end_date=None, username=None, password=None):
         """
-        設定ファイルを読み込む
+        コンストラクタ
         
         Args:
-            config_path: 設定ファイルのパス
+            components (list): 取得対象のOpenStackコンポーネントリスト
+            start_date (str): 取得対象の開始日 (YYYY-MM-DD)
+            end_date (str): 取得対象の終了日 (YYYY-MM-DD)
+            username (str): Gerritのユーザー名
+            password (str): Gerritのパスワード
+        """
+
+        load_dotenv()
+
+        self.components = components if components is not None else OPENSTACK_CORE_COMPONENTS
+        self.start_date = start_date if start_date is not None else START_DATE
+        self.end_date = end_date if end_date is not None else END_DATE
+        self.username = username if username is not None else os.getenv("GERRIT_USERNAME")
+        self.password = password if password is not None else os.getenv("GERRIT_PASSWORD")
+
+        # 認証ヘッダーを明示的に設定
+        self.headers = {
+            "Authorization": f"Basic {self._base64_encode(f'{self.username}:{self.password}')}",
+            "Accept": "application/json"
+        }
+
+        # 保存先ディレクトリの作成
+        self.output_dir = DEFAULT_DATA_DIR / "openstack"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        for component in self.components:
+            # コンポーネントディレクトリ
+            (self.output_dir / component).mkdir(exist_ok=True)
+            # PR情報用のディレクトリ
+            (self.output_dir / component / "changes").mkdir(exist_ok=True)
+            # コミット情報用のディレクトリ
+            (self.output_dir / component / "commits").mkdir(exist_ok=True)
+
+    def _base64_encode(self, text):
+        """
+        文字列をBase64エンコードする
+        
+        Args:
+            text (str): エンコードする文字列
             
         Returns:
-            configparser.ConfigParser: 設定オブジェクト
+            str: Base64エンコードされた文字列
         """
-        config = configparser.ConfigParser()
-        
-        # 設定ファイルがあれば読み込み
-        if config_path:
-            config_file = Path(config_path)
-            if config_file.exists():
-                logger.info(f"設定ファイルを読み込み中: {config_path}")
-                config.read(config_path)
-            else:
-                logger.warning(f"設定ファイルが見つかりません: {config_path}")
-                # デフォルト設定のファイルを作成
-                with open(config_path, 'w') as f:
-                    config.write(f)
-                logger.info(f"デフォルト設定を作成しました: {config_path}")
-        
-        return config
-        
-    def _ensure_directories(self):
-        """必要なディレクトリを作成"""
-        dirs = [
-            self.data_dir,
-            self.repos_dir,
-            self.data_dir / "commits",
-            self.data_dir / "reviews",
-            self.data_dir / "pull_requests",
-            self.data_dir / "issues",
-            self.data_dir / "stats",
-        ]
-        
-        for directory in dirs:
-            directory.mkdir(parents=True, exist_ok=True)
-            logger.debug(f"ディレクトリを確認/作成: {directory}")
+        import base64
+        return base64.b64encode(text.encode()).decode()
     
-    def run(self):
-        """データ収集の実行"""
-        logger.info("OpenStackデータ収集を開始します")
-        
-        for component in self.openstack_core_components:
-            logger.info(f"コンポーネント '{component}' の処理を開始します")
-            
-            # Gitリポジトリのクローンとコミットデータの収集
-            self.collect_git_data(component)
-            
-            # Gerritレビューデータの収集
-            self.collect_gerrit_data(component)
-            
-            # GitHubのIssueとPull Requestの収集
-            self.collect_github_data(component)
-            
-            # 統計情報の集計
-            self.generate_stats(component)
-            
-        logger.info("全てのデータ収集が完了しました")
-
-    def collect_git_data(self, component):
+    def _make_request(self, endpoint, params=None):
         """
-        Gitリポジトリからコミットデータを収集
+        GerritのREST APIにリクエストを送信
         
         Args:
-            component: コンポーネント名
-        """
-        repo_path = self.repos_dir / component
-        repo_url = f"https://opendev.org/openstack/{component}"
-        
-        logger.info(f"{component}: Gitリポジトリデータの収集を開始")
-        
-        # リポジトリのクローンまたは更新
-        if repo_path.exists():
-            logger.info(f"{component}: リポジトリを更新します")
-            repo = Repo(repo_path)
-            repo.git.fetch(all=True)
-            repo.git.reset('--hard', 'origin/master')
-        else:
-            logger.info(f"{component}: リポジトリをクローンします: {repo_url}")
-            repo = Repo.clone_from(repo_url, repo_path)
-        
-        # 期間内のコミットを取得
-        start_date = datetime.strptime(START_DATE, '%Y-%m-%d')
-        end_date = datetime.strptime(END_DATE, '%Y-%m-%d')
-        start_date_str = start_date.strftime('%Y-%m-%d')
-        end_date_str = end_date.strftime('%Y-%m-%d')
-        
-        logger.info(f"{component}: {start_date_str}から{end_date_str}までのコミットを取得します")
-        
-        # コミットログの取得（日付フィルタ付き）
-        git_cmd = [
-            'git', 'log',
-            f'--after={start_date_str}',
-            f'--before={end_date_str}',
-            '--pretty=format:%H|%an|%ae|%ad|%s',
-            '--date=iso'
-        ]
-        git = Git(repo_path)
-        commits_raw = git.execute(git_cmd)
-        
-        # 結果を解析してCSVに保存
-        commits_file = self.data_dir / "commits" / f"{component}_commits.csv"
-        
-        with open(commits_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['commit_hash', 'author_name', 'author_email', 'commit_date', 'subject'])
+            endpoint (str): APIエンドポイント
+            params (dict): クエリパラメータ
             
-            if commits_raw:
-                for commit_line in commits_raw.split('\n'):
-                    if commit_line:
-                        writer.writerow(commit_line.split('|'))
-        
-        logger.info(f"{component}: コミットデータを保存しました: {commits_file}")
-        
-        # ファイル変更の統計を収集
-        self.collect_file_changes(component, repo_path)
-
-    def collect_file_changes(self, component, repo_path):
+        Returns:
+            dict: レスポンスデータ
         """
-        期間内のファイル変更統計を収集
-        
-        Args:
-            component: コンポーネント名
-            repo_path: リポジトリのパス
-        """
-        start_date = datetime.strptime(START_DATE, '%Y-%m-%d')
-        end_date = datetime.strptime(END_DATE, '%Y-%m-%d')
-        start_date_str = start_date.strftime('%Y-%m-%d')
-        end_date_str = end_date.strftime('%Y-%m-%d')
-        
-        logger.info(f"{component}: ファイル変更統計を収集します")
-        
-        # ファイル変更の統計を取得
-        git = Git(repo_path)
-        changes_cmd = [
-            'git', 'log',
-            f'--after={start_date_str}',
-            f'--before={end_date_str}',
-            '--numstat',
-            '--pretty=%H'
-        ]
-        changes_raw = git.execute(changes_cmd)
-        
-        changes_file = self.data_dir / "commits" / f"{component}_file_changes.csv"
-        
-        current_commit = None
-        
-        with open(changes_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['commit_hash', 'added_lines', 'deleted_lines', 'file_path'])
+        url = f"{self.BASE_URL}/{endpoint}"
+        try:
+            if self.username and self.password:
+                headers = self.headers
             
-            if changes_raw:
-                for line in changes_raw.split('\n'):
-                    line = line.strip()
-                    
-                    if not line:
-                        continue
-                    
-                    # コミットハッシュの行
-                    if not line[0].isdigit():
-                        current_commit = line
-                    else:
-                        # ファイル変更の行
-                        parts = line.split("\t")
-                        if len(parts) >= 3:
-                            added = parts[0] if parts[0] != '-' else '0'
-                            deleted = parts[1] if parts[1] != '-' else '0'
-                            file_path = parts[2]
-                            writer.writerow([current_commit, added, deleted, file_path])
-
-        logger.info(f"{component}: ファイル変更データを保存しました: {changes_file}")
-
-    def collect_gerrit_data(self, component):
-        """
-        Gerritからコードレビューデータを収集
-        
-        Args:
-            component: コンポーネント名
-        """
-        logger.info(f"{component}: Gerritレビューデータの収集を開始")
-        
-        # 開始と終了のタイムスタンプ（秒）
-        start_date = datetime.strptime(START_DATE, '%Y-%m-%d')
-        end_date = datetime.strptime(END_DATE, '%Y-%m-%d')
-        start_timestamp = int(start_date.timestamp())
-        end_timestamp = int(end_date.timestamp())
-        
-        # Gerrit APIのクエリパラメータ
-        query_params = [
-            f"project:openstack/{component}",
-            f"after:{start_timestamp}",
-            f"before:{end_timestamp}",
-        ]
-        
-        query_str = "+".join(query_params)
-        
-        # ページネーション用の変数
-        start = 0
-        limit = 100  # 一度に取得する最大数
-        more_changes = True
-        all_reviews = []
-        
-        reviews_file = self.data_dir / "reviews" / f"{component}_reviews.json"
-        
-        # Gerrit APIでデータ取得
-        while more_changes:
-            url = f"{self.GERRIT_API_BASE}?q={query_str}&o=DETAILED_ACCOUNTS&o=DETAILED_LABELS&o=MESSAGES&n={limit}&S={start}"
-            logger.debug(f"Gerrit APIリクエスト: {url}")
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
             
-            try:
-                response = requests.get(url)
-                response.raise_for_status()
-                
-                # Gerritの応答は ")]}'" で始まるため、これを除去する
-                data = response.text[4:] if response.text.startswith(")]}'") else response.text
-                changes = json.loads(data)
-                
-                if not changes:
-                    more_changes = False
+            # Gerrit APIのレスポンスの処理
+            data = response.text
+            if data.startswith(")]}'"):
+                # 確実に特殊プレフィックスを除去
+                if '\n' in data:
+                    data = data[data.find('\n') + 1:]
                 else:
-                    all_reviews.extend(changes)
-                    
-                    # 次のページがあるかチェック
-                    if len(changes) < limit:
-                        more_changes = False
-                    else:
-                        start += limit
-                
-                # APIレート制限を避けるための待機
-                time.sleep(float(self.config.get('API', 'request_delay', fallback='1.0')))
-                
-            except Exception as e:
-                logger.error(f"Gerrit APIリクエスト中にエラーが発生しました: {e}")
-                more_changes = False
-        
-        # 結果をJSONファイルに保存
-        with open(reviews_file, 'w', encoding='utf-8') as f:
-            json.dump(all_reviews, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"{component}: {len(all_reviews)}件のレビューデータを保存しました: {reviews_file}")
-        
-        # レビュー統計の抽出と保存
-        self.extract_review_stats(component, all_reviews)
-
-    def extract_review_stats(self, component, reviews):
-        """
-        レビューデータから統計情報を抽出
-        
-        Args:
-            component: コンポーネント名
-            reviews: レビューデータのリスト
-        """
-        reviews_stats_file = self.data_dir / "stats" / f"{component}_review_stats.csv"
-        
-        with open(reviews_stats_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                'change_id', 'subject', 'owner', 'created', 'updated', 'status',
-                'reviewers_count', 'comments_count', 'revisions_count', 'time_to_merge_days'
-            ])
+                    data = data[4:]  # ')]}\'の4文字を除去
             
-            for review in reviews:
-                if 'id' not in review:
-                    continue
-                    
-                # 基本情報
-                change_id = review.get('change_id', '')
-                subject = review.get('subject', '')
-                owner = review.get('owner', {}).get('name', '')
-                created = review.get('created', '')
-                updated = review.get('updated', '')
-                status = review.get('status', '')
-                
-                # レビュアー数
-                reviewers = set()
-                for label in review.get('labels', {}).values():
-                    for vote in label.get('all', []):
-                        if vote.get('value') and vote.get('name'):
-                            reviewers.add(vote.get('name'))
-                
-                # コメント数
-                comments_count = len(review.get('messages', []))
-                
-                # リビジョン数
-                revisions_count = len(review.get('revisions', {}))
-                
-                # マージまでの時間（日数）
-                time_to_merge_days = ''
-                if status == 'MERGED' and created:
-                    created_date = datetime.datetime.fromisoformat(created.replace('Z', '+00:00'))
-                    updated_date = datetime.datetime.fromisoformat(updated.replace('Z', '+00:00'))
-                    time_to_merge = updated_date - created_date
-                    time_to_merge_days = time_to_merge.total_seconds() / (24 * 3600)
-                
-                writer.writerow([
-                    change_id, subject, owner, created, updated, status,
-                    len(reviewers), comments_count, revisions_count, time_to_merge_days
-                ])
-        
-        logger.info(f"{component}: レビュー統計データを保存しました: {reviews_stats_file}")
-
-    def collect_github_data(self, component):
+            return json.loads(data)
+        except requests.exceptions.HTTPError as e:
+            # 詳細なエラー情報を提供
+            logger.error(f"APIリクエストエラー（HTTPステータス {e.response.status_code}）: {e}")
+            if e.response.status_code == 401:
+                logger.error("認証エラー: ユーザー名とパスワードを確認してください")
+            elif e.response.status_code == 403:
+                logger.error("権限エラー: このリソースにアクセスする権限がありません")
+            elif e.response.status_code == 429:
+                logger.error("リクエスト制限エラー: APIリクエストの頻度を下げてください")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"JSONデコードエラー: {e}")
+            logger.debug(f"受信したレスポンスデータ: {response.text[:200]}...")
+            return None
+    
+    def get_merged_changes(self, component, limit=100, skip=0):
         """
-        GitHubからIssueやPull Requestのデータを収集
+        マージ済みの変更を日付昇順（古い順）に取得
         
         Args:
-            component: コンポーネント名
-        """
-        logger.info(f"{component}: GitHub IssueとPRデータの収集を開始")
-        
-        # 期間の設定
-        start_date = datetime.strptime(START_DATE, '%Y-%m-%d')
-        end_date = datetime.strptime(END_DATE, '%Y-%m-%d')
-        start_date_str = start_date.strftime('%Y-%m-%d')
-        end_date_str = end_date.strftime('%Y-%m-%d')
-        
-        # Issue取得
-        self._collect_github_issues(component, start_date_str, end_date_str)
-        
-        # Pull Request取得
-        self._collect_github_prs(component, start_date_str, end_date_str)
-
-    def _collect_github_issues(self, component, start_date_str, end_date_str):
-        """
-        GitHubからIssueを収集
-        
-        Args:
-            component: コンポーネント名
-            start_date_str: 開始日（YYYY-MM-DD）
-            end_date_str: 終了日（YYYY-MM-DD）
-        """
-        issues_file = self.data_dir / "issues" / f"{component}_issues.json"
-        
-        # GitHub APIのヘッダ設定
-        headers = {}
-        if self.github_token:
-            headers['Authorization'] = f"token {self.github_token}"
-        
-        # ページネーション用の変数
-        page = 1
-        per_page = 100
-        all_issues = []
-        has_more = True
-
-        while has_more:
-            # クエリパラメータを構築
-            query = f"repo:openstack/{component} is:issue created:{start_date_str}..{end_date_str}"
-            url = f"https://api.github.com/search/issues?q={query}&sort=created&order=asc&page={page}&per_page={per_page}"
+            component (str): OpenStackのコンポーネント名
+            limit (int): 一度に取得する変更の数
+            skip (int): スキップする変更の数
             
-            try:
-                response = requests.get(url, headers=headers)
-                response.raise_for_status()
-                data = response.json()
-                
-                items = data.get('items', [])
-                all_issues.extend(items)
-                
-                # 次のページがあるかチェック
-                total_count = data.get('total_count', 0)
-                if page * per_page >= total_count or not items:
-                    has_more = False
-                else:
-                    page += 1
-                
-                # APIレート制限を避けるための待機
-                time.sleep(float(self.config.get('API', 'request_delay', fallback='1.0')))
-                
-                # レート制限の確認
-                if 'X-RateLimit-Remaining' in response.headers:
-                    remaining = int(response.headers['X-RateLimit-Remaining'])
-                    if remaining <= 1:
-                        reset_time = int(response.headers['X-RateLimit-Reset'])
-                        sleep_time = max(reset_time - time.time() + 1, 0)
-                        logger.warning(f"GitHub APIレート制限に達しました。{sleep_time}秒待機します...")
-                        time.sleep(sleep_time)
-                
-            except Exception as e:
-                logger.error(f"GitHub Issues APIリクエスト中にエラーが発生しました: {e}")
-                has_more = False
-        
-        # 結果をJSONファイルに保存
-        with open(issues_file, 'w', encoding='utf-8') as f:
-            json.dump(all_issues, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"{component}: {len(all_issues)}件のIssueデータを保存しました: {issues_file}")
-
-    def _collect_github_prs(self, component, start_date_str, end_date_str):
+        Returns:
+            list: 変更のリスト
         """
-        GitHubからPull Requestを収集
+        # GerritのSearchエンドポイントを使用するためのクエリを構築
+        query = f"project:openstack/{component} status:merged after:{self.start_date} before:{self.end_date}"
         
-        Args:
-            component: コンポーネント名
-            start_date_str: 開始日（YYYY-MM-DD）
-            end_date_str: 終了日（YYYY-MM-DD）
-        """
-        prs_file = self.data_dir / "pull_requests" / f"{component}_prs.json"
-        
-        # GitHub APIのヘッダ設定
-        headers = {}
-        if self.github_token:
-            headers['Authorization'] = f"token {self.github_token}"
-        
-        # ページネーション用の変数
-        page = 1
-        per_page = 100
-        all_prs = []
-        has_more = True
-        
-        while has_more:
-            # クエリパラメータを構築
-            query = f"repo:openstack/{component} is:pr created:{start_date_str}..{end_date_str}"
-            url = f"https://api.github.com/search/issues?q={query}&sort=created&order=asc&page={page}&per_page={per_page}"
-            
-            try:
-                response = requests.get(url, headers=headers)
-                response.raise_for_status()
-                data = response.json()
-                
-                items = data.get('items', [])
-                all_prs.extend(items)
-                
-                # 次のページがあるかチェック
-                total_count = data.get('total_count', 0)
-                if page * per_page >= total_count or not items:
-                    has_more = False
-                else:
-                    page += 1
-                
-                # APIレート制限を避けるための待機
-                time.sleep(float(self.config.get('API', 'request_delay', fallback='1.0')))
-                
-                # レート制限の確認
-                if 'X-RateLimit-Remaining' in response.headers:
-                    remaining = int(response.headers['X-RateLimit-Remaining'])
-                    if remaining <= 1:
-                        reset_time = int(response.headers['X-RateLimit-Reset'])
-                        sleep_time = max(reset_time - time.time() + 1, 0)
-                        logger.warning(f"GitHub APIレート制限に達しました。{sleep_time}秒待機します...")
-                        time.sleep(sleep_time)
-                
-            except Exception as e:
-                logger.error(f"GitHub PRs APIリクエスト中にエラーが発生しました: {e}")
-                has_more = False
-        
-        # 結果をJSONファイルに保存
-        with open(prs_file, 'w', encoding='utf-8') as f:
-            json.dump(all_prs, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"{component}: {len(all_prs)}件のPull Requestデータを保存しました: {prs_file}")
-
-    def generate_stats(self, component):
-        """
-        コンポーネントの統計情報を生成
-        
-        Args:
-            component: コンポーネント名
-        """
-        logger.info(f"{component}: 統計情報の生成を開始")
-        
-        start_date = datetime.strptime(START_DATE, '%Y-%m-%d')
-        end_date = datetime.strptime(END_DATE, '%Y-%m-%d')
-
-        stats = {
-            'component': component,
-            'period_start': start_date.strftime('%Y-%m-%d'),
-            'period_end': end_date.strftime('%Y-%m-%d'),
-            'generated_at': datetime.now().isoformat(),
+        endpoint = "changes/"
+        params = {
+            "q": query,
+            "n": limit,
+            "S": skip,
+            "o": [
+                "CURRENT_REVISION",
+                "ALL_REVISIONS",
+                "CURRENT_COMMIT",
+                "ALL_COMMITS",
+                "DETAILED_ACCOUNTS",
+                "DETAILED_LABELS",
+                "MESSAGES",
+                "CURRENT_FILES",
+                "ALL_FILES",
+                "REVIEWED",
+                "SUBMITTABLE"
+            ]
         }
         
-        # コミット統計
-        commits_file = self.data_dir / "commits" / f"{component}_commits.csv"
-        if commits_file.exists():
-            commit_count = sum(1 for _ in open(commits_file)) - 1  # ヘッダー行を除く
-            stats['commit_count'] = commit_count
+        return self._make_request(endpoint, params)
+    
+    def get_change_detail(self, change_id):
+        """
+        特定の変更の詳細情報を取得
         
-        # ファイル変更統計
-        changes_file = self.data_dir / "commits" / f"{component}_file_changes.csv"
-        if changes_file.exists():
-            with open(changes_file, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                total_added = 0
-                total_deleted = 0
-                file_types = {}
-                
-                for row in reader:
-                    total_added += int(row['added_lines']) if row['added_lines'].isdigit() else 0
-                    total_deleted += int(row['deleted_lines']) if row['deleted_lines'].isdigit() else 0
-                    
-                    # ファイル拡張子の統計
-                    file_path = row['file_path']
-                    if '.' in file_path:
-                        ext = file_path.split('.')[-1].lower()
-                        file_types[ext] = file_types.get(ext, 0) + 1
+        Args:
+            change_id (str): 変更ID
             
-            stats['lines_added'] = total_added
-            stats['lines_deleted'] = total_deleted
-            stats['file_types'] = file_types
+        Returns:
+            dict: 変更の詳細情報
+        """
+        endpoint = f"changes/{change_id}/detail"
+        return self._make_request(endpoint)
+    
+    def get_file_content(self, change_id, revision_id, file_path):
+        from urllib.parse import quote
+        encoded_path = quote(file_path, safe='')
         
-        # レビュー統計
-        reviews_file = self.data_dir / "reviews" / f"{component}_reviews.json"
-        if reviews_file.exists():
-            try:
-                with open(reviews_file, 'r', encoding='utf-8') as f:
-                    reviews = json.load(f)
-                    
-                stats['review_count'] = len(reviews)
-                
-                # ステータス別の集計
-                status_counts = {}
-                for review in reviews:
-                    status = review.get('status', 'UNKNOWN')
-                    status_counts[status] = status_counts.get(status, 0) + 1
-                
-                stats['review_status_counts'] = status_counts
-                
-                # マージされたレビューのみの統計
-                merged_reviews = [r for r in reviews if r.get('status') == 'MERGED']
-                stats['merged_review_count'] = len(merged_reviews)
-                
-            except Exception as e:
-                logger.error(f"レビューデータの読み込み中にエラーが発生しました: {e}")
-        
-        # レビュー詳細統計
-        review_stats_file = self.data_dir / "stats" / f"{component}_review_stats.csv"
-        if review_stats_file.exists():
-            with open(review_stats_file, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                
-                reviewers_counts = []
-                comments_counts = []
-                revisions_counts = []
-                time_to_merge_days = []
-                
-                for row in reader:
-                    reviewers_counts.append(int(row['reviewers_count']) if row['reviewers_count'] else 0)
-                    comments_counts.append(int(row['comments_count']) if row['comments_count'] else 0)
-                    revisions_counts.append(int(row['revisions_count']) if row['revisions_count'] else 0)
-                    
-                    if row['time_to_merge_days']:
-                        try:
-                            time_to_merge_days.append(float(row['time_to_merge_days']))
-                        except ValueError:
-                            pass
-            
-            if reviewers_counts:
-                stats['avg_reviewers_per_change'] = sum(reviewers_counts) / len(reviewers_counts)
-            
-            if comments_counts:
-                stats['avg_comments_per_change'] = sum(comments_counts) / len(comments_counts)
-            
-            if revisions_counts:
-                stats['avg_revisions_per_change'] = sum(revisions_counts) / len(revisions_counts)
-            
-            if time_to_merge_days:
-                stats['avg_time_to_merge_days'] = sum(time_to_merge_days) / len(time_to_merge_days)
-        
-        # GitHub Issue統計
-        issues_file = self.data_dir / "issues" / f"{component}_issues.json"
-        if issues_file.exists():
-            try:
-                with open(issues_file, 'r', encoding='utf-8') as f:
-                    issues = json.load(f)
-                    
-                stats['issue_count'] = len(issues)
-                
-                # オープン/クローズの集計
-                open_issues = sum(1 for issue in issues if issue.get('state') == 'open')
-                closed_issues = sum(1 for issue in issues if issue.get('state') == 'closed')
-                
-                stats['open_issue_count'] = open_issues
-                stats['closed_issue_count'] = closed_issues
-                
-            except Exception as e:
-                logger.error(f"Issueデータの読み込み中にエラーが発生しました: {e}")
-        
-        # GitHub PR統計
-        prs_file = self.data_dir / "pull_requests" / f"{component}_prs.json"
-        if prs_file.exists():
-            try:
-                with open(prs_file, 'r', encoding='utf-8') as f:
-                    prs = json.load(f)
-                    
-                stats['pr_count'] = len(prs)
-                
-                # オープン/クローズ/マージの集計
-                open_prs = sum(1 for pr in prs if pr.get('state') == 'open')
-                closed_prs = sum(1 for pr in prs if pr.get('state') == 'closed')
-                
-                stats['open_pr_count'] = open_prs
-                stats['closed_pr_count'] = closed_prs
-                
-            except Exception as e:
-                logger.error(f"PRデータの読み込み中にエラーが発生しました: {e}")
-        
-        # 統計結果をJSONファイルに保存
-        stats_file = self.data_dir / "stats" / f"{component}_summary.json"
-        with open(stats_file, 'w', encoding='utf-8') as f:
-            json.dump(stats, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"{component}: 統計情報を保存しました: {stats_file}")
+        endpoint = f"changes/{change_id}/revisions/{revision_id}/files/{encoded_path}/content"
 
+        try:
+            # Pythonファイルのみ処理する
+            file_lang = identify_lang_from_file(file_path)
+            if file_lang != "Python":
+                logger.info(f"Pythonファイル以外なのでスキップします: {file_path} (言語: {file_lang})")
+                return None
+        except ValueError:
+            # 未知の拡張子の場合はスキップ
+            logger.info(f"未知のファイル拡張子なのでスキップします: {file_path}")
+            return None
+        
+        # 認証ヘッダーを使用
+        url = f"{self.BASE_URL}/{endpoint}"
+        try:
+            import base64
+            auth_string = f"{self.username}:{self.password}"
+            encoded_auth = base64.b64encode(auth_string.encode()).decode()
+            headers = {
+                "Authorization": f"Basic {encoded_auth}",
+                "Accept": "application/json"
+            }
+            
+            response = requests.get(url, headers=headers)
+
+            if response.status_code == 404:
+                # 404エラーは正常なケースとして処理
+                logger.info(f"ファイル {file_path} はこのリビジョンでは見つかりませんでした（スキップします）")
+                return None
+
+            response.raise_for_status()
+            
+            content_type = response.headers.get("Content-Type", "")
+
+            if "application/json" in content_type:
+                # JSONレスポンス
+                return json.loads(response.text.replace(")]}'", ""))
+            else:
+                # JSONでない場合（Base64エンコードされたファイル内容等）
+                # そのままテキストとして返す
+                return response.text
+        except Exception as e:
+            logger.error(f"ファイル内容の取得エラー ({file_path}): {e}")
+            return None
+    
+    def get_comments(self, change_id):
+        """
+        変更に対するコメントを取得
+        
+        Args:
+            change_id (str): 変更ID
+            
+        Returns:
+            dict: コメント情報
+        """
+        endpoint = f"changes/{change_id}/comments"
+        return self._make_request(endpoint)
+
+    def get_reviewers(self, change_id):
+        """
+        レビュワー情報を取得
+        
+        Args:
+            change_id (str): 変更ID
+            
+        Returns:
+            list: レビュワー情報のリスト
+        """
+        endpoint = f"changes/{change_id}/reviewers"
+        return self._make_request(endpoint)
+    
+    def get_diff(self, change_id, revision_id, file_path):
+        """
+        特定のファイルの差分を取得
+        
+        Args:
+            change_id (str): 変更ID
+            revision_id (str): リビジョンID
+            file_path (str): ファイルパス
+            
+        Returns:
+            str: ファイルの差分
+        """
+        from urllib.parse import quote
+        encoded_path = quote(file_path, safe='')
+        
+        endpoint = f"changes/{change_id}/revisions/{revision_id}/files/{encoded_path}/diff"
+        diff_data = self._make_request(endpoint)
+        
+        if diff_data:
+            return diff_data.get("content", "")
+        return None
+    
+    def get_revision_commits(self, change_id, revision_id):
+        """
+        特定のリビジョンのコミット情報を取得
+        
+        Args:
+            change_id (str): 変更ID
+            revision_id (str): リビジョンID
+            
+        Returns:
+            dict: コミット情報
+        """
+        endpoint = f"changes/{change_id}/revisions/{revision_id}/commit"
+        return self._make_request(endpoint)
+    
+    def get_commit_parents(self, change_id, revision_id):
+        """
+        コミットの親（Parent）情報を取得
+        
+        Args:
+            change_id (str): 変更ID
+            revision_id (str): リビジョンID
+            
+        Returns:
+            list: 親コミットのリスト
+        """
+        endpoint = f"changes/{change_id}/revisions/{revision_id}/commit"
+        commit_data = self._make_request(endpoint)
+        
+        if commit_data and "parents" in commit_data:
+            return commit_data["parents"]
+        return []
+    
+    def collect_data(self, batch_size=100):
+        """
+        OpenStackのすべての対象コンポーネントからデータを収集
+        
+        Args:
+            batch_size (int): 一度に取得する変更の数
+        """
+        all_data = {
+            "changes": {},
+            "commits": {}
+        }
+
+        # 日付フォーマット用のヘルパー関数
+        def format_date(date_str):
+            if not date_str or date_str == "不明":
+                return "不明"
+            # ISO形式の日付文字列から分数以降を削除
+            if "." in date_str:
+                date_str = date_str.split(".")[0]
+            return date_str
+        
+        for component in self.components:
+            logger.info(f"{component}のデータ収集を開始します...")
+            component_changes = []
+            component_commits = []
+            skip = 0
+            
+            while True:
+                changes = self.get_merged_changes(component, batch_size, skip)
+                
+                if not changes or len(changes) == 0:
+                    logger.info(f"{component}の全ての変更を取得しました（合計: {len(component_changes)}）")
+                    break
+                
+                # 各変更の詳細情報を取得
+                for change in changes:
+                    change_id = change["id"]
+                    change_number = change["_number"]
+                    pr_date = format_date(change.get("created", "不明"))
+
+                    # 進捗を表示（日付から分数以降を削除）
+                    logger.info(f"処理中: {component} - PR #{change_number} ({pr_date})")
+                    
+                    # 詳細情報の取得
+                    detail = self.get_change_detail(change_id)
+                    if not detail:
+                        continue
+                    
+                    # コメント情報の取得
+                    comments = self.get_comments(change_id)
+                    
+                    # レビュワー情報の取得
+                    reviewers = self.get_reviewers(change_id)
+                    
+                    # 現在のリビジョン情報
+                    current_revision = change.get("current_revision")
+                    revisions = change.get("revisions", {})
+                    
+                    # PRに関連するコミットIDのリストを保持
+                    commit_ids = []
+                    
+                    # すべてのリビジョン（コミット）情報を収集
+                    for revision_id, revision_info in revisions.items():
+                        # コミット情報を取得
+                        commit_info = self.get_revision_commits(change_id, revision_id)
+                        
+                        if not commit_info:
+                            continue
+                        
+                        # 変更されたファイル情報
+                        files = revision_info.get("files", {})
+                        
+                        # ファイルの差分情報を取得
+                        file_diffs = {}
+                        for file_path in files.keys():
+                            # ファイルパスが長すぎる場合やバイナリファイルはスキップ
+                            if len(file_path) > 255 or files[file_path].get("binary", False):
+                                continue
+                            
+                            try:
+                                # ファイル差分を取得
+                                diff = self.get_diff(change_id, revision_id, file_path)
+                                if diff:
+                                    file_diffs[file_path] = diff
+                            except Exception as e:
+                                logger.error(f"ファイル差分の取得に失敗しました ({file_path}): {e}")
+                        
+                        # 親コミット情報の取得
+                        parents = self.get_commit_parents(change_id, revision_id)
+                        
+                        # コミット詳細情報を構造化
+                        commit_data = {
+                            "revision_id": revision_id,
+                            "change_id": change_id,
+                            "change_number": change_number,
+                            "project": change.get("project", ""),
+                            "branch": change.get("branch", ""),
+                            "commit": {
+                                "message": commit_info.get("message", ""),
+                                "author": commit_info.get("author", {}),
+                                "committer": commit_info.get("committer", {}),
+                                "commit_id": revision_id,
+                                "parents": parents
+                            },
+                            "files": list(files.keys()),
+                            "file_changes": {
+                                path: {
+                                    "lines_inserted": info.get("lines_inserted", 0),
+                                    "lines_deleted": info.get("lines_deleted", 0),
+                                    "size_delta": info.get("size_delta", 0)
+                                } for path, info in files.items()
+                            },
+                            "file_diffs": file_diffs,
+                            "created": revision_info.get("created", ""),
+                            "uploader": revision_info.get("uploader", {})
+                        }
+                        
+                        component_commits.append(commit_data)
+                        
+                        # コミットIDをリストに追加（PRとコミットの関連付け用）
+                        commit_ids.append(revision_id)
+                        
+                        # 各コミットのデータを個別に保存
+                        self._save_commit_data(component, change_number, revision_id, commit_data)
+                    
+                    # 現在のリビジョン情報を使用してファイル内容を取得
+                    if current_revision:
+                        revision_info = revisions.get(current_revision, {})
+                        files = revision_info.get("files", {})
+                        commit_info = revision_info.get("commit", {})
+                    else:
+                        files = {}
+                        commit_info = {}
+                    
+                    # ファイルの内容を取得
+                    file_contents = {}
+                    if current_revision:
+                        for file_path in files.keys():
+                            # ファイルパスが長すぎる場合やバイナリファイルはスキップ
+                            if len(file_path) > 255 or files[file_path].get("binary", False):
+                                continue
+                            
+                            # コード差分と内容の取得
+                            try:
+                                # 変更後のファイル内容を取得
+                                content = self.get_file_content(change_id, current_revision, file_path)
+                                # ファイル差分も取得
+                                diff = self.get_diff(change_id, current_revision, file_path)
+                                
+                                file_data = {
+                                    "content": content,
+                                    "diff": diff
+                                }
+                                if content or diff:
+                                    file_contents[file_path] = file_data
+                            except Exception as e:
+                                logger.error(f"ファイル内容の取得に失敗しました ({file_path}): {e}")
+                    
+                    # 収集したデータを構造化（ただしコミット詳細は含めない）
+                    pr_data = {
+                        "change_id": change_id,
+                        "change_number": change_number,
+                        "project": change.get("project", ""),
+                        "branch": change.get("branch", ""),
+                        "subject": change.get("subject", ""),
+                        "created": change.get("created", ""),
+                        "updated": change.get("updated", ""),
+                        "submitted": change.get("submitted", ""),
+                        "merged": change.get("submitted", ""),  # submittedがマージ日時と同じ
+                        "owner": change.get("owner", {}),
+                        "labels": change.get("labels", {}),
+                        "current_revision": current_revision,
+                        "commit_message": commit_info.get("message", ""),
+                        "files": list(files.keys()),
+                        "file_changes": {
+                            path: {
+                                "lines_inserted": info.get("lines_inserted", 0),
+                                "lines_deleted": info.get("lines_deleted", 0),
+                                "size_delta": info.get("size_delta", 0)
+                            } for path, info in files.items()
+                        },
+                        "file_contents": file_contents,  # ファイルの内容を追加
+                        "comments": comments,
+                        "reviewers": reviewers,
+                        "messages": change.get("messages", []),
+                        "commit_ids": commit_ids  # PRに関連するコミットIDのリストのみを保持
+                    }
+                    
+                    component_changes.append(pr_data)
+                    
+                    # 各変更ごとのデータを個別に保存
+                    self._save_change_data(component, change_number, pr_data)
+                
+                skip += len(changes)
+                
+                # API制限を回避するための待機
+                time.sleep(1)
+            
+            # コンポーネントごとのデータをまとめて保存
+            self._save_component_summary(component, component_changes)
+            # コミット情報のサマリーも保存
+            self._save_component_commit_summary(component, component_commits)
+            all_data["changes"][component] = component_changes
+            all_data["commits"][component] = component_commits
+            
+        # 全体のサマリーデータを保存
+        self._save_summary(all_data)
+        
+        logger.info("全てのコンポーネントのデータ収集が完了しました")
+    
+    def _save_change_data(self, component, change_number, data):
+        """
+        個別の変更データを保存
+        
+        Args:
+            component (str): コンポーネント名
+            change_number (int): 変更番号
+            data (dict): 保存するデータ
+        """
+        output_path = self.output_dir / component / "changes" / f"change_{change_number}.json"
+        
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    
+    def _save_commit_data(self, component, change_number, revision_id, data):
+        """
+        個別のコミットデータを保存
+        
+        Args:
+            component (str): コンポーネント名
+            change_number (int): 変更番号
+            revision_id (str): リビジョンID
+            data (dict): 保存するデータ
+        """
+        # リビジョンIDを短くして使用（最初の8文字）
+        short_revision_id = revision_id[:8] if len(revision_id) > 8 else revision_id
+        output_path = self.output_dir / component / "commits" / f"commit_{change_number}_{short_revision_id}.json"
+        
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    
+    def _save_component_summary(self, component, changes):
+        """
+        コンポーネントごとのサマリーデータを保存
+        
+        Args:
+            component (str): コンポーネント名
+            changes (list): コンポーネントの変更データリスト
+        """
+        # 基本的な統計情報を抽出
+        summary = {
+            "total_changes": len(changes),
+            "date_range": {
+                "start": self.start_date,
+                "end": self.end_date
+            }
+        }
+        
+        # JSONとして保存
+        output_path = self.output_dir / component / "changes" / "summary.json"
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        
+        # 分析用にCSVとしても保存
+        if changes:
+            # 基本情報のみをフラット化
+            flat_data = []
+            for change in changes:
+                flat_change = {
+                    "change_id": change["change_id"],
+                    "change_number": change["change_number"],
+                    "project": change["project"],
+                    "branch": change["branch"],
+                    "subject": change["subject"],
+                    "created": change["created"],
+                    "updated": change["updated"],
+                    "merged": change["merged"],
+                    "owner_name": change["owner"].get("name", ""),
+                    "owner_email": change["owner"].get("email", ""),
+                    "files_changed": len(change["files"]),
+                    "lines_inserted": sum(f.get("lines_inserted", 0) for f in change["file_changes"].values()),
+                    "lines_deleted": sum(f.get("lines_deleted", 0) for f in change["file_changes"].values()),
+                    "size_delta": sum(f.get("size_delta", 0) for f in change["file_changes"].values()),
+                    "comments_count": sum(len(comments) for comments in change["comments"].values()) if change["comments"] else 0,
+                    "messages_count": len(change["messages"]),
+                    "reviewers_count": len(change["reviewers"]),
+                    "commit_count": len(change.get("commit_ids", []))  # コミット数を追加
+                }
+                flat_data.append(flat_change)
+            
+            df = pd.DataFrame(flat_data)
+            csv_path = self.output_dir / component / "changes" / "changes.csv"
+            df.to_csv(csv_path, index=False)
+    
+    def _save_component_commit_summary(self, component, commits):
+        """
+        コンポーネントごとのコミットサマリーデータを保存
+        
+        Args:
+            component (str): コンポーネント名
+            commits (list): コミットのデータリスト
+        """
+        # コミットの基本情報をフラット化
+        if commits:
+            flat_commits = []
+            for commit in commits:
+                flat_commit = {
+                    "change_id": commit["change_id"],
+                    "change_number": commit["change_number"],
+                    "revision_id": commit["revision_id"],
+                    "commit_message": commit["commit"]["message"],
+                    "author_name": commit["commit"]["author"].get("name", ""),
+                    "author_email": commit["commit"]["author"].get("email", ""),
+                    "commit_time": commit["commit"]["committer"].get("date", ""),
+                    "files_changed": len(commit["files"]),
+                    "lines_inserted": sum(f.get("lines_inserted", 0) for f in commit["file_changes"].values()),
+                    "lines_deleted": sum(f.get("lines_deleted", 0) for f in commit["file_changes"].values()),
+                    "size_delta": sum(f.get("size_delta", 0) for f in commit["file_changes"].values()),
+                    "parent_count": len(commit["commit"].get("parents", [])),
+                }
+                flat_commits.append(flat_commit)
+            
+            df = pd.DataFrame(flat_commits)
+            csv_path = self.output_dir / component / "commits" / "commits.csv"
+            df.to_csv(csv_path, index=False)
+            
+            # JSONサマリーも保存
+            summary = {
+                "total_commits": len(commits),
+                "date_range": {
+                    "start": self.start_date,
+                    "end": self.end_date
+                }
+            }
+            
+            output_path = self.output_dir / component / "commits" / "summary.json"
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2, ensure_ascii=False)
+    
+    def _save_summary(self, all_data):
+        """
+        全体のサマリーデータを保存
+        
+        Args:
+            all_data (dict): 全コンポーネントのデータ
+        """
+        # 基本的な集計情報を作成
+        components_summary = {}
+        total_changes = 0
+        total_commits = 0
+        
+        for component, changes in all_data["changes"].items():
+            component_changes = len(changes)
+            total_changes += component_changes
+            
+            # 対応するコミット数
+            component_commits = len(all_data["commits"].get(component, []))
+            total_commits += component_commits
+            
+            components_summary[component] = {
+                "total_changes": component_changes,
+                "total_commits": component_commits
+            }
+        
+        summary = {
+            "collection_date": datetime.now().isoformat(),
+            "date_range": {
+                "start": self.start_date,
+                "end": self.end_date
+            },
+            "components": self.components,
+            "total_components": len(self.components),
+            "total_changes": total_changes,
+            "total_commits": total_commits,
+            "components_summary": components_summary
+        }
+        
+        # JSONとして保存
+        output_path = self.output_dir / "summary.json"
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        
+        # コンポーネントごとの変更数をCSVでも保存
+        summary_data = [
+            {
+                "component": comp,
+                "changes": stats["total_changes"],
+                "commits": stats["total_commits"]
+            }
+            for comp, stats in components_summary.items()
+        ]
+        
+        if summary_data:
+            df = pd.DataFrame(summary_data)
+            csv_path = self.output_dir / "component_summary.csv"
+            df.to_csv(csv_path, index=False)
+
+def main():
+    """メイン関数"""
+    logger.info("OpenStack Gerritデータ収集を開始します")
+    
+    collector = OpenStackGerritCollector()
+    
+    collector.collect_data()
+    
+    logger.info("データ収集が完了しました")
 
 if __name__ == "__main__":
-    
-    parser = argparse.ArgumentParser(description='OpenStack コアコンポーネントデータ収集')
-    parser.add_argument('--config', dest='config_path', default='src/config/path.py',
-                      help='設定ファイルのパス (デフォルト: src/config/path.py)')
-    
-    args = parser.parse_args()
-    
-    # データ収集の実行
-    collector = OpenStackDataCollector(config_path=args.config_path)
-    collector.run()
+    main()
