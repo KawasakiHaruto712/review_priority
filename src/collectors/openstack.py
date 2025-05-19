@@ -111,6 +111,9 @@ class OpenStackGerritCollector:
                     data = data[data.find('\n') + 1:]
                 else:
                     data = data[4:]  # ')]}\'の4文字を除去
+
+            # API制限回避のためのスリープを追加
+            time.sleep(1)  # 各APIコール後に1秒待機
             
             return json.loads(data)
         except requests.exceptions.HTTPError as e:
@@ -122,6 +125,8 @@ class OpenStackGerritCollector:
                 logger.error("権限エラー: このリソースにアクセスする権限がありません")
             elif e.response.status_code == 429:
                 logger.error("リクエスト制限エラー: APIリクエストの頻度を下げてください")
+                # 429エラーの場合はより長く待機
+                time.sleep(5)
             return None
         except json.JSONDecodeError as e:
             logger.error(f"JSONデコードエラー: {e}")
@@ -217,6 +222,9 @@ class OpenStackGerritCollector:
             
             content_type = response.headers.get("Content-Type", "")
 
+            # API制限回避のためのスリープを追加
+            time.sleep(1)  # 各ファイル取得後に1秒待機
+
             if "application/json" in content_type:
                 # JSONレスポンス
                 return json.loads(response.text.replace(")]}'", ""))
@@ -224,6 +232,7 @@ class OpenStackGerritCollector:
                 # JSONでない場合（Base64エンコードされたファイル内容等）
                 # そのままテキストとして返す
                 return response.text
+
         except Exception as e:
             logger.error(f"ファイル内容の取得エラー ({file_path}): {e}")
             return None
@@ -504,7 +513,7 @@ class OpenStackGerritCollector:
                 skip += len(changes)
                 
                 # API制限を回避するための待機
-                time.sleep(1)
+                time.sleep(2)
             
             # コンポーネントごとのデータをまとめて保存
             self._save_component_summary(component, component_changes)
