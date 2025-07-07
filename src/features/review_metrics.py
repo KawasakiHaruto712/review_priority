@@ -1,5 +1,3 @@
-import torch
-from transformers import BertTokenizer, BertForSequenceClassification
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -7,6 +5,19 @@ from typing import Dict, Any, List
 import re
 import logging
 import pandas as pd # For pd.notna
+import configparser # configparserをインポート
+
+# NLTKのインポートとデータダウンロードの指示
+import nltk
+from nltk.stem import WordNetLemmatizer
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+
+# NLTKデータのダウンロード（初回のみ必要）
+# 環境に合わせてコメントアウトを外し、一度実行してください
+# nltk.download('wordnet')
+# nltk.download('punkt')
+# nltk.download('stopwords')
 
 logger = logging.getLogger(__name__)
 
@@ -14,191 +25,206 @@ logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+def _load_bot_names(config_path: Path) -> List[str]:
+    """
+    gerrymanderconfig.ini からボットのユーザー名を読み込む
+    (review_comment_processor.py と同じ関数を再利用)
+
+    Args:
+        config_path (Path): gerrymanderconfig.ini のパス
+
+    Returns:
+        List[str]: ボットのユーザー名リスト
+    """
+    bot_names = []
+    config = configparser.ConfigParser()
+    try:
+        config.read(config_path)
+        if 'organization' in config and 'bots' in config['organization']:
+            bot_names = [name.strip() for name in config['organization']['bots'].split(',')]
+            logger.info(f"ボット名が {config_path} からロードされました: {bot_names}")
+        else:
+            logger.warning(f"'{config_path}' に 'organization' セクションまたは 'bots' エントリが見つかりません。")
+    except configparser.Error as e:
+        logger.error(f"'{config_path}' のパース中にエラーが発生しました: {e}")
+    except FileNotFoundError:
+        logger.error(f"エラー: gerrymanderconfig.ini が {config_path} に見つかりません。")
+    return bot_names
+
 class ReviewStatusAnalyzer:
     """
     レビューコメントの対応状況を分析し, メトリクスを算出するクラス
-    修正要求の抽出には学習済みBERTモデルを, 修正確認の抽出にはキーワードを使用
+    修正要求と修正確認の抽出には、review_comment_processor.pyで抽出されたキーワードを使用
     """
     def __init__(
         self, 
-        bert_model_path: Path, 
-        confirmation_keywords_path: Path, 
-        device: str = None # 'cuda' or 'cpu'
+        extraction_keywords_path: Path, # review_keywords.json のパスをコンストラクタに追加
+        gerrymander_config_path: Path # gerrymanderconfig.ini のパスをコンストラクタに追加
     ):
-        self.bert_model_path = bert_model_path
-        self.confirmation_keywords_path = confirmation_keywords_path
-        self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.extraction_keywords_path = extraction_keywords_path
+        self.gerrymander_config_path = gerrymander_config_path
         
-        # 1. BERTモデルとトークナイザの読み込み
+        # 1. キーワードの読み込み
         try:
-            # tokenizer_nameは'bert-base-uncased'が使われているため, それを採用
-            self.tokenizer = BertTokenizer.from_pretrained(bert_model_path) # モデルパスから直接ロード
-            self.bert_model = BertForSequenceClassification.from_pretrained(bert_model_path)
-            self.bert_model.to(self.device)
-            self.bert_model.eval() # 推論モードに設定
-            logger.info(f"BERTモデルが {bert_model_path} からロードされ, {self.device} に移動しました.")
+            with open(self.extraction_keywords_path, 'r', encoding='utf-8') as f:
+                keywords_data = json.load(f)
+            self.request_keywords = set(keywords_data.get('修正要求', [])) # 高速なルックアップのためsetに変換
+            self.confirmation_keywords = set(keywords_data.get('修正確認', [])) # 高速なルックアップのためsetに変換
+            logger.info(f"キーワードが {self.extraction_keywords_path} からロードされました.")
+            logger.info(f"修正要求キーワード数: {len(self.request_keywords)}")
+            logger.info(f"修正確認キーワード数: {len(self.confirmation_keywords)}")
         except Exception as e:
-            logger.error(f"BERTモデルまたはトークナイザのロード中にエラーが発生しました: {bert_model_path}: {e}")
-            self.tokenizer = None
-            self.bert_model = None
-            raise RuntimeError("BERTモデルのロードに失敗しました. 修正要求の分類を続行できません.")
+            logger.error(f"エラー: キーワードファイルの読み込み中にエラーが発生しました: {e}")
+            self.request_keywords = set()
+            self.confirmation_keywords = set()
 
-        # 2. 修正確認キーワードの読み込みとパターンコンパイル
-        self.confirmation_patterns = self._load_and_compile_confirmation_keywords(confirmation_keywords_path)
-        if not self.confirmation_patterns:
-            logger.warning(f"修正確認キーワードが {confirmation_keywords_path} からロードされませんでした. 確認検出が機能しない可能性があります.")
+        # ボット名のロード
+        self.bot_names = _load_bot_names(self.gerrymander_config_path)
 
-    def _load_and_compile_confirmation_keywords(self, path: Path) -> re.Pattern | None:
-        """JSONファイルから修正確認キーワードを読み込み, 正規表現パターンにコンパイルする"""
-        if not path.exists():
-            logger.error(f"エラー: 修正確認キーワードファイルが {path} に見つかりません.")
-            return None # Noneを返すように変更
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            keywords = []
-            # AchieveComments.json の形式は [{"AchieveComments": "keyword"}]
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict) and "AchieveComments" in item:
-                        # キーワードの型が文字列であることを確認し, 小文字に変換してエスケープ
-                        if isinstance(item["AchieveComments"], str):
-                            keywords.append(re.escape(item["AchieveComments"].lower()))
-            else:
-                logger.error(f"{path} の予期せぬフォーマットです. 辞書のリストが期待されます.")
-                return None # Noneを返すように変更
+        # レマタイザーとストップワードのインスタンス化（利用したい場合はコメントアウトを外す）
+        # self.lemmatizer = WordNetLemmatizer()
+        # self.english_stopwords = set(stopwords.words('english'))
 
-            if not keywords:
-                return None # Noneを返すように変更
-            
-            # 全てのキーワードをORで結合し, 単語境界でマッチング (大文字小文字無視)
-            pattern_str = r'\b(' + '|'.join(keywords) + r')\b'
-            return re.compile(pattern_str, re.IGNORECASE)
-        except Exception as e:
-            logger.error(f"{path} からの修正確認キーワードのロードまたはコンパイル中にエラーが発生しました: {e}")
-            return None # Noneを返すように変更
+    def _preprocess_comment_for_matching(self, comment_text: str) -> str: # 戻り値を str に変更
+        """
+        キーワードマッチングのためにコメントを前処理する
+        結果は単一の文字列として返す
+        """
+        processed_comment = comment_text.lower()
+        processed_comment = re.sub(r'https?://[^\s<>"]+|www\.[^\s<>"]+|[^\s<>"]+\.[a-zA-Z]{2,}', " ", processed_comment) # URLを削除
+        processed_comment = re.sub(r"patch set \d+:", " ", processed_comment, flags=re.IGNORECASE) # "Patch Set 数字:" を削除
+        processed_comment = re.sub(r"\(\d+\s*(?:inline\s+)?comments?\)", " ", processed_comment) # インラインコメントのパターンを削除
+        processed_comment = re.sub(r"[^a-zA-Z'0-9\+-]+", " ", processed_comment) # 記号を削除
+        
+        # プロジェクト名やその他不要コメントを削除 (review_comment_processor.pyと一致させる)
+        processed_comment = re.sub(r"\b(nova|neutron|cinder|horizon|keystone|swift|glance|openstack|ci)\b", " ", processed_comment)
+        
+        # トークナイズ
+        words = word_tokenize(processed_comment)
+
+        # ストップワード除去, レマタイズ（利用したい場合はコメントアウトを外す）                                                  
+        # words = [word for word in words if word not in self.english_stopwords]                           
+        # words = [self.lemmatizer.lemmatize(word) for word in words]                                      
+        words = [word for word in words if word] # 空文字列の単語を除外
+
+        return " ".join(words) # 単語リストをスペースで結合して単一の文字列として返す
 
     def _classify_comment_as_request(self, comment_text: str) -> bool:
         """
-        BERTモデルを使用して, コメントが修正要求であるかを分類
+        コメントを修正要求として分類する（キーワードベース）
         """
-        if not self.bert_model or not self.tokenizer:
-            logger.error("BERTモデルまたはトークナイザがロードされていません. コメントを分類できません.")
-            return False
+        processed_comment_string = self._preprocess_comment_for_matching(comment_text) # 処理済みコメント文字列を取得
         
-        inputs = self.tokenizer(
-            comment_text, 
-            return_tensors='pt', 
-            truncation=True, 
-            padding=True, 
-            max_length=128
-        ).to(self.device)
+        for keyword in self.request_keywords: # 抽出されたキーワードをイテレート
+            # 処理済みコメント文字列がキーワードを部分文字列として含むかチェック
+            if keyword in processed_comment_string: # シンプルな部分文字列チェック
+                logger.debug(f"修正要求キーワード '{keyword}' がコメント内で見つかりました。")
+                return True
+        return False
 
-        with torch.no_grad(): # 勾配計算を無効化し, メモリ使用量を削減
-            outputs = self.bert_model(**inputs)
-        
-        # ロジットから予測クラス (0または1) を取得
-        # 0: 修正要求ではない, 1: 修正要求である (この二値分類タスク向けにファインチューニングされていると仮定)
-        predicted_class_id = torch.argmax(outputs.logits, dim=1).item()
-        
-        return predicted_class_id == 1 # 1が修正要求を示すと仮定
+    def _is_confirmation_comment(self, comment_text: str) -> bool:
+        """
+        コメントが修正確認であるかを判定する（キーワードベース）
+        """
+        processed_comment_string = self._preprocess_comment_for_matching(comment_text) # 処理済みコメント文字列を取得
 
-    def _is_comment_confirmation(self, comment_text: str) -> bool:
-        """
-        キーワードマッチングにより, コメントが修正確認であるかを判定
-        """
-        if self.confirmation_patterns is None: # パターンがNoneの場合のチェックを追加
-            return False
-        return bool(self.confirmation_patterns.search(comment_text))
+        for keyword in self.confirmation_keywords: # 抽出されたキーワードをイテレート
+            if keyword in processed_comment_string: # シンプルな部分文字列チェック
+                logger.debug(f"修正確認キーワード '{keyword}' がコメント内で見つかりました。")
+                return True
+        return False
 
-    def analyze_review_status(self, pr_data: Dict[str, Any], analysis_time: datetime) -> Dict[str, Any]:
+    def analyze_pr_status(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        PRのレビューコメント履歴とリビジョン更新状況に基づき, レビューの対応状況を分析
+        PRの各時点における修正要求の対応状況を分析する関数
+
+        この関数は、与えられたプルリクエスト (PR) のデータ (`pr_data`) を解析し、
+        PRのライフサイクルにおける修正要求の発生、完了、未完了の状態を追跡します
+        具体的には以下のメトリクスを計算し、`pr_data` ディクショナリに追加して返します
+
+        - `uncompleted_requests_counts`: 各イベント発生時点での未完了の修正要求数
+        - `uncompleted_requests_latest_timestamps`: 各イベント発生時点での未完了の修正要求の中で最も新しいもののタイムスタンプ
+        - `completed_requests_count`: PRのライフサイクル全体を通して完了した修正要求の総数
+        - `uncompleted_requests_final_count`: PRクローズ時の最終的な未完了修正要求数
+
+        処理のフロー:
+        1. `pr_data` からすべてのメッセージ（コメント）とリビジョンアップロードイベントを抽出し、
+           タイムスタンプに基づいてソート
+        2. 各イベントを時系列順に処理
+        3. メッセージが「修正確認」と分類された場合、それ以前のリビジョンアップロードより前に
+           発生した未完了の修正要求を「完了」として処理し、`completed_requests_count` を更新
+           これは、新しいリビジョンのアップロードとそれに続く修正確認コメントが、
+           以前の修正要求に対応していると仮定
+        4. メッセージが「修正要求」と分類された場合、その要求を未完了リストに追加
+        5. リビジョンアップロードイベントがあった場合、そのタイムスタンプを記録
+        6. PRの処理が完了した時点（すべてのイベントを処理した後）で、残っている未完了の修正要求の数と、
+           最も古い未完了要求の経過時間 (`uncompleted_requests_age_at_close`) を計算
 
         Args:
-            pr_data (Dict[str, Any]): 単一のPRの詳細データ (openstack.pyで収集されたJSONデータ)
-                                      'messages' (コメント履歴), 'all_revisions_info' (リビジョン履歴) が必要
-            analysis_time (datetime): メトリクスを計算する基準となる分析時点の時刻
+            pr_data (Dict[str, Any]): 単一のプルリクエストに関するデータを含む辞書
+                                       Gerritのシステムから取得された生データ形式を想定
+                                       'messages' (コメント), 'revisions' (リビジョン情報),
+                                       'last_updated' (最終更新日時) などのキーが含まれる
 
         Returns:
-            int: 未完了の修正要求の数
+            Dict[str, Any]: 分析結果のメトリクスが追加された更新版の `pr_data` 辞書。
         """
-        uncompleted_requests_count = 0
-        completed_requests_count = 0
         
-        # 1. 分析時点までのコメントとリビジョンを収集し, 時系列で統合
-        event_stream = []
+        pr_data['uncompleted_requests_counts'] = []
+        pr_data['uncompleted_requests_latest_timestamps'] = []
+        pr_data['completed_requests_count'] = 0
 
-        # コメントイベントの追加
+        events = []
         for msg in pr_data.get('messages', []):
-            # 'datetime'キーがNoneでないことを確認
-            if msg.get('datetime') and msg['datetime'] <= analysis_time:
-                event_stream.append({
-                    'type': 'comment',
-                    'timestamp': msg['datetime'],
-                    'data': msg.get('message', '')
-                })
-        
-        # リビジョン更新イベントの追加
-        # pr_data['all_revisions_info']が利用可能であることを前提
-        for rev_id, rev_info in pr_data.get('all_revisions_info', {}).items():
-            if rev_info.get('created'):
-                try:
-                    # ISO 8601形式の文字列をdatetimeオブジェクトに変換
-                    rev_datetime = datetime.fromisoformat(rev_info['created'].split('.')[0].replace(' ', 'T'))
-                    if rev_datetime <= analysis_time:
-                        event_stream.append({
-                            'type': 'revision_update', # イベントタイプを'revision_update'に変更
-                            'timestamp': rev_datetime,
-                            'data': rev_id # リビジョンIDなど
-                        })
-                except ValueError as e:
-                    logger.warning(f"PR {pr_data.get('change_number')}: リビジョン日時 {rev_info['created']} のパースに失敗しました: {e}")
+            events.append({
+                'type': 'message',
+                'timestamp': datetime.fromisoformat(msg['date'].replace('Z', '+00:00')),
+                'author': msg.get('author', {}).get('name'), # author 情報も取得
+                'message_id': msg.get('id'),
+                'comment_text': msg.get('message', ''),
+                'revision_number': msg.get('revision_number')
+            })
+        for rev_id, rev_data in pr_data.get('revisions', {}).items():
+            events.append({
+                'type': 'revision_upload',
+                'timestamp': datetime.fromisoformat(rev_data['created'].replace('Z', '+00:00')),
+                'revision_number': rev_data.get('_number')
+            })
 
-        # イベントストリームを時系列でソート
-        event_stream.sort(key=lambda x: x['timestamp'])
+        events.sort(key=lambda x: x['timestamp'])
 
-        # 修正要求の追跡リスト: 各要素は {'timestamp': datetime, 'comment_text': str}
-        pending_requests = [] # ここには, まだ完了していない修正要求を格納
-        
-        # 最後に確認されたリビジョン更新のタイムスタンプ
-        # これが「修正確認の投稿されたリビジョンより前のリビジョン」の基準となる
-        last_revision_update_time = None # 変数名を変更
+        pending_requests: List[Dict[str, Any]] = []
+        last_revision_upload_timestamp = None
 
-        for event in event_stream:
-            if event['type'] == 'revision_update': # イベントタイプを'revision_update'に変更
-                # リビジョン更新があった場合, その時刻を記録
-                last_revision_update_time = event['timestamp']
-                logger.debug(f"PR {pr_data.get('change_number')}: リビジョン更新が {event['timestamp']} に発生しました.")
+        for event in events:
+            if event['type'] == 'revision_upload':
+                last_revision_upload_timestamp = event['timestamp']
+                logger.debug(f"PR {pr_data.get('change_number')}: リビジョン {event.get('revision_number')} が {event['timestamp']} にアップロードされました.")
+            
+            elif event['type'] == 'message':
+                comment_author = event.get('author') # メッセージの著者を取得
+                # ボットのコメントをスキップ
+                if comment_author and comment_author in self.bot_names:
+                    logger.debug(f"PR {pr_data.get('change_number')}: ボット '{comment_author}' のコメントをスキップします。")
+                    continue
 
-            elif event['type'] == 'comment':
-                comment_text = event['data']
+                comment_text = event['comment_text']
                 
-                is_confirmation = self._is_comment_confirmation(comment_text)
                 is_request = self._classify_comment_as_request(comment_text)
+                is_confirmation = self._is_confirmation_comment(comment_text)
 
                 if is_confirmation:
-                    # 修正確認の投稿があった場合
-                    logger.debug(f"PR {pr_data.get('change_number')}: 確認コメントが {event['timestamp']} で見つかりました: {comment_text[:50]}...")
-                    
-                    if not pending_requests: # 未完了の要求がなければスキップ
-                        logger.debug("未完了の要求がないためスキップします.")
-                        
-                    # 修正確認が投稿されたリビジョンより前のリビジョンで投稿された修正要求を全て完了とみなす
-                    # => req.timestamp < last_revision_update_time の条件を満たす要求をクリア
-                    
-                    if last_revision_update_time is not None:
-                        requests_to_clear_indices = []
-                        for i, req in enumerate(pending_requests):
-                            if req['timestamp'] < last_revision_update_time: # リビジョン更新より前に投稿された要求
-                                requests_to_clear_indices.append(i)
-                        
-                        # 後ろから削除することでインデックスのずれを防ぐ
+                    logger.debug(f"PR {pr_data.get('change_number')}: 修正確認が {event['timestamp']} で識別されました: {comment_text[:50]}...")
+                    # 最新のリビジョンアップロードより古い要求を完了済みとして処理
+                    if last_revision_upload_timestamp:
+                        requests_to_clear_indices = [
+                            i for i, req in enumerate(pending_requests) 
+                            if req['timestamp'] < last_revision_upload_timestamp
+                        ]
                         for i in sorted(requests_to_clear_indices, reverse=True):
-                            completed_requests_count += 1
                             pending_requests.pop(i)
-                            
+                            pr_data['completed_requests_count'] += 1
+
                         if requests_to_clear_indices:
                             logger.debug(f"修正確認により {len(requests_to_clear_indices)} 件の要求が完了しました.")
                         else:
@@ -206,7 +232,7 @@ class ReviewStatusAnalyzer:
                     else:
                         logger.debug("修正確認が見つかりましたが, それ以前にリビジョン更新がないため, 要求と紐付けできません.")
                         
-                    # もしこのコメント自体が修正要求でもあれば, 新たな要求として追加
+                    # 修正確認コメント自体が新たな修正要求を含む場合があるため、そのチェックも行う
                     if is_request:
                         pending_requests.append({
                             'timestamp': event['timestamp'],
@@ -214,19 +240,19 @@ class ReviewStatusAnalyzer:
                         })
                         logger.debug(f"PR {pr_data.get('change_number')}: コメントは修正確認かつ新たな修正要求です. 新たな要求を追加しました.")
 
-                elif is_request: # 修正確認ではないが, 修正要求である場合
+                elif is_request:
+                    # 修正要求の場合、未完了リストに追加
                     pending_requests.append({
                         'timestamp': event['timestamp'],
                         'comment_text': comment_text
                     })
-                    logger.debug(f"PR {pr_data.get('change_number')}: 修正要求が {event['timestamp']} で識別されました: {comment_text[:50]}...")
+                    logger.debug(f"PR {pr_data.get('change_number')}: 修正要求が {event['timestamp']} で識別されました: {comment_text[:50]}...\n未完了の要求: {len(pending_requests)}")
                 
-                # どちらでもないコメントはスキップ
                 else:
                     logger.debug(f"PR {pr_data.get('change_number')}: コメント {event['timestamp']} は修正要求でも修正確認でもありません.")
 
-
-        # analysis_time 終了時点での未完了の修正要求の数をカウント
+        # PRクローズ時の未完了要求数を計算
         uncompleted_requests_count = len(pending_requests)
 
-        return uncompleted_requests_count
+        pr_data['uncompleted_requests_final_count'] = uncompleted_requests_count
+        return pr_data
