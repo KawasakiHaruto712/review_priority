@@ -4,20 +4,14 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List
 import re
 import logging
-import pandas as pd # For pd.notna
-import configparser # configparserをインポート
+import pandas as pd
+import configparser
 
-# NLTKのインポートとデータダウンロードの指示
-import nltk
-from nltk.stem import WordNetLemmatizer
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
-
-# NLTKデータのダウンロード（初回のみ必要）
-# 環境に合わせてコメントアウトを外し、一度実行してください
-# nltk.download('wordnet')
-# nltk.download('punkt')
-# nltk.download('stopwords')
+# 必要に応じて，NLTKのインポートとデータダウンロード
+# import nltk
+# from nltk.stem import WordNetLemmatizer
+# from nltk.corpus import stopwords
+# from nltk.tokenize import word_tokenize
 
 logger = logging.getLogger(__name__)
 
@@ -54,38 +48,84 @@ def _load_bot_names(config_path: Path) -> List[str]:
 class ReviewStatusAnalyzer:
     """
     レビューコメントの対応状況を分析し, メトリクスを算出するクラス
-    修正要求と修正確認の抽出には、review_comment_processor.pyで抽出されたキーワードを使用
+    修正要求と修正確認の抽出には、review_comment_processor.pyで抽出されたキーワードと、
+    review_label.json のCode-Reviewラベルを使用する
     """
     def __init__(
         self, 
-        extraction_keywords_path: Path, # review_keywords.json のパスをコンストラクタに追加
-        gerrymander_config_path: Path # gerrymanderconfig.ini のパスをコンストラクタに追加
+        extraction_keywords_path: Path, # review_keywords.json のパス
+        gerrymander_config_path: Path, # gerrymanderconfig.ini のパス
+        review_label_path: Path # review_label.json のパス
     ):
         self.extraction_keywords_path = extraction_keywords_path
         self.gerrymander_config_path = gerrymander_config_path
+        self.review_label_path = review_label_path
         
-        # 1. キーワードの読み込み
+        # 1. review_keywords.json からキーワードの読み込み
         try:
             with open(self.extraction_keywords_path, 'r', encoding='utf-8') as f:
                 keywords_data = json.load(f)
             self.request_keywords = set(keywords_data.get('修正要求', [])) # 高速なルックアップのためsetに変換
             self.confirmation_keywords = set(keywords_data.get('修正確認', [])) # 高速なルックアップのためsetに変換
-            logger.info(f"キーワードが {self.extraction_keywords_path} からロードされました.")
+            logger.info(f"review_keywords.json からキーワードがロードされました.")
             logger.info(f"修正要求キーワード数: {len(self.request_keywords)}")
             logger.info(f"修正確認キーワード数: {len(self.confirmation_keywords)}")
         except Exception as e:
-            logger.error(f"エラー: キーワードファイルの読み込み中にエラーが発生しました: {e}")
+            logger.error(f"エラー: review_keywords.json ファイルの読み込み中にエラーが発生しました: {e}")
             self.request_keywords = set()
             self.confirmation_keywords = set()
+
+        # review_label.json からレビューラベルを読み込む
+        self.all_review_labels = [] # すべてのラベル（前処理で削除するため）
+        self.code_review_minus_labels = set() # Code-Reviewのminusラベル（修正要求として使用）
+        self.code_review_plus_labels = set() # Code-Reviewのplusラベル（修正確認として使用）
+        self.non_code_review_labels_pattern = None # Code-Review以外のラベルを削除するための正規表現
+
+        try:
+            with open(self.review_label_path, 'r', encoding='utf-8') as f:
+                labels_data = json.load(f)
+            
+            non_code_review_labels = [] # Code-Review以外のラベルを一時的に保持
+
+            for category, sentiments in labels_data.items():
+                for sentiment_type, labels in sentiments.items():
+                    # すべてのラベルをall_review_labelsに追加
+                    self.all_review_labels.extend(labels)
+
+                    if category == "Code-Review":
+                        if sentiment_type == "minus":
+                            self.code_review_minus_labels.update(labels)
+                        elif sentiment_type == "plus":
+                            self.code_review_plus_labels.update(labels)
+                    else: # Code-Review以外のカテゴリのラベルはnon_code_review_labelsに追加
+                        non_code_review_labels.extend(labels)
+            
+            # 長いラベルから順にソートすることで、短いラベルが長いラベルの一部である場合に
+            # 長いラベルが先にマッチして削除されるようにする
+            self.all_review_labels.sort(key=len, reverse=True)
+            non_code_review_labels.sort(key=len, reverse=True)
+
+            # Code-Review以外のラベルを削除するための正規表現パターンを作成
+            if non_code_review_labels:
+                # 単語境界 `\b` を使用して、部分マッチではなく完全な単語としてのラベルを削除
+                self.non_code_review_labels_pattern = re.compile(
+                    r'\b(?:' + '|'.join(re.escape(label) for label in non_code_review_labels) + r')\b', 
+                    re.IGNORECASE
+                )
+            logger.info(f"review_label.json からラベルがロードされました。")
+            logger.info(f"Code-Review (minus) ラベル数: {len(self.code_review_minus_labels)}")
+            logger.info(f"Code-Review (plus) ラベル数: {len(self.code_review_plus_labels)}")
+        except Exception as e:
+            logger.error(f"エラー: review_label.json ファイルの読み込み中にエラーが発生しました: {e}")
 
         # ボット名のロード
         self.bot_names = _load_bot_names(self.gerrymander_config_path)
 
-        # レマタイザーとストップワードのインスタンス化（利用したい場合はコメントアウトを外す）
+        # NLTK関連のインスタンス化を削除
         # self.lemmatizer = WordNetLemmatizer()
         # self.english_stopwords = set(stopwords.words('english'))
 
-    def _preprocess_comment_for_matching(self, comment_text: str) -> str: # 戻り値を str に変更
+    def _preprocess_comment_for_matching(self, comment_text: str) -> str:
         """
         キーワードマッチングのためにコメントを前処理する
         結果は単一の文字列として返す
@@ -94,15 +134,20 @@ class ReviewStatusAnalyzer:
         processed_comment = re.sub(r'https?://[^\s<>"]+|www\.[^\s<>"]+|[^\s<>"]+\.[a-zA-Z]{2,}', " ", processed_comment) # URLを削除
         processed_comment = re.sub(r"patch set \d+:", " ", processed_comment, flags=re.IGNORECASE) # "Patch Set 数字:" を削除
         processed_comment = re.sub(r"\(\d+\s*(?:inline\s+)?comments?\)", " ", processed_comment) # インラインコメントのパターンを削除
+        
+        # --- 変更点: Code-Review以外のラベルを削除 ---
+        if self.non_code_review_labels_pattern:
+            processed_comment = self.non_code_review_labels_pattern.sub(" ", processed_comment)
+        
         processed_comment = re.sub(r"[^a-zA-Z'0-9\+-]+", " ", processed_comment) # 記号を削除
         
         # プロジェクト名やその他不要コメントを削除 (review_comment_processor.pyと一致させる)
         processed_comment = re.sub(r"\b(nova|neutron|cinder|horizon|keystone|swift|glance|openstack|ci)\b", " ", processed_comment)
         
-        # トークナイズ
-        words = word_tokenize(processed_comment)
+        # NLTKのtokenizeの代わりに、簡単なスペース区切りを使用
+        words = processed_comment.split()
 
-        # ストップワード除去, レマタイズ（利用したい場合はコメントアウトを外す）                                                  
+        # NLTK関連のストップワード除去, レマタイズを削除
         # words = [word for word in words if word not in self.english_stopwords]                           
         # words = [self.lemmatizer.lemmatize(word) for word in words]                                      
         words = [word for word in words if word] # 空文字列の単語を除外
@@ -111,27 +156,44 @@ class ReviewStatusAnalyzer:
 
     def _classify_comment_as_request(self, comment_text: str) -> bool:
         """
-        コメントを修正要求として分類する（キーワードベース）
+        コメントを修正要求として分類する（キーワードベースとCode-Review minusラベルベース）
         """
-        processed_comment_string = self._preprocess_comment_for_matching(comment_text) # 処理済みコメント文字列を取得
+        processed_comment_string = self._preprocess_comment_for_matching(comment_text)
         
-        for keyword in self.request_keywords: # 抽出されたキーワードをイテレート
-            # 処理済みコメント文字列がキーワードを部分文字列として含むかチェック
-            if keyword in processed_comment_string: # シンプルな部分文字列チェック
+        # review_keywords.jsonのキーワードとCode-Review (minus) ラベルの両方でチェック
+        for keyword in self.request_keywords:
+            if keyword in processed_comment_string:
                 logger.debug(f"修正要求キーワード '{keyword}' がコメント内で見つかりました。")
                 return True
+        
+        for label in self.code_review_minus_labels:
+            # ラベルはすでに前処理で小文字化されていることを前提に、そのまま比較
+            # ただし、完全な単語としてマッチするかを確認するため、単語境界を考慮
+            if re.search(r'\b' + re.escape(label) + r'\b', processed_comment_string):
+                logger.debug(f"Code-Review (minus) ラベル '{label}' がコメント内で見つかりました。")
+                return True
+
         return False
 
     def _is_confirmation_comment(self, comment_text: str) -> bool:
         """
-        コメントが修正確認であるかを判定する（キーワードベース）
+        コメントが修正確認であるかを判定する（キーワードベースとCode-Review plusラベルベース）
         """
-        processed_comment_string = self._preprocess_comment_for_matching(comment_text) # 処理済みコメント文字列を取得
+        processed_comment_string = self._preprocess_comment_for_matching(comment_text)
 
-        for keyword in self.confirmation_keywords: # 抽出されたキーワードをイテレート
-            if keyword in processed_comment_string: # シンプルな部分文字列チェック
+        # --- 変更点: review_keywords.jsonのキーワードとCode-Review (plus) ラベルの両方でチェック ---
+        for keyword in self.confirmation_keywords:
+            if keyword in processed_comment_string:
                 logger.debug(f"修正確認キーワード '{keyword}' がコメント内で見つかりました。")
                 return True
+        
+        for label in self.code_review_plus_labels:
+            # ラベルはすでに前処理で小文字化されていることを前提に、そのまま比較
+            # ただし、完全な単語としてマッチするかを確認するため、単語境界を考慮
+            if re.search(r'\b' + re.escape(label) + r'\b', processed_comment_string):
+                logger.debug(f"Code-Review (plus) ラベル '{label}' がコメント内で見つかりました。")
+                return True
+        
         return False
 
     def analyze_pr_status(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -167,7 +229,7 @@ class ReviewStatusAnalyzer:
                                        'last_updated' (最終更新日時) などのキーが含まれる
 
         Returns:
-            Dict[str, Any]: 分析結果のメトリクスが追加された更新版の `pr_data` 辞書。
+            uncompleted_requests_count (int): PRのライフサイクル全体を通しての未完了の修正要求数
         """
         
         pr_data['uncompleted_requests_counts'] = []
@@ -179,7 +241,7 @@ class ReviewStatusAnalyzer:
             events.append({
                 'type': 'message',
                 'timestamp': datetime.fromisoformat(msg['date'].replace('Z', '+00:00')),
-                'author': msg.get('author', {}).get('name'), # author 情報も取得
+                'author': msg.get('author', {}).get('name'),
                 'message_id': msg.get('id'),
                 'comment_text': msg.get('message', ''),
                 'revision_number': msg.get('revision_number')
@@ -202,7 +264,7 @@ class ReviewStatusAnalyzer:
                 logger.debug(f"PR {pr_data.get('change_number')}: リビジョン {event.get('revision_number')} が {event['timestamp']} にアップロードされました.")
             
             elif event['type'] == 'message':
-                comment_author = event.get('author') # メッセージの著者を取得
+                comment_author = event.get('author')
                 # ボットのコメントをスキップ
                 if comment_author and comment_author in self.bot_names:
                     logger.debug(f"PR {pr_data.get('change_number')}: ボット '{comment_author}' のコメントをスキップします。")
@@ -233,6 +295,7 @@ class ReviewStatusAnalyzer:
                         logger.debug("修正確認が見つかりましたが, それ以前にリビジョン更新がないため, 要求と紐付けできません.")
                         
                     # 修正確認コメント自体が新たな修正要求を含む場合があるため、そのチェックも行う
+                    # is_requestがtrueの場合、新しい要求として追加
                     if is_request:
                         pending_requests.append({
                             'timestamp': event['timestamp'],
@@ -254,5 +317,4 @@ class ReviewStatusAnalyzer:
         # PRクローズ時の未完了要求数を計算
         uncompleted_requests_count = len(pending_requests)
 
-        pr_data['uncompleted_requests_final_count'] = uncompleted_requests_count
-        return pr_data
+        return uncompleted_requests_count
