@@ -5,20 +5,13 @@ from pathlib import Path
 import logging
 import re
 import numpy as np
-from typing import List
 import configparser
 
-# NLTKのインポートとデータダウンロードの指示
-import nltk
-from nltk.stem import WordNetLemmatizer
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
-
-# NLTKデータのダウンロード（初回のみ必要）
-# コメントアウトしていますが、環境に合わせて実行してください
-# nltk.download('wordnet')
-# nltk.download('punkt')
-# nltk.download('stopwords')
+# NLTKのインポートとデータダウンロードの指示を削除
+# import nltk
+# from nltk.stem import WordNetLemmatizer
+# from nltk.corpus import stopwords
+# from nltk.tokenize import word_tokenize
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +19,7 @@ logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def _generate_ngrams(words: List[str], n_min: int, n_max: int) -> List[str]:
+def _generate_ngrams(words: list[str], n_min: int, n_max: int) -> list[str]:
     """
     単語のリストからN-gram (フレーズ) を生成
 
@@ -46,7 +39,7 @@ def _generate_ngrams(words: List[str], n_min: int, n_max: int) -> List[str]:
             ngrams.append(ngram)
     return ngrams
 
-def _load_bot_names(config_path: Path) -> List[str]:
+def _load_bot_names(config_path: Path) -> list[str]:
     """
     gerrymanderconfig.ini からボットのユーザー名を読み込む
 
@@ -72,7 +65,32 @@ def _load_bot_names(config_path: Path) -> List[str]:
         logger.error(f"エラー: gerrymanderconfig.ini が {config_path} に見つかりません。")
     return bot_names
 
-def summarize_keywords_by_inclusion(keywords: List[str]) -> List[str]:
+def _load_review_labels(label_path: Path) -> list[str]:
+    """
+    review_label.json からすべてのレビューラベルを読み込む
+
+    Args:
+        label_path (Path): review_label.json のパス
+
+    Returns:
+        List[str]: すべてのレビューラベルのリスト
+    """
+    all_labels = []
+    try:
+        with open(label_path, 'r', encoding='utf-8') as f:
+            labels_data = json.load(f)
+        for category in labels_data.values():
+            for sentiment in category.values():
+                all_labels.extend(sentiment)
+        # 長いラベルから順にソートすることで、短いラベルが長いラベルの一部である場合に
+        # 長いラベルが先にマッチして削除されるようにする
+        all_labels.sort(key=len, reverse=True)
+        logger.info(f"レビューラベルが {label_path} からロードされました。合計 {len(all_labels)} 個。")
+    except Exception as e:
+        logger.error(f"エラー: レビューラベルファイルの読み込み中にエラーが発生しました: {e}")
+    return all_labels
+
+def summarize_keywords_by_inclusion(keywords: list[str]) -> list[str]:
     """
     キーワードのリストから包含関係にある冗長なキーワードを削除し、より一般的な（短い）キーワードを優先する。
 
@@ -106,6 +124,7 @@ def extract_and_save_review_keywords(
     checklist_path: Path,
     output_keywords_path: Path,
     gerrymander_config_path: Path,
+    review_label_path: Path, # 新しい引数
     min_comment_count: int = 10,
     min_precision_ratio: float = 0.90,
     ngram_min: int = 1,
@@ -118,6 +137,7 @@ def extract_and_save_review_keywords(
         checklist_path (Path): checklist.csvファイルのパス
         output_keywords_path (Path): 抽出されたキーワードを保存するJSONファイルのパス
         gerrymander_config_path (Path): gerrymanderconfig.ini のパス
+        review_label_path (Path): review_label.json のパス
         min_comment_count (int): 語彙を含むレビューコメントの最小数
         min_precision_ratio (float): 語彙を含むレビューコメントが修正要求/確認として分類される最小割合 (0.0〜1.0)
         ngram_min (int): 抽出するN-gramの最小の長さ (デフォルト: 1)
@@ -132,6 +152,12 @@ def extract_and_save_review_keywords(
 
     # ボット名をロード
     bot_names = _load_bot_names(gerrymander_config_path)
+    # レビューラベルをロード
+    review_labels = _load_review_labels(review_label_path)
+    # レビューラベルから正規表現パターンを生成 (長いラベルを先にマッチさせるためソート済みのものを使用)
+    # 単語境界 `\b` を使用して、部分マッチではなく完全な単語としてのラベルを削除
+    review_labels_pattern = re.compile(r'\b(?:' + '|'.join(re.escape(label) for label in review_labels) + r')\b', re.IGNORECASE)
+
 
     try:
         df = pd.read_csv(checklist_path)
@@ -152,10 +178,6 @@ def extract_and_save_review_keywords(
     except Exception as e:
         logger.error(f"エラー: checklist.csv の読み込み中にエラーが発生しました: {e}")
         return
-
-    # レマタイザーとストップワードのインスタンス化（利用したい場合はコメントアウトを外す）
-    # lemmatizer = WordNetLemmatizer()
-    # english_stopwords = set(stopwords.words('english'))
     
     # 語彙ごとの集計
     vocab_counts = defaultdict(lambda: {'total': 0, 'is_request': 0, 'is_confirmation': 0})
@@ -170,7 +192,7 @@ def extract_and_save_review_keywords(
             logger.debug(f"ボット '{comment_author}' のコメントをスキップします。: {original_comment[:50]}...")
             continue
 
-        # --- 修正点: '修正要求'と'修正確認'の判定ロジックを修正 ---
+        # '修正要求'と'修正確認'の判定ロジック
         is_request_row = False
         request_val = row['修正要求']
         if pd.notna(request_val): # NaNでないことを確認
@@ -190,22 +212,27 @@ def extract_and_save_review_keywords(
         processed_comment = re.sub(r'https?://[^\s<>"]+|www\.[^\s<>"]+|[^\s<>"]+\.[a-zA-Z]{2,}', " ", processed_comment) # URLを削除
         processed_comment = re.sub(r"patch set \d+:", " ", processed_comment, flags=re.IGNORECASE) # "Patch Set 数字:" のパターンを削除
         processed_comment = re.sub(r"\(\d+\s*(?:inline\s+)?comments?\)", " ", processed_comment) # インラインコメントのパターンを削除
+        
+        # review_label.jsonから読み込んだラベルを削除
+        processed_comment = review_labels_pattern.sub(" ", processed_comment)
+        
         processed_comment = re.sub(r"[^a-zA-Z'0-9\+-]+", " ", processed_comment) # 記号を削除
         
         # プロジェクト名やその他不要コメントを削除 (単語境界でマッチングを強化)
         processed_comment = re.sub(r"\b(nova|neutron|cinder|horizon|keystone|swift|glance|openstack|ci)\b", " ", processed_comment)
         
         # トークナイズ
-        words = word_tokenize(processed_comment) 
+        # NLTKのtokenizeの代わりに、簡単なスペース区切りを使用
+        words = processed_comment.split() 
 
-        # ストップワード除去, レマタイズ（利用したい場合はコメントアウトを外す）
+        # ストップワード除去, レマタイズ（NLTKがないため削除）
         # words = [word for word in words if word not in english_stopwords]                           
         # words = [lemmatizer.lemmatize(word) for word in words]                                      
         
         # 空文字列の単語を除外 (前処理でスペースになった部分など)
         words = [word for word in words if word]
 
-        # --- N-gram (フレーズ) の生成 ---
+        # N-gram (フレーズ) の生成
         phrases = _generate_ngrams(words, ngram_min, ngram_max)
         
         # フレーズごとのカウント (コメント内での重複を避けるためsetを使用)
@@ -248,11 +275,13 @@ if __name__ == "__main__":
     checklist_csv_path = DEFAULT_DATA_DIR / "processed" / "checklist.csv"
     output_json_path = DEFAULT_DATA_DIR / "processed" / "review_keywords.json"
     gerrymander_config_path = DEFAULT_CONFIG / "gerrymanderconfig.ini"
+    review_label_json_path = DEFAULT_DATA_DIR / "processed" / "review_label.json" # review_label.json のパスを追加
 
     extract_and_save_review_keywords(
         checklist_csv_path, 
         output_json_path,
         gerrymander_config_path,
+        review_label_json_path, # 新しい引数を渡す
         min_comment_count=10,
         min_precision_ratio=0.90,
         ngram_min= 1,
