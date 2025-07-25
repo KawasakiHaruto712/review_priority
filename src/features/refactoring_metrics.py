@@ -12,7 +12,7 @@ SAR_PATTERNS = [
     r"refactor(ing|ed)?",
     r"mov(e|ed|ing)",
     r"split(ting)?",
-    r"fix(e(d|s))?",
+    r"fix(e(d|s)|ing)?",  # "fixing"も含むように修正
     r"introduc(e|ed|ing)",
     r"decompos(e|ed|ing|ition)",
     r"reorgani(z|s)(e|ed|ing|ation)?",
