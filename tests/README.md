@@ -1,67 +1,82 @@
-# Test directory for review-priority project
+# Review Priority プロジェクト テストディレクトリ
 
-This directory contains unit tests and integration tests for the project.
+このディレクトリには、Review Priority プロジェクトのユニットテストと統合テストが含まれています。
 
-## Structure
+## ディレクトリ構造
 
-- `features/` - Tests for feature extraction modules
-- `data/` - Sample test data files
-- `test_integration.py` - Integration tests using real data
+- `collectors/` - データ収集モジュールのテスト
+- `features/` - 特徴量抽出モジュールのテスト
+- `learning/` - 機械学習・IRL（逆強化学習）モジュールのテスト
+- `preprocessing/` - データ前処理モジュールのテスト
+- `data/` - テスト用サンプルデータファイル
+- `test_integration.py` - 実データを使用した統合テスト
 
-## Running Tests
+## テストの実行方法
 
-### Prerequisites
+### 前提条件
 
-Install test dependencies:
+テスト用依存関係をインストール：
 ```bash
 pip install -e .[test]
 ```
 
-### All Tests
+### 全テスト実行
 ```bash
 pytest tests/ -v
 ```
 
-### Unit Tests Only
+### モジュール別テスト実行
 ```bash
-pytest tests/features/ -v
+pytest tests/collectors/ -v      # データ収集テスト
+pytest tests/features/ -v       # 特徴量抽出テスト
+pytest tests/learning/ -v       # 機械学習テスト
+pytest tests/preprocessing/ -v  # データ前処理テスト
 ```
 
-### Integration Tests Only
+### 統合テストのみ実行
 ```bash
 pytest tests/test_integration.py -v
 ```
 
-### Using Makefile
+### Makefileを使用した実行
 ```bash
-make test           # All tests
-make test-unit      # Unit tests only
-make test-integration # Integration tests only
+make test           # 全テスト
+make test-unit      # ユニットテストのみ
+make test-integration # 統合テストのみ
 ```
 
-### Using the run_tests.py Script
+### run_tests.pyスクリプトを使用した実行
 ```bash
-python run_tests.py                # Install deps and run all tests
-python run_tests.py install        # Install test dependencies
-python run_tests.py unit          # Run unit tests
-python run_tests.py integration   # Run integration tests
+python run_tests.py                # 依存関係インストール＋全テスト実行
+python run_tests.py install        # テスト依存関係のインストール
+python run_tests.py unit          # ユニットテスト実行
+python run_tests.py integration   # 統合テスト実行
 ```
 
-## Test Categories
+## テストカテゴリ
 
-### Unit Tests (`tests/features/`)
-- Test individual functions in isolation
-- Use mock data and mocked dependencies
-- Fast execution
-- Test edge cases and error handling
+### ユニットテスト
+- 各モジュールの個別機能をテスト
+- モックデータと依存関係の模擬を使用
+- 高速実行
+- エッジケースとエラーハンドリングをテスト
 
-### Integration Tests (`test_integration.py`)
-- Test with real data files from `data/openstack/`
-- Verify that functions work with actual change data
-- Slower execution but more realistic testing
-- Can be skipped if data directories don't exist
+### 統合テスト（`test_integration.py`）
+- `data/openstack/`の実データファイルを使用
+- 実際の変更データでの動作確認
+- 実行時間は長いが、より現実的なテスト
+- データディレクトリが存在しない場合はスキップ可能
 
-## Test Data
+## テストデータ
 
-- `tests/data/sample_change.json` - Sample change data for unit tests
-- Real data in `data/openstack/{project}/changes/` is used for integration tests
+- `tests/data/sample_change.json` - ユニットテスト用サンプル変更データ
+- `data/openstack/{project}/changes/` の実データは統合テストで使用
+
+## 各モジュールの詳細
+
+詳細なテスト内容については、各ディレクトリのREADME.mdを参照してください：
+
+- [collectors/README.md](collectors/README.md) - データ収集テスト
+- [features/README.md](features/README.md) - 特徴量抽出テスト  
+- [learning/README.md](learning/README.md) - 機械学習テスト
+- [preprocessing/README.md](preprocessing/README.md) - データ前処理テスト
