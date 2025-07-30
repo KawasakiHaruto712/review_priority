@@ -36,7 +36,7 @@ def _load_bot_names(config_path: Path) -> List[str]:
         config.read(config_path)
         if 'organization' in config and 'bots' in config['organization']:
             bot_names = [name.strip() for name in config['organization']['bots'].split(',')]
-            logger.info(f"ボット名が {config_path} からロードされました: {bot_names}")
+            logger.info(f"ボット数: {len(bot_names)}")
         else:
             logger.warning(f"'{config_path}' に 'organization' セクションまたは 'bots' エントリが見つかりません。")
     except configparser.Error as e:
