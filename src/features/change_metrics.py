@@ -21,10 +21,13 @@ def calculate_lines_added(change_data: Dict[str, Any]) -> int:
     Returns:
         int: 追加された総行数
     """
+    file_changes = change_data.get('file_changes', {})
     total_lines_added = 0
-    file_changes = change_data.get("file_changes", {})
-    for file_info in file_changes.values():
-        total_lines_added += file_info.get("lines_inserted", 0)
+    
+    for file_path, file_change in file_changes.items():
+        lines_inserted = file_change.get('lines_inserted', 0)
+        total_lines_added += lines_inserted
+    
     return total_lines_added
 
 def calculate_lines_deleted(change_data: Dict[str, Any]) -> int:
@@ -37,10 +40,13 @@ def calculate_lines_deleted(change_data: Dict[str, Any]) -> int:
     Returns:
         int: 削除された総行数
     """
+    file_changes = change_data.get('file_changes', {})
     total_lines_deleted = 0
-    file_changes = change_data.get("file_changes", {})
-    for file_info in file_changes.values():
-        total_lines_deleted += file_info.get("lines_deleted", 0)
+    
+    for file_path, file_change in file_changes.items():
+        lines_deleted = file_change.get('lines_deleted', 0)
+        total_lines_deleted += lines_deleted
+    
     return total_lines_deleted
 
 def calculate_files_changed(change_data: Dict[str, Any]) -> int:
@@ -53,7 +59,7 @@ def calculate_files_changed(change_data: Dict[str, Any]) -> int:
     Returns:
         int: 変更されたファイルの総数
     """
-    files = change_data.get("files", [])
+    files = change_data.get('files', [])
     return len(files)
 
 def calculate_elapsed_time(change_data: Dict[str, Any], analysis_time: datetime) -> float:
@@ -67,14 +73,19 @@ def calculate_elapsed_time(change_data: Dict[str, Any], analysis_time: datetime)
     Returns:
         float: 経過時間（分数），計算できない場合は-1.0
     """
-    created_str = change_data.get("created")
-    if not created_str:
+    created = change_data.get("created")
+    if not created:
         logger.warning(f"Change {change_data.get('change_number', 'N/A')} has no 'created' timestamp. Cannot calculate elapsed time.")
         return -1.0
     
     try:
-        # 時刻部分にスペースが含まれる場合は'T'に変換してからパース
-        created_dt = datetime.fromisoformat(created_str.replace(' ', 'T'))
+        # datetimeオブジェクトの場合はそのまま使用、文字列の場合は変換
+        if isinstance(created, datetime):
+            created_dt = created
+        else:
+            # 時刻部分にスペースが含まれる場合は'T'に変換してからパース
+            created_str = str(created).replace('.000000000', '').replace(' ', 'T')
+            created_dt = datetime.fromisoformat(created_str)
         
         # ここでは、0または負の値（まだ作成されていない、あるいは未来の分析時点）を返す
         if analysis_time < created_dt:
@@ -83,8 +94,8 @@ def calculate_elapsed_time(change_data: Dict[str, Any], analysis_time: datetime)
             
         time_difference = analysis_time - created_dt
         return time_difference.total_seconds() / 60  # 分数に変換
-    except ValueError as e:
-        logger.error(f"Error parsing 'created' timestamp '{created_str}' for change {change_data.get('change_number', 'N/A')}: {e}")
+    except (ValueError, TypeError) as e:
+        logger.error(f"Error parsing 'created' timestamp '{created}' for change {change_data.get('change_number', 'N/A')}: {e}")
         return -1.0
 
 def calculate_revision_count(change_data: Dict[str, Any], analysis_time: datetime) -> int:
@@ -153,8 +164,16 @@ def check_test_code_presence(change_data: Dict[str, Any]) -> int:
     Returns:
         int: テストコードが含まれている場合は1、含まれていない場合は0。
     """
-    files = change_data.get("files", [])
-    for file_path in files:
-        if "/test/" in file_path.lower() or "/tests/" in file_path.lower() or file_path.lower().endswith(('_test.py', 'test_.py')):
+    # 現在のデータにはfilesフィールドが含まれていないため、デフォルト値を返す
+    # 実際のプロジェクトでは、コミット情報から計算するか、別途収集が必要
+    # PRのタイトルや説明からテストの存在を推測する簡易的な方法を使用
+    subject = change_data.get("subject", "").lower()
+    message = change_data.get("message", "").lower()
+    
+    test_keywords = ["test", "unittest", "pytest", "testing"]
+    
+    for keyword in test_keywords:
+        if keyword in subject or keyword in message:
             return 1
+    
     return 0

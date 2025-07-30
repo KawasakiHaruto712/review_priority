@@ -2,12 +2,83 @@ import logging
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, Any
+import json
+import os
+from src.config.path import DEFAULT_DATA_DIR
 
 logger = logging.getLogger(__name__)
 
 # ロギング設定の例 (必要に応じて調整)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def add_lines_info_to_dataframe(df: pd.DataFrame, project_name: str) -> pd.DataFrame:
+    """
+    DataFrameにchangeデータから行数情報（lines_added, lines_deleted, files_changed）を追加します。
+    
+    Args:
+        df (pd.DataFrame): 'change_number'カラムを含むDataFrame
+        project_name (str): プロジェクト名（例: 'neutron', 'nova'）
+    
+    Returns:
+        pd.DataFrame: 行数情報が追加されたDataFrame
+    """
+    lines_added_list = []
+    lines_deleted_list = []
+    files_changed_list = []
+    
+    for idx, row in df.iterrows():
+        change_number = row.get('change_number')
+        if pd.isna(change_number):
+            lines_added_list.append(0)
+            lines_deleted_list.append(0)
+            files_changed_list.append(0)
+            continue
+            
+        # changeファイルのパスを構築
+        change_file_path = os.path.join(
+            DEFAULT_DATA_DIR, 'openstack', project_name, 'changes', 
+            f'change_{int(change_number)}.json'
+        )
+        
+        try:
+            if os.path.exists(change_file_path):
+                with open(change_file_path, 'r', encoding='utf-8') as f:
+                    change_data = json.load(f)
+                
+                # change_metrics関数を使用して行数を計算
+                from src.features.change_metrics import (
+                    calculate_lines_added, 
+                    calculate_lines_deleted, 
+                    calculate_files_changed
+                )
+                
+                lines_added = calculate_lines_added(change_data)
+                lines_deleted = calculate_lines_deleted(change_data)
+                files_changed = calculate_files_changed(change_data)
+                
+                lines_added_list.append(lines_added)
+                lines_deleted_list.append(lines_deleted)
+                files_changed_list.append(files_changed)
+            else:
+                logger.warning(f"Change file not found: {change_file_path}")
+                lines_added_list.append(0)
+                lines_deleted_list.append(0)
+                files_changed_list.append(0)
+                
+        except Exception as e:
+            logger.error(f"Error reading change file {change_file_path}: {e}")
+            lines_added_list.append(0)
+            lines_deleted_list.append(0)
+            files_changed_list.append(0)
+    
+    # DataFrameに新しいカラムを追加
+    df_with_lines = df.copy()
+    df_with_lines['lines_added'] = lines_added_list
+    df_with_lines['lines_deleted'] = lines_deleted_list
+    df_with_lines['files_changed'] = files_changed_list
+    
+    return df_with_lines
 
 def _get_major_version(version_string: str) -> int | None:
     """
@@ -114,18 +185,18 @@ def calculate_reviewed_lines_in_period(
     lookback_days: int = 14 # 過去2週間
 ) -> int:
     """
-    指定された分析時点から過去指定日数以内（デフォルト2週間）にレビューされた（活動があった）チケットの
-    追加・削除された行数の総和を計算します。
+    指定された分析時点から過去指定日数以内（デフォルト2週間）にレビューされた（活動があった）
+    行数の合計を計算します。
     ここで「レビューされた」とは、その期間内にPRが更新されたことを指します。
     
     Args:
         all_prs_df (pd.DataFrame): 全てのPR履歴を含むDataFrame。
-                                   'updated' (datetime型), 'lines_inserted', 'lines_deleted' カラムが必要です。
+                                   'updated' (datetime型), 'lines_added', 'lines_deleted' カラムが必要です。
         analysis_time (datetime): メトリクスを計算する基準となる分析時点の時刻。
         lookback_days (int): 遡る日数（デフォルト: 14日）。
 
     Returns:
-        int: 指定期間内に活動があったPRの追加・削除された行数の総和。
+        int: 指定期間内にレビューされた総行数（追加+削除）。
     """
     start_of_period = analysis_time - timedelta(days=lookback_days)
 
@@ -135,7 +206,12 @@ def calculate_reviewed_lines_in_period(
         (all_prs_df['updated'] <= analysis_time)
     ]
     
-    total_reviewed_lines = active_prs_in_period['lines_inserted'].sum() + \
-                           active_prs_in_period['lines_deleted'].sum()
-    
-    return int(total_reviewed_lines)
+    # 行数情報が利用可能な場合は実際の行数を計算
+    if 'lines_added' in active_prs_in_period.columns and 'lines_deleted' in active_prs_in_period.columns:
+        lines_added = active_prs_in_period['lines_added'].fillna(0).astype(int).sum()
+        lines_deleted = active_prs_in_period['lines_deleted'].fillna(0).astype(int).sum()
+        return lines_added + lines_deleted
+    else:
+        # 行数情報が利用できない場合は0を返す
+        logger.warning("行数情報が利用できないため、0を返します。")
+        return 0

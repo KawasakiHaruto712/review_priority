@@ -1,5 +1,3 @@
 data
-
-openstack_data_collector.log
-
+src/review_priority.egg-info
 .env

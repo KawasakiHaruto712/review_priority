@@ -9,7 +9,7 @@ OPENSTACK_CORE_COMPONENTS = [
 ]
 
 # 日付範囲
-START_DATE = "2020-01-01"
+START_DATE = "2015-01-01"
 END_DATE = "2024-12-31"
 
 # ラベル付けしたChange数
