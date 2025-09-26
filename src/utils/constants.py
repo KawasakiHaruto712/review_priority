@@ -14,3 +14,7 @@ END_DATE = "2024-12-31"
 
 # ラベル付けしたChange数
 LABELLED_CHANGE_COUNT = 383
+
+# スライディングウィンドウ日数
+SLIDING_WINDOW_DAYS = 14 # ウィンドウサイズ（2週間）
+SLIDING_WINDOW_STEP_DAYS = 1 # ウィンドウをずらす間隔（1日）
