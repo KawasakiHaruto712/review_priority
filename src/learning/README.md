@@ -7,6 +7,8 @@
 | ファイル | 説明 |
 |---------|------|
 | `irl_models.py` | IRLモデルの実装とデータ処理クラス |
+| `temporal_weight_analysis.py` | 時系列重み分析（スライディングウィンドウでIRL重み変動を追跡） |
+| `temporal_model_evaluation.py` | 時系列モデル評価（Balanced Random Forestで正負例を分類） |
 
 ## 🧠 アルゴリズム
 
@@ -241,4 +243,40 @@ def allocate_resources(review_queue, available_resources):
 - **深層学習**: ニューラルネットワークベースのIRL
 - **多目的最適化**: 複数の評価軸の同時考慮
 - **強化学習**: 動的な優先順位調整
+
+## 📊 時系列モデル評価 (`temporal_model_evaluation.py`)
+
+### 概要
+Balanced Random Forestを用いてウィンドウごとに正負例を定義し、レビュー優先順位付けモデルを評価します。
+
+### 正負例の定義
+- **正例（ラベル=1）**: ウィンドウ期間中に1回以上レビューされたPR
+- **負例（ラベル=0）**: ウィンドウ期間中に1度もレビューされなかったPR
+
+### データ分割
+- PR単位で学習:評価 = 8:2に分割
+- `random_state=42`で再現性を確保
+- 同じPRが学習と評価の両方に含まれないよう保証
+
+### 評価指標
+- **Precision（適合率）**: 予測した正例のうち実際に正例だった割合
+- **Recall（再現率）**: 実際の正例のうち正しく予測できた割合  
+- **F1 Score（F値）**: PrecisionとRecallの調和平均
+
+### 出力ファイル
+`data/temporal_evaluation/`ディレクトリに保存：
+- `temporal_evaluation_{project}.csv`: ウィンドウごとの評価指標
+- `temporal_evaluation_{project}.json`: 全体のサマリー統計
+- `temporal_evaluation_{project}.pdf`: 評価結果の可視化レポート
+
+### 使用例
+```python
+from src.learning.temporal_model_evaluation import run_temporal_model_evaluation
+
+# 全プロジェクトの評価
+results = run_temporal_model_evaluation()
+
+# 特定プロジェクトの評価
+results = run_temporal_model_evaluation(projects=['nova', 'neutron'])
+```
 - **説明可能AI**: より詳細な判断根拠の提供
