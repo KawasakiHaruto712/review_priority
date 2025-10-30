@@ -233,7 +233,9 @@ class TemporalModelEvaluator:
     def evaluate_window(self, project_changes: pd.DataFrame, 
                        window_start: datetime, window_end: datetime,
                        bot_names: List[str], project: str,
-                       releases_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+                       releases_df: pd.DataFrame,
+                       windows: List[Tuple[datetime, datetime]] = None,
+                       current_window_index: int = None) -> Optional[Dict[str, Any]]:
         """
         単一ウィンドウでの学習・評価を実行
         
@@ -249,7 +251,7 @@ class TemporalModelEvaluator:
             Optional[Dict[str, Any]]: 評価結果（失敗時はNone）
         """
         try:
-            # ウィンドウ期間中にオープンなChangeを取得
+            # ウィンドウ期間中にオープンなChangeを取得（評価対象）
             window_changes = get_open_changes_at_time(project_changes, window_start)
             
             if window_changes.empty:
@@ -265,7 +267,7 @@ class TemporalModelEvaluator:
                 logger.warning(f"ウィンドウ {window_start} - {window_end}: ラベルなし")
                 return None
             
-            # 特徴量を抽出
+            # 現在ウィンドウの特徴量を抽出（評価データ）
             features_df = self.data_processor.extract_features(
                 window_changes, window_start, project, releases_df
             )
@@ -274,60 +276,119 @@ class TemporalModelEvaluator:
                 logger.warning(f"ウィンドウ {window_start} - {window_end}: 特徴量抽出失敗")
                 return None
             
-            # ラベルと特徴量をマージ
+            # ラベルと特徴量（評価用）をマージ
             features_df['label'] = features_df['change_number'].astype(str).map(labels)
             features_df = features_df.dropna(subset=['label'])
-            
-            if len(features_df) < 10:  # 最低限のデータ数
+
+            if len(features_df) < 5:  # 最低限のデータ数（評価は緩めに）
                 logger.warning(f"ウィンドウ {window_start} - {window_end}: データ不足 ({len(features_df)}件)")
                 return None
-            
-            # 正負例の合計を確認
-            positive_count = (features_df['label'] == 1).sum()
-            negative_count = (features_df['label'] == 0).sum()
-            
-            # 特徴量とラベルを準備
-            X = features_df[self.feature_columns].fillna(0).values
-            y = features_df['label'].values
-            
-            # データ分割（8:2）
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=self.random_state, stratify=y
-            )
-            
-            # Balanced Random Forestで学習
-            model = BalancedRandomForestClassifier(
-                n_estimators=100,
-                random_state=self.random_state,
-                n_jobs=-1
-            )
-            model.fit(X_train, y_train)
-            
-            # 予測
-            y_pred = model.predict(X_test)
-            
-            # 評価指標を計算
-            precision = precision_score(y_test, y_pred, zero_division=0)
-            recall = recall_score(y_test, y_pred, zero_division=0)
-            f1 = f1_score(y_test, y_pred, zero_division=0)
-            
-            # 結果を作成
+
+            # 現在ウィンドウの特徴量とラベル
+            X_current = features_df[self.feature_columns].fillna(0).values
+            y_current = features_df['label'].values
+
+            positive_count = int((features_df['label'] == 1).sum())
+            negative_count = int((features_df['label'] == 0).sum())
+
+            # これから作成する各履歴モデルについての結果格納
+            lookbacks = {
+                '1m': 30,
+                '3m': 90,
+                '6m': 180
+            }
+
+            models_summary: Dict[str, Any] = {}
+
+            # windowsとcurrent_window_indexが必要（履歴ウィンドウの収集に使う）
+            if windows is None or current_window_index is None:
+                logger.warning("履歴ウィンドウ情報が不足しています。履歴モデルは作成されません。")
+            else:
+                # 履歴ウィンドウごとに訓練データを収集して学習 -> 評価
+                for name, days in lookbacks.items():
+                    # 収集する過去ウィンドウの期間: window_end >= window_start - days and window_end < window_start
+                    training_parts = []
+                    for idx in range(0, current_window_index):
+                        prev_start, prev_end = windows[idx]
+                        if prev_end < window_start and prev_end >= (window_start - timedelta(days=days)):
+                            # 前ウィンドウのopen changes
+                            prev_window_changes = get_open_changes_at_time(project_changes, prev_start)
+                            if prev_window_changes.empty:
+                                continue
+                            # ラベル抽出
+                            prev_labels = self.extract_window_labels(prev_window_changes, prev_start, prev_end, bot_names)
+                            if not prev_labels:
+                                continue
+                            prev_features = self.data_processor.extract_features(prev_window_changes, prev_start, project, releases_df)
+                            if prev_features.empty:
+                                continue
+                            prev_features['label'] = prev_features['change_number'].astype(str).map(prev_labels)
+                            prev_features = prev_features.dropna(subset=['label'])
+                            if len(prev_features) > 0:
+                                training_parts.append(prev_features)
+
+                    if not training_parts:
+                        logger.info(f"ウィンドウ {window_start.date()} - {window_end.date()}: '{name}' 用の履歴データが不足しています")
+                        models_summary[name] = {
+                            'trained': False,
+                            'reason': 'no_training_data'
+                        }
+                        continue
+
+                    # 訓練データを結合
+                    training_df = pd.concat(training_parts, ignore_index=True)
+                    # 最低限のサンプル数とクラスがあるか確認
+                    if len(training_df) < 10 or training_df['label'].nunique() < 2:
+                        logger.info(f"ウィンドウ {window_start.date()}: '{name}' 用の訓練データが不十分 ({len(training_df)} 件, classes={training_df['label'].nunique()})")
+                        models_summary[name] = {
+                            'trained': False,
+                            'reason': 'insufficient_samples_or_classes'
+                        }
+                        continue
+
+                    X_train_hist = training_df[self.feature_columns].fillna(0).values
+                    y_train_hist = training_df['label'].values
+
+                    # 学習
+                    hist_model = BalancedRandomForestClassifier(n_estimators=100, random_state=self.random_state, n_jobs=-1)
+                    try:
+                        hist_model.fit(X_train_hist, y_train_hist)
+                    except Exception as e:
+                        logger.warning(f"履歴モデル学習エラー ({name}): {e}")
+                        models_summary[name] = {'trained': False, 'reason': f'training_error: {e}'}
+                        continue
+
+                    # 現ウィンドウに対する予測
+                    try:
+                        y_pred_current = hist_model.predict(X_current)
+                        precision = precision_score(y_current, y_pred_current, zero_division=0)
+                        recall = recall_score(y_current, y_pred_current, zero_division=0)
+                        f1 = f1_score(y_current, y_pred_current, zero_division=0)
+
+                        models_summary[name] = {
+                            'trained': True,
+                            'train_samples': int(len(X_train_hist)),
+                            'current_samples': int(len(X_current)),
+                            'precision': float(precision),
+                            'recall': float(recall),
+                            'f1_score': float(f1)
+                        }
+                        logger.info(f"ウィンドウ {window_start.date()}: 履歴モデル '{name}' -> F1={f1:.3f}, P={precision:.3f}, R={recall:.3f}")
+                    except Exception as e:
+                        logger.warning(f"履歴モデル評価エラー ({name}): {e}")
+                        models_summary[name] = {'trained': True, 'evaluation_error': str(e)}
+
+            # 総合結果
             result = {
                 'window_start': window_start,
                 'window_end': window_end,
-                'total_samples': len(features_df),
-                'train_samples': len(X_train),
-                'test_samples': len(X_test),
-                'positive_samples': int(positive_count),
-                'negative_samples': int(negative_count),
-                'precision': float(precision),
-                'recall': float(recall),
-                'f1_score': float(f1),
+                'total_samples': int(len(features_df)),
+                'positive_samples': positive_count,
+                'negative_samples': negative_count,
+                'models': models_summary,
                 'evaluation_status': 'success'
             }
-            
-            logger.info(f"ウィンドウ {window_start} - {window_end}: F1={f1:.3f}, Precision={precision:.3f}, Recall={recall:.3f}")
-            
+
             return result
             
         except Exception as e:
@@ -408,7 +469,9 @@ class TemporalModelEvaluator:
                 
                 result = self.evaluate_window(
                     project_changes, window_start, window_end,
-                    bot_names, project, releases_df
+                    bot_names, project, releases_df,
+                    windows=windows,
+                    current_window_index=i
                 )
                 
                 if result:
@@ -468,19 +531,34 @@ class TemporalModelEvaluator:
             # CSV形式で保存
             csv_data = []
             for result in self.evaluation_results[project]:
+                # 基本情報
                 row = {
                     'window_start': result['window_start'].strftime('%Y-%m-%d'),
                     'window_end': result['window_end'].strftime('%Y-%m-%d'),
-                    'total_samples': result['total_samples'],
-                    'train_samples': result['train_samples'],
-                    'test_samples': result['test_samples'],
-                    'positive_samples': result['positive_samples'],
-                    'negative_samples': result['negative_samples'],
-                    'precision': result['precision'],
-                    'recall': result['recall'],
-                    'f1_score': result['f1_score'],
-                    'status': result['evaluation_status']
+                    'total_samples': result.get('total_samples', 0),
+                    'positive_samples': result.get('positive_samples', 0),
+                    'negative_samples': result.get('negative_samples', 0),
+                    'status': result.get('evaluation_status', 'unknown')
                 }
+                
+                # 履歴モデルごとの指標を追加
+                models = result.get('models', {})
+                for lookback in ['1m', '3m', '6m']:
+                    model_info = models.get(lookback, {})
+                    if model_info.get('trained'):
+                        row[f'{lookback}_trained'] = True
+                        row[f'{lookback}_train_samples'] = model_info.get('train_samples', 0)
+                        row[f'{lookback}_precision'] = model_info.get('precision', 0.0)
+                        row[f'{lookback}_recall'] = model_info.get('recall', 0.0)
+                        row[f'{lookback}_f1_score'] = model_info.get('f1_score', 0.0)
+                    else:
+                        row[f'{lookback}_trained'] = False
+                        row[f'{lookback}_train_samples'] = 0
+                        row[f'{lookback}_precision'] = 0.0
+                        row[f'{lookback}_recall'] = 0.0
+                        row[f'{lookback}_f1_score'] = 0.0
+                        row[f'{lookback}_reason'] = model_info.get('reason', 'unknown')
+                
                 csv_data.append(row)
             
             if csv_data:
@@ -493,32 +571,51 @@ class TemporalModelEvaluator:
             # JSON形式で保存（サマリー統計を含む）
             successful_results = [r for r in self.evaluation_results[project] if r.get('evaluation_status') == 'success']
             
+            # 履歴モデルごとのサマリー統計を計算
+            summary_stats = {
+                'successful_windows': len(successful_results),
+                'total_windows': len(self.evaluation_results[project]),
+                'by_lookback': {}
+            }
+            
             if successful_results:
-                f1_scores = [r['f1_score'] for r in successful_results]
-                precisions = [r['precision'] for r in successful_results]
-                recalls = [r['recall'] for r in successful_results]
-                
-                summary_stats = {
-                    'mean_f1': float(np.mean(f1_scores)),
-                    'std_f1': float(np.std(f1_scores)),
-                    'mean_precision': float(np.mean(precisions)),
-                    'std_precision': float(np.std(precisions)),
-                    'mean_recall': float(np.mean(recalls)),
-                    'std_recall': float(np.std(recalls)),
-                    'successful_windows': len(successful_results),
-                    'total_windows': len(self.evaluation_results[project])
-                }
-            else:
-                summary_stats = {
-                    'mean_f1': 0.0,
-                    'std_f1': 0.0,
-                    'mean_precision': 0.0,
-                    'std_precision': 0.0,
-                    'mean_recall': 0.0,
-                    'std_recall': 0.0,
-                    'successful_windows': 0,
-                    'total_windows': len(self.evaluation_results[project])
-                }
+                for lookback in ['1m', '3m', '6m']:
+                    # このルックバックで訓練されたモデルの指標を収集
+                    f1_scores = []
+                    precisions = []
+                    recalls = []
+                    train_samples = []
+                    
+                    for r in successful_results:
+                        model_info = r.get('models', {}).get(lookback, {})
+                        if model_info.get('trained'):
+                            f1_scores.append(model_info.get('f1_score', 0.0))
+                            precisions.append(model_info.get('precision', 0.0))
+                            recalls.append(model_info.get('recall', 0.0))
+                            train_samples.append(model_info.get('train_samples', 0))
+                    
+                    if f1_scores:
+                        summary_stats['by_lookback'][lookback] = {
+                            'mean_f1': float(np.mean(f1_scores)),
+                            'std_f1': float(np.std(f1_scores)),
+                            'mean_precision': float(np.mean(precisions)),
+                            'std_precision': float(np.std(precisions)),
+                            'mean_recall': float(np.mean(recalls)),
+                            'std_recall': float(np.std(recalls)),
+                            'mean_train_samples': float(np.mean(train_samples)),
+                            'trained_windows': len(f1_scores)
+                        }
+                    else:
+                        summary_stats['by_lookback'][lookback] = {
+                            'mean_f1': 0.0,
+                            'std_f1': 0.0,
+                            'mean_precision': 0.0,
+                            'std_precision': 0.0,
+                            'mean_recall': 0.0,
+                            'std_recall': 0.0,
+                            'mean_train_samples': 0.0,
+                            'trained_windows': 0
+                        }
             
             json_data = {
                 'project': project,
@@ -577,70 +674,93 @@ class TemporalModelEvaluator:
             
             # データを準備
             dates = [result['window_start'] for result in successful_results]
-            
-            # 評価指標データ
-            metrics_data = {
-                'F1 Score': [result['f1_score'] for result in successful_results],
-                'Precision': [result['precision'] for result in successful_results],
-                'Recall': [result['recall'] for result in successful_results]
+
+            # 履歴モデルごとの指標を準備（1m,3m,6m）
+            lookbacks = ['1m', '3m', '6m']
+            metrics_by_lookback: Dict[str, Dict[str, List[float]]] = {
+                lb: {'f1': [], 'precision': [], 'recall': [], 'train_samples': [], 'current_samples': []}
+                for lb in lookbacks
             }
-            
-            # サンプル数データ
+
+            # サンプル数データ（ウィンドウ自体の統計）
             samples_data = {
                 'Total Samples': [result['total_samples'] for result in successful_results],
                 'Positive Samples': [result['positive_samples'] for result in successful_results],
                 'Negative Samples': [result['negative_samples'] for result in successful_results],
-                'Train Samples': [result['train_samples'] for result in successful_results],
-                'Test Samples': [result['test_samples'] for result in successful_results]
+                'Current Samples': [int(result.get('total_samples', 0)) for result in successful_results]
             }
-            
+
             # 比率データ
             positive_ratios = [result['positive_samples'] / result['total_samples'] 
                              if result['total_samples'] > 0 else 0 
                              for result in successful_results]
+
+            # fill metrics_by_lookback from results
+            for result in successful_results:
+                models = result.get('models', {})
+                for lb in lookbacks:
+                    info = models.get(lb, {})
+                    if info.get('trained'):
+                        metrics_by_lookback[lb]['f1'].append(info.get('f1_score', np.nan))
+                        metrics_by_lookback[lb]['precision'].append(info.get('precision', np.nan))
+                        metrics_by_lookback[lb]['recall'].append(info.get('recall', np.nan))
+                        metrics_by_lookback[lb]['train_samples'].append(info.get('train_samples', 0))
+                        metrics_by_lookback[lb]['current_samples'].append(info.get('current_samples', 0))
+                    else:
+                        metrics_by_lookback[lb]['f1'].append(np.nan)
+                        metrics_by_lookback[lb]['precision'].append(np.nan)
+                        metrics_by_lookback[lb]['recall'].append(np.nan)
+                        metrics_by_lookback[lb]['train_samples'].append(0)
+                        metrics_by_lookback[lb]['current_samples'].append(int(result.get('total_samples', 0)))
             
             # 図を作成（4x2のサブプロット - temporal_weight_analysis.pyと同様のスタイル）
             fig, axes = plt.subplots(4, 2, figsize=(20, 16))
             fig.suptitle(f'Temporal Model Evaluation - {project}', fontsize=16, fontweight='bold')
             
-            # 1. F1スコアの時系列変化
+            # 1. F1スコアの時系列変化（履歴モデルごと）
             ax1 = axes[0, 0]
-            ax1.plot(dates, metrics_data['F1 Score'], marker='o', linewidth=2, markersize=4)
-            ax1.set_title('F1 Score Over Time', fontsize=10, fontweight='bold')
+            colors = {'1m': 'tab:blue', '3m': 'tab:orange', '6m': 'tab:green'}
+            for lb in lookbacks:
+                ax1.plot(dates, metrics_by_lookback[lb]['f1'], marker='o', linewidth=2, markersize=4, label=f'F1 ({lb})', color=colors.get(lb))
+            ax1.set_title('F1 Score Over Time (by lookback)', fontsize=10, fontweight='bold')
             ax1.set_xlabel('Date', fontsize=8)
             ax1.set_ylabel('F1 Score', fontsize=8)
             ax1.grid(True, alpha=0.3)
             ax1.tick_params(axis='x', rotation=45, labelsize=8)
             ax1.tick_params(axis='y', labelsize=8)
+            ax1.legend(fontsize=8)
             
-            # 2. Precisionの時系列変化
+            # 2. Precisionの時系列変化（履歴モデルごと）
             ax2 = axes[0, 1]
-            ax2.plot(dates, metrics_data['Precision'], marker='o', linewidth=2, markersize=4, color='green')
-            ax2.set_title('Precision Over Time', fontsize=10, fontweight='bold')
+            for lb in lookbacks:
+                ax2.plot(dates, metrics_by_lookback[lb]['precision'], marker='o', linewidth=2, markersize=4, label=f'Precision ({lb})', color=colors.get(lb))
+            ax2.set_title('Precision Over Time (by lookback)', fontsize=10, fontweight='bold')
             ax2.set_xlabel('Date', fontsize=8)
             ax2.set_ylabel('Precision', fontsize=8)
             ax2.grid(True, alpha=0.3)
             ax2.tick_params(axis='x', rotation=45, labelsize=8)
             ax2.tick_params(axis='y', labelsize=8)
+            ax2.legend(fontsize=8)
             
-            # 3. Recallの時系列変化
+            # 3. Recallの時系列変化（履歴モデルごと）
             ax3 = axes[1, 0]
-            ax3.plot(dates, metrics_data['Recall'], marker='o', linewidth=2, markersize=4, color='orange')
-            ax3.set_title('Recall Over Time', fontsize=10, fontweight='bold')
+            for lb in lookbacks:
+                ax3.plot(dates, metrics_by_lookback[lb]['recall'], marker='o', linewidth=2, markersize=4, label=f'Recall ({lb})', color=colors.get(lb))
+            ax3.set_title('Recall Over Time (by lookback)', fontsize=10, fontweight='bold')
             ax3.set_xlabel('Date', fontsize=8)
             ax3.set_ylabel('Recall', fontsize=8)
             ax3.grid(True, alpha=0.3)
             ax3.tick_params(axis='x', rotation=45, labelsize=8)
             ax3.tick_params(axis='y', labelsize=8)
+            ax3.legend(fontsize=8)
             
-            # 4. 全評価指標の比較
+            # 4. 訓練サンプル数の比較（履歴モデルごと）
             ax4 = axes[1, 1]
-            ax4.plot(dates, metrics_data['F1 Score'], marker='o', label='F1 Score', linewidth=2, markersize=4)
-            ax4.plot(dates, metrics_data['Precision'], marker='s', label='Precision', linewidth=2, markersize=4)
-            ax4.plot(dates, metrics_data['Recall'], marker='^', label='Recall', linewidth=2, markersize=4)
-            ax4.set_title('All Metrics Comparison', fontsize=10, fontweight='bold')
+            for lb in lookbacks:
+                ax4.plot(dates, metrics_by_lookback[lb]['train_samples'], marker='o', label=f'Train Samples ({lb})', linewidth=2, markersize=4, color=colors.get(lb))
+            ax4.set_title('Training Samples Over Time (by lookback)', fontsize=10, fontweight='bold')
             ax4.set_xlabel('Date', fontsize=8)
-            ax4.set_ylabel('Score', fontsize=8)
+            ax4.set_ylabel('Train Samples', fontsize=8)
             ax4.legend(fontsize=8)
             ax4.grid(True, alpha=0.3)
             ax4.tick_params(axis='x', rotation=45, labelsize=8)
@@ -668,11 +788,17 @@ class TemporalModelEvaluator:
             ax6.tick_params(axis='x', rotation=45, labelsize=8)
             ax6.tick_params(axis='y', labelsize=8)
             
-            # 7. 学習/評価データ数の時系列変化
+            # 7. 訓練総サンプル数（全履歴モデル合算）と現在ウィンドウのサンプル数
             ax7 = axes[3, 0]
-            ax7.plot(dates, samples_data['Train Samples'], marker='o', label='Train', linewidth=2, markersize=4, color='blue')
-            ax7.plot(dates, samples_data['Test Samples'], marker='s', label='Test', linewidth=2, markersize=4, color='purple')
-            ax7.set_title('Train/Test Samples Over Time', fontsize=10, fontweight='bold')
+            # 合算訓練サンプル数を計算
+            total_train_samples = []
+            for i in range(len(dates)):
+                s = sum([metrics_by_lookback[lb]['train_samples'][i] for lb in lookbacks])
+                total_train_samples.append(s)
+
+            ax7.plot(dates, total_train_samples, marker='o', label='Total Train (sum of lookbacks)', linewidth=2, markersize=4, color='blue')
+            ax7.plot(dates, samples_data['Current Samples'], marker='s', label='Current Samples', linewidth=2, markersize=4, color='purple')
+            ax7.set_title('Train (hist) vs Current Samples Over Time', fontsize=10, fontweight='bold')
             ax7.set_xlabel('Date', fontsize=8)
             ax7.set_ylabel('Sample Count', fontsize=8)
             ax7.legend(fontsize=8)
