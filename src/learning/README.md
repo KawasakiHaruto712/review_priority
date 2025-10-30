@@ -247,36 +247,191 @@ def allocate_resources(review_queue, available_resources):
 ## 📊 時系列モデル評価 (`temporal_model_evaluation.py`)
 
 ### 概要
-Balanced Random Forestを用いてウィンドウごとに正負例を定義し、レビュー優先順位付けモデルを評価します。
+Balanced Random Forestを用いてウィンドウごとに**履歴データで学習したモデル**を作成し、**現在ウィンドウのデータを予測**することでレビュー優先順位付けモデルを評価します。
+
+### 履歴モデルの学習方式
+各ウィンドウについて、以下の3種類の履歴期間を用いてモデルを学習します：
+
+1. **1ヶ月モデル（1m）**: ウィンドウ開始の1ヶ月前まで（30日間）のデータで学習
+2. **3ヶ月モデル（3m）**: ウィンドウ開始の3ヶ月前まで（90日間）のデータで学習
+3. **6ヶ月モデル（6m）**: ウィンドウ開始の6ヶ月前まで（180日間）のデータで学習
+
+各履歴モデルは、指定された期間内の**過去ウィンドウ**からデータを収集し、Balanced Random Forestで学習した後、**現在ウィンドウのデータに対して予測**を行います。
 
 ### 正負例の定義
-- **正例（ラベル=1）**: ウィンドウ期間中に1回以上レビューされたPR
-- **負例（ラベル=0）**: ウィンドウ期間中に1度もレビューされなかったPR
+- **正例（ラベル=1）**: ウィンドウ期間中に1回以上レビューされたChange
+- **負例（ラベル=0）**: ウィンドウ期間中に1度もレビューされなかったChange
 
-### データ分割
-- PR単位で学習:評価 = 8:2に分割
-- `random_state=42`で再現性を確保
-- 同じPRが学習と評価の両方に含まれないよう保証
+### 学習と評価のフロー
 
-### 評価指標
+```
+時系列: [過去6ヶ月] ← [過去3ヶ月] ← [過去1ヶ月] ← [現在ウィンドウ]
+              ↓              ↓              ↓              ↓
+           訓練データ     訓練データ     訓練データ      評価データ
+           (6mモデル)     (3mモデル)     (1mモデル)
+                ↓              ↓              ↓
+                └──────────────┴──────────────┘
+                              ↓
+                        現在ウィンドウを予測
+                     (Precision/Recall/F1を算出)
+```
+
+### 評価指標（履歴モデルごと）
+各履歴モデル（1m/3m/6m）について、以下の指標を算出します：
+
 - **Precision（適合率）**: 予測した正例のうち実際に正例だった割合
-- **Recall（再現率）**: 実際の正例のうち正しく予測できた割合  
+- **Recall（再現率）**: 実際の正例のうち正しく予測できた割合
 - **F1 Score（F値）**: PrecisionとRecallの調和平均
+- **訓練サンプル数**: 履歴期間から収集されたサンプル数
+- **評価サンプル数**: 現在ウィンドウのサンプル数
 
 ### 出力ファイル
 `data/temporal_evaluation/`ディレクトリに保存：
-- `temporal_evaluation_{project}.csv`: ウィンドウごとの評価指標
-- `temporal_evaluation_{project}.json`: 全体のサマリー統計
-- `temporal_evaluation_{project}.pdf`: 評価結果の可視化レポート
+
+- `temporal_evaluation_{project}.csv`: ウィンドウごとの評価指標（全履歴モデル含む）
+- `temporal_evaluation_{project}.json`: 全体のサマリー統計と履歴モデル別の詳細結果
+- `temporal_evaluation_{project}.pdf`: 評価結果の可視化レポート（8つのグラフ）
+
+### 可視化レポートの内容
+PDFには以下の8つのグラフが含まれます：
+
+1. **F1スコアの時系列変化（履歴モデル別）**: 1m/3m/6mモデルのF1スコアの推移
+2. **Precisionの時系列変化（履歴モデル別）**: 1m/3m/6mモデルのPrecisionの推移
+3. **Recallの時系列変化（履歴モデル別）**: 1m/3m/6mモデルのRecallの推移
+4. **訓練サンプル数の推移（履歴モデル別）**: 各履歴期間から収集されたサンプル数
+5. **総サンプル数の推移**: 各ウィンドウの総Change数
+6. **正負例サンプル数の推移**: レビューされた/されなかったChangeの数
+7. **訓練データと現在データの比較**: 履歴データの合計と現在ウィンドウのサンプル数
+8. **正例比率の推移**: レビューされたChangeの割合
+
+### 履歴データ不足時の動作
+- 履歴期間に十分なデータがない場合、そのモデルは作成されず `trained: False` として記録されます
+- 訓練データが10サンプル未満、または正負例のどちらかしか存在しない場合も学習をスキップします
+- 結果JSONには不足理由（`no_training_data`, `insufficient_samples_or_classes`等）が記録されます
 
 ### 使用例
+
 ```python
 from src.learning.temporal_model_evaluation import run_temporal_model_evaluation
 
-# 全プロジェクトの評価
+# 全プロジェクトの評価（デフォルトの期間で実行）
 results = run_temporal_model_evaluation()
 
 # 特定プロジェクトの評価
 results = run_temporal_model_evaluation(projects=['nova', 'neutron'])
+
+# 結果の確認
+for project, evaluations in results['evaluation_results'].items():
+    for window_result in evaluations:
+        print(f"ウィンドウ: {window_result['window_start']}")
+        for lookback in ['1m', '3m', '6m']:
+            model_info = window_result['models'].get(lookback, {})
+            if model_info.get('trained'):
+                print(f"  {lookback}: F1={model_info['f1_score']:.3f}")
+            else:
+                print(f"  {lookback}: 訓練されませんでした ({model_info.get('reason', 'unknown')})")
 ```
+
+### 出力JSON形式
+
+```json
+{
+  "project": "nova",
+  "evaluation_config": {
+    "window_size": 14,
+    "sliding_step": 1,
+    "random_state": 42
+  },
+  "summary_statistics": {
+    "mean_f1": 0.72,
+    "std_f1": 0.08,
+    "mean_precision": 0.75,
+    "std_precision": 0.09,
+    "mean_recall": 0.70,
+    "std_recall": 0.10,
+    "successful_windows": 180,
+    "total_windows": 200
+  },
+  "results": [
+    {
+      "window_start": "2024-01-15T00:00:00",
+      "window_end": "2024-01-29T00:00:00",
+      "total_samples": 150,
+      "positive_samples": 80,
+      "negative_samples": 70,
+      "models": {
+        "1m": {
+          "trained": true,
+          "train_samples": 450,
+          "current_samples": 150,
+          "precision": 0.78,
+          "recall": 0.72,
+          "f1_score": 0.75
+        },
+        "3m": {
+          "trained": true,
+          "train_samples": 1200,
+          "current_samples": 150,
+          "precision": 0.82,
+          "recall": 0.74,
+          "f1_score": 0.78
+        },
+        "6m": {
+          "trained": false,
+          "reason": "no_training_data"
+        }
+      },
+      "evaluation_status": "success"
+    }
+  ]
+}
+```
+
+### パフォーマンスと推奨設定
+
+#### 処理時間の目安
+- **小規模** (1プロジェクト、3ヶ月分): ~10-20分
+- **中規模** (3プロジェクト、6ヶ月分): ~1-2時間
+- **大規模** (6プロジェクト、1年分): ~3-6時間
+
+#### メモリ使用量
+- **基本**: ~500MB
+- **大規模データ**: ~2-4GB（多数のウィンドウと履歴データの場合）
+
+#### 推奨設定
+```python
+# 高速テスト実行
+evaluator = TemporalModelEvaluator(
+    window_size=14,      # 2週間
+    sliding_step=7       # 1週間ずつずらす（ウィンドウ数を削減）
+)
+
+# 詳細分析
+evaluator = TemporalModelEvaluator(
+    window_size=14,      # 2週間
+    sliding_step=1       # 1日ずつずらす（詳細な時系列分析）
+)
+```
+
+### 注意事項
+
+1. **初期ウィンドウ**: 分析開始直後のウィンドウは履歴データが不足するため、6mモデルや3mモデルが作成されないことがあります
+2. **計算リソース**: 各ウィンドウで3つのモデルを学習するため、単純なウィンドウ評価より処理時間が長くなります
+3. **ボットフィルタリング**: `gerrymanderconfig.ini`で定義されたボットのレビューは正負例判定から除外されます
+4. **欠損データ**: 特徴量に欠損値がある場合は0で補完されます
+
+### 解釈のポイント
+
+- **1mモデル vs 6mモデル**: 1mモデルは直近のトレンドを反映し、6mモデルは長期的なパターンを学習します
+- **F1スコアの推移**: 時系列でF1が向上している場合、履歴データからの学習が効果的であることを示唆します
+- **訓練サンプル数**: 多いほど安定したモデルが期待できますが、古いデータの影響も大きくなります
+- **正例比率**: 極端に偏っている（0.1未満や0.9超）場合、クラス不均衡の影響に注意が必要です
+
+## 🔬 研究・拡張の方向性
+
+- **深層学習**: ニューラルネットワークベースのIRL
+- **多目的最適化**: 複数の評価軸の同時考慮
+- **強化学習**: 動的な優先順位調整
 - **説明可能AI**: より詳細な判断根拠の提供
+- **適応的ウィンドウ**: データ量や変動に応じたウィンドウサイズの自動調整
+- **アンサンブル学習**: 複数の履歴モデルを組み合わせた予測
