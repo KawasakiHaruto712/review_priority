@@ -168,27 +168,14 @@ class TemporalWeightAnalyzer:
             Optional[Dict[str, Any]]: 分析結果（失敗時はNone）
         """
         try:
-            # ウィンドウ内のChangeをフィルタ
-            window_changes = project_changes[
-                (project_changes['created'] >= window_start) & 
-                (project_changes['created'] < window_end)
+            # 学習イベントを抽出（プロジェクト全体から）
+            learning_events = extract_learning_events(project_changes, bot_names)
+            
+            # ウィンドウ期間内のイベントのみにフィルタ
+            learning_events = [
+                event for event in learning_events
+                if window_start <= event['timestamp'] < window_end
             ]
-            
-            if window_changes.empty:
-                return {
-                    'window_start': window_start,
-                    'window_end': window_end,
-                    'training_samples': 0,
-                    'learning_events': 0,
-                    'training_stats': None,
-                    'weights': {feature: 0.0 for feature in self.feature_columns},
-                    'feature_names': self.feature_columns,
-                    'irl_status': 'failure',
-                    'error_message': 'No changes in window'
-                }
-            
-            # 学習イベントを抽出
-            learning_events = extract_learning_events(window_changes, bot_names)
             
             if not learning_events:
                 return {
@@ -209,12 +196,8 @@ class TemporalWeightAnalyzer:
             for event in learning_events:
                 event_time = event['timestamp']
                 
-                # ウィンドウ内の時刻のみ処理
-                if not (window_start <= event_time < window_end):
-                    continue
-                
-                # その時刻にオープンだったChangeを取得
-                open_changes = get_open_changes_at_time(window_changes, event_time)
+                # その時刻にオープンだったChangeを取得（プロジェクト全体から）
+                open_changes = get_open_changes_at_time(project_changes, event_time)
                 
                 if len(open_changes) < 2:
                     continue
@@ -530,7 +513,7 @@ class TemporalWeightAnalyzer:
                 col = i % 4
                 ax = axes[row, col]
                 
-                ax.plot(dates, weights_data[feature], marker='o', linewidth=2, markersize=4)
+                ax.plot(dates, weights_data[feature], linewidth=0.8)
                 ax.set_title(feature, fontsize=10, fontweight='bold')
                 ax.set_xlabel('Date', fontsize=8)
                 ax.set_ylabel('Weight', fontsize=8)

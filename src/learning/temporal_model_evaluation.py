@@ -230,12 +230,57 @@ class TemporalModelEvaluator:
         
         return labels
     
+    def get_changes_open_in_window(self, project_changes: pd.DataFrame,
+                                   window_start: datetime, window_end: datetime) -> pd.DataFrame:
+        """
+        ウィンドウ期間中に一度でもオープンだった期間があるChangeを取得
+        
+        Args:
+            project_changes: プロジェクトのChangeデータ
+            window_start: ウィンドウ開始時刻
+            window_end: ウィンドウ終了時刻
+            
+        Returns:
+            pd.DataFrame: ウィンドウ期間中に一度でもオープンだったChange
+        """
+        changes_in_window = []
+        
+        for _, change in project_changes.iterrows():
+            try:
+                created_time = pd.to_datetime(change.get('created'))
+                
+                # ウィンドウ終了後に作成されたChangeは除外
+                if created_time >= window_end:
+                    continue
+                
+                # マージまたはクローズ時刻を取得
+                merged_time = change.get('merged')
+                if pd.notna(merged_time):
+                    merged_time = pd.to_datetime(merged_time)
+                    # ウィンドウ開始前にマージされた場合は除外
+                    if merged_time <= window_start:
+                        continue
+                
+                # ここまで来たら、ウィンドウ期間中に一度でもオープンだった
+                changes_in_window.append(change)
+                
+            except (ValueError, AttributeError):
+                continue
+        
+        if changes_in_window:
+            return pd.DataFrame(changes_in_window)
+        else:
+            return pd.DataFrame()
+    
     def evaluate_window(self, project_changes: pd.DataFrame, 
                        window_start: datetime, window_end: datetime,
                        bot_names: List[str], project: str,
                        releases_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
         単一ウィンドウでの学習・評価を実行
+        
+        学習データ: window_start の 14日前 ～ window_start
+        評価データ: window_start ～ window_end
         
         Args:
             project_changes: プロジェクトのChangeデータ
@@ -249,51 +294,231 @@ class TemporalModelEvaluator:
             Optional[Dict[str, Any]]: 評価結果（失敗時はNone）
         """
         try:
-            # ウィンドウ期間中にオープンなChangeを取得
-            window_changes = get_open_changes_at_time(project_changes, window_start)
+            # === 学習データの準備 ===
+            # window_start の 14日前から window_start までの期間
+            train_window_start = window_start - timedelta(days=self.window_size)
+            train_window_end = window_start
             
-            if window_changes.empty:
-                logger.warning(f"ウィンドウ {window_start} - {window_end}: オープンなChangeなし")
-                return None
-            
-            # 正負例ラベルを抽出
-            labels = self.extract_window_labels(
-                window_changes, window_start, window_end, bot_names
+            # 学習用：期間中に一度でもオープンだったChangeを取得
+            train_changes = self.get_changes_open_in_window(
+                project_changes, train_window_start, train_window_end
             )
             
-            if not labels:
-                logger.warning(f"ウィンドウ {window_start} - {window_end}: ラベルなし")
-                return None
+            if train_changes.empty:
+                logger.warning(f"ウィンドウ {window_start.date()}: 学習データなし")
+                return {
+                    'window_start': window_start,
+                    'window_end': window_end,
+                    'train_window_start': train_window_start,
+                    'train_window_end': train_window_end,
+                    'total_samples': 0,
+                    'train_samples': 0,
+                    'test_samples': 0,
+                    'positive_samples': 0,
+                    'negative_samples': 0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'f1_score': 0.0,
+                    'evaluation_status': 'failure',
+                    'error_message': 'No training data in the training window'
+                }
             
-            # 特徴量を抽出
-            features_df = self.data_processor.extract_features(
-                window_changes, window_start, project, releases_df
+            # 学習用ラベルを抽出
+            train_labels = self.extract_window_labels(
+                train_changes, train_window_start, train_window_end, bot_names
             )
             
-            if features_df.empty:
-                logger.warning(f"ウィンドウ {window_start} - {window_end}: 特徴量抽出失敗")
-                return None
+            if not train_labels:
+                logger.warning(f"ウィンドウ {window_start.date()}: 学習ラベルなし")
+                return {
+                    'window_start': window_start,
+                    'window_end': window_end,
+                    'train_window_start': train_window_start,
+                    'train_window_end': train_window_end,
+                    'total_samples': 0,
+                    'train_samples': 0,
+                    'test_samples': 0,
+                    'positive_samples': 0,
+                    'negative_samples': 0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'f1_score': 0.0,
+                    'evaluation_status': 'failure',
+                    'error_message': 'No training labels extracted'
+                }
             
-            # ラベルと特徴量をマージ
-            features_df['label'] = features_df['change_number'].astype(str).map(labels)
-            features_df = features_df.dropna(subset=['label'])
-            
-            if len(features_df) < 10:  # 最低限のデータ数
-                logger.warning(f"ウィンドウ {window_start} - {window_end}: データ不足 ({len(features_df)}件)")
-                return None
-            
-            # 正負例の合計を確認
-            positive_count = (features_df['label'] == 1).sum()
-            negative_count = (features_df['label'] == 0).sum()
-            
-            # 特徴量とラベルを準備
-            X = features_df[self.feature_columns].fillna(0).values
-            y = features_df['label'].values
-            
-            # データ分割（8:2）
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=self.random_state, stratify=y
+            # 学習用特徴量を抽出（train_window_start時点の情報を使用）
+            train_features_df = self.data_processor.extract_features(
+                train_changes, train_window_start, project, releases_df
             )
+            
+            if train_features_df.empty:
+                logger.warning(f"ウィンドウ {window_start.date()}: 学習特徴量抽出失敗")
+                return {
+                    'window_start': window_start,
+                    'window_end': window_end,
+                    'train_window_start': train_window_start,
+                    'train_window_end': train_window_end,
+                    'total_samples': 0,
+                    'train_samples': 0,
+                    'test_samples': 0,
+                    'positive_samples': 0,
+                    'negative_samples': 0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'f1_score': 0.0,
+                    'evaluation_status': 'failure',
+                    'error_message': 'Failed to extract training features'
+                }
+            
+            # 学習データにラベルをマージ
+            train_features_df['label'] = train_features_df['change_number'].astype(str).map(train_labels)
+            train_features_df = train_features_df.dropna(subset=['label'])
+            
+            if len(train_features_df) < 10:  # 最低限のデータ数
+                logger.warning(f"ウィンドウ {window_start.date()}: 学習データ不足 ({len(train_features_df)}件)")
+                return {
+                    'window_start': window_start,
+                    'window_end': window_end,
+                    'train_window_start': train_window_start,
+                    'train_window_end': train_window_end,
+                    'total_samples': 0,
+                    'train_samples': len(train_features_df),
+                    'test_samples': 0,
+                    'positive_samples': 0,
+                    'negative_samples': 0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'f1_score': 0.0,
+                    'evaluation_status': 'failure',
+                    'error_message': f'Insufficient training data: {len(train_features_df)} samples (minimum 10 required)'
+                }
+            
+            # 学習データにクラスが2つ以上あるか確認
+            if train_features_df['label'].nunique() < 2:
+                logger.warning(f"ウィンドウ {window_start.date()}: 学習データのクラスが不足")
+                return {
+                    'window_start': window_start,
+                    'window_end': window_end,
+                    'train_window_start': train_window_start,
+                    'train_window_end': train_window_end,
+                    'total_samples': 0,
+                    'train_samples': len(train_features_df),
+                    'test_samples': 0,
+                    'positive_samples': 0,
+                    'negative_samples': 0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'f1_score': 0.0,
+                    'evaluation_status': 'failure',
+                    'error_message': 'Insufficient class diversity in training data (need both positive and negative samples)'
+                }
+            
+            # === 評価データの準備 ===
+            # window_start から window_end までの期間
+            # 評価用：期間中に一度でもオープンだったChangeを取得
+            test_changes = self.get_changes_open_in_window(
+                project_changes, window_start, window_end
+            )
+            
+            if test_changes.empty:
+                logger.warning(f"ウィンドウ {window_start.date()}: 評価データなし")
+                return {
+                    'window_start': window_start,
+                    'window_end': window_end,
+                    'train_window_start': train_window_start,
+                    'train_window_end': train_window_end,
+                    'total_samples': 0,
+                    'train_samples': len(train_features_df),
+                    'test_samples': 0,
+                    'positive_samples': 0,
+                    'negative_samples': 0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'f1_score': 0.0,
+                    'evaluation_status': 'failure',
+                    'error_message': 'No evaluation data in the evaluation window'
+                }
+            
+            # 評価用ラベルを抽出
+            test_labels = self.extract_window_labels(
+                test_changes, window_start, window_end, bot_names
+            )
+            
+            if not test_labels:
+                logger.warning(f"ウィンドウ {window_start.date()}: 評価ラベルなし")
+                return {
+                    'window_start': window_start,
+                    'window_end': window_end,
+                    'train_window_start': train_window_start,
+                    'train_window_end': train_window_end,
+                    'total_samples': 0,
+                    'train_samples': len(train_features_df),
+                    'test_samples': 0,
+                    'positive_samples': 0,
+                    'negative_samples': 0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'f1_score': 0.0,
+                    'evaluation_status': 'failure',
+                    'error_message': 'No evaluation labels extracted'
+                }
+            
+            # 評価用特徴量を抽出（window_start時点の情報を使用）
+            test_features_df = self.data_processor.extract_features(
+                test_changes, window_start, project, releases_df
+            )
+            
+            if test_features_df.empty:
+                logger.warning(f"ウィンドウ {window_start.date()}: 評価特徴量抽出失敗")
+                return {
+                    'window_start': window_start,
+                    'window_end': window_end,
+                    'train_window_start': train_window_start,
+                    'train_window_end': train_window_end,
+                    'total_samples': 0,
+                    'train_samples': len(train_features_df),
+                    'test_samples': 0,
+                    'positive_samples': 0,
+                    'negative_samples': 0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'f1_score': 0.0,
+                    'evaluation_status': 'failure',
+                    'error_message': 'Failed to extract evaluation features'
+                }
+            
+            # 評価データにラベルをマージ
+            test_features_df['label'] = test_features_df['change_number'].astype(str).map(test_labels)
+            test_features_df = test_features_df.dropna(subset=['label'])
+            
+            if len(test_features_df) < 5:  # 評価データは最低5件
+                logger.warning(f"ウィンドウ {window_start.date()}: 評価データ不足 ({len(test_features_df)}件)")
+                return {
+                    'window_start': window_start,
+                    'window_end': window_end,
+                    'train_window_start': train_window_start,
+                    'train_window_end': train_window_end,
+                    'total_samples': len(test_features_df),
+                    'train_samples': len(train_features_df),
+                    'test_samples': len(test_features_df),
+                    'positive_samples': 0,
+                    'negative_samples': 0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'f1_score': 0.0,
+                    'evaluation_status': 'failure',
+                    'error_message': f'Insufficient evaluation data: {len(test_features_df)} samples (minimum 5 required)'
+                }
+            
+            # === モデル学習と評価 ===
+            # 学習データの準備
+            X_train = train_features_df[self.feature_columns].fillna(0).values
+            y_train = train_features_df['label'].values
+            
+            # 評価データの準備
+            X_test = test_features_df[self.feature_columns].fillna(0).values
+            y_test = test_features_df['label'].values
             
             # Balanced Random Forestで学習
             model = BalancedRandomForestClassifier(
@@ -311,30 +536,40 @@ class TemporalModelEvaluator:
             recall = recall_score(y_test, y_pred, zero_division=0)
             f1 = f1_score(y_test, y_pred, zero_division=0)
             
+            # 正負例の統計（評価データ）
+            positive_count = int((test_features_df['label'] == 1).sum())
+            negative_count = int((test_features_df['label'] == 0).sum())
+            
             # 結果を作成
             result = {
                 'window_start': window_start,
                 'window_end': window_end,
-                'total_samples': len(features_df),
+                'train_window_start': train_window_start,
+                'train_window_end': train_window_end,
+                'total_samples': len(test_features_df),
                 'train_samples': len(X_train),
                 'test_samples': len(X_test),
-                'positive_samples': int(positive_count),
-                'negative_samples': int(negative_count),
+                'positive_samples': positive_count,
+                'negative_samples': negative_count,
                 'precision': float(precision),
                 'recall': float(recall),
                 'f1_score': float(f1),
                 'evaluation_status': 'success'
             }
             
-            logger.info(f"ウィンドウ {window_start} - {window_end}: F1={f1:.3f}, Precision={precision:.3f}, Recall={recall:.3f}")
+            logger.info(f"ウィンドウ {window_start.date()}-{window_end.date()}: "
+                       f"Train={len(X_train)}, Test={len(X_test)}, "
+                       f"F1={f1:.3f}, P={precision:.3f}, R={recall:.3f}")
             
             return result
             
         except Exception as e:
-            logger.warning(f"ウィンドウ評価エラー ({window_start} - {window_end}): {e}")
+            logger.warning(f"ウィンドウ評価エラー ({window_start.date()} - {window_end.date()}): {e}")
             return {
                 'window_start': window_start,
                 'window_end': window_end,
+                'train_window_start': window_start - timedelta(days=self.window_size),
+                'train_window_end': window_start,
                 'total_samples': 0,
                 'train_samples': 0,
                 'test_samples': 0,
@@ -471,6 +706,8 @@ class TemporalModelEvaluator:
                 row = {
                     'window_start': result['window_start'].strftime('%Y-%m-%d'),
                     'window_end': result['window_end'].strftime('%Y-%m-%d'),
+                    'train_window_start': result.get('train_window_start', result['window_start'] - timedelta(days=self.window_size)).strftime('%Y-%m-%d'),
+                    'train_window_end': result.get('train_window_end', result['window_start']).strftime('%Y-%m-%d'),
                     'total_samples': result['total_samples'],
                     'train_samples': result['train_samples'],
                     'test_samples': result['test_samples'],
@@ -479,7 +716,8 @@ class TemporalModelEvaluator:
                     'precision': result['precision'],
                     'recall': result['recall'],
                     'f1_score': result['f1_score'],
-                    'status': result['evaluation_status']
+                    'status': result['evaluation_status'],
+                    'error_message': result.get('error_message', '')
                 }
                 csv_data.append(row)
             
@@ -605,42 +843,46 @@ class TemporalModelEvaluator:
             
             # 1. F1スコアの時系列変化
             ax1 = axes[0, 0]
-            ax1.plot(dates, metrics_data['F1 Score'], marker='o', linewidth=2, markersize=4)
+            ax1.plot(dates, metrics_data['F1 Score'], linewidth=0.8)
             ax1.set_title('F1 Score Over Time', fontsize=10, fontweight='bold')
             ax1.set_xlabel('Date', fontsize=8)
             ax1.set_ylabel('F1 Score', fontsize=8)
+            ax1.set_ylim([0, 1])
             ax1.grid(True, alpha=0.3)
             ax1.tick_params(axis='x', rotation=45, labelsize=8)
             ax1.tick_params(axis='y', labelsize=8)
             
             # 2. Precisionの時系列変化
             ax2 = axes[0, 1]
-            ax2.plot(dates, metrics_data['Precision'], marker='o', linewidth=2, markersize=4, color='green')
+            ax2.plot(dates, metrics_data['Precision'], linewidth=0.8, color='green')
             ax2.set_title('Precision Over Time', fontsize=10, fontweight='bold')
             ax2.set_xlabel('Date', fontsize=8)
             ax2.set_ylabel('Precision', fontsize=8)
+            ax2.set_ylim([0, 1])
             ax2.grid(True, alpha=0.3)
             ax2.tick_params(axis='x', rotation=45, labelsize=8)
             ax2.tick_params(axis='y', labelsize=8)
             
             # 3. Recallの時系列変化
             ax3 = axes[1, 0]
-            ax3.plot(dates, metrics_data['Recall'], marker='o', linewidth=2, markersize=4, color='orange')
+            ax3.plot(dates, metrics_data['Recall'], linewidth=0.8, color='orange')
             ax3.set_title('Recall Over Time', fontsize=10, fontweight='bold')
             ax3.set_xlabel('Date', fontsize=8)
             ax3.set_ylabel('Recall', fontsize=8)
+            ax3.set_ylim([0, 1])
             ax3.grid(True, alpha=0.3)
             ax3.tick_params(axis='x', rotation=45, labelsize=8)
             ax3.tick_params(axis='y', labelsize=8)
             
             # 4. 全評価指標の比較
             ax4 = axes[1, 1]
-            ax4.plot(dates, metrics_data['F1 Score'], marker='o', label='F1 Score', linewidth=2, markersize=4)
-            ax4.plot(dates, metrics_data['Precision'], marker='s', label='Precision', linewidth=2, markersize=4)
-            ax4.plot(dates, metrics_data['Recall'], marker='^', label='Recall', linewidth=2, markersize=4)
+            ax4.plot(dates, metrics_data['F1 Score'], label='F1 Score', linewidth=0.8)
+            ax4.plot(dates, metrics_data['Precision'], label='Precision', linewidth=0.8)
+            ax4.plot(dates, metrics_data['Recall'], label='Recall', linewidth=0.8)
             ax4.set_title('All Metrics Comparison', fontsize=10, fontweight='bold')
             ax4.set_xlabel('Date', fontsize=8)
             ax4.set_ylabel('Score', fontsize=8)
+            ax4.set_ylim([0, 1])
             ax4.legend(fontsize=8)
             ax4.grid(True, alpha=0.3)
             ax4.tick_params(axis='x', rotation=45, labelsize=8)
@@ -648,21 +890,23 @@ class TemporalModelEvaluator:
             
             # 5. 総サンプル数の時系列変化
             ax5 = axes[2, 0]
-            ax5.plot(dates, samples_data['Total Samples'], marker='o', linewidth=2, markersize=4, color='blue')
+            ax5.plot(dates, samples_data['Total Samples'], linewidth=0.8, color='blue')
             ax5.set_title('Total Samples Over Time', fontsize=10, fontweight='bold')
             ax5.set_xlabel('Date', fontsize=8)
             ax5.set_ylabel('Total Samples', fontsize=8)
+            ax5.set_ylim(bottom=0)
             ax5.grid(True, alpha=0.3)
             ax5.tick_params(axis='x', rotation=45, labelsize=8)
             ax5.tick_params(axis='y', labelsize=8)
             
             # 6. 正負例サンプル数の時系列変化
             ax6 = axes[2, 1]
-            ax6.plot(dates, samples_data['Positive Samples'], marker='^', label='Positive', linewidth=2, markersize=4, color='green')
-            ax6.plot(dates, samples_data['Negative Samples'], marker='v', label='Negative', linewidth=2, markersize=4, color='red')
+            ax6.plot(dates, samples_data['Positive Samples'], label='Positive', linewidth=0.8, color='green')
+            ax6.plot(dates, samples_data['Negative Samples'], label='Negative', linewidth=0.8, color='red')
             ax6.set_title('Positive/Negative Samples Over Time', fontsize=10, fontweight='bold')
             ax6.set_xlabel('Date', fontsize=8)
             ax6.set_ylabel('Sample Count', fontsize=8)
+            ax6.set_ylim(bottom=0)
             ax6.legend(fontsize=8)
             ax6.grid(True, alpha=0.3)
             ax6.tick_params(axis='x', rotation=45, labelsize=8)
@@ -670,11 +914,12 @@ class TemporalModelEvaluator:
             
             # 7. 学習/評価データ数の時系列変化
             ax7 = axes[3, 0]
-            ax7.plot(dates, samples_data['Train Samples'], marker='o', label='Train', linewidth=2, markersize=4, color='blue')
-            ax7.plot(dates, samples_data['Test Samples'], marker='s', label='Test', linewidth=2, markersize=4, color='purple')
+            ax7.plot(dates, samples_data['Train Samples'], label='Train', linewidth=0.8, color='blue')
+            ax7.plot(dates, samples_data['Test Samples'], label='Test', linewidth=0.8, color='purple')
             ax7.set_title('Train/Test Samples Over Time', fontsize=10, fontweight='bold')
             ax7.set_xlabel('Date', fontsize=8)
             ax7.set_ylabel('Sample Count', fontsize=8)
+            ax7.set_ylim(bottom=0)
             ax7.legend(fontsize=8)
             ax7.grid(True, alpha=0.3)
             ax7.tick_params(axis='x', rotation=45, labelsize=8)
@@ -682,7 +927,7 @@ class TemporalModelEvaluator:
             
             # 8. 正例比率の時系列変化
             ax8 = axes[3, 1]
-            ax8.plot(dates, positive_ratios, marker='o', linewidth=2, markersize=4, color='green')
+            ax8.plot(dates, positive_ratios, linewidth=0.8, color='green')
             ax8.set_title('Positive Sample Ratio Over Time', fontsize=10, fontweight='bold')
             ax8.set_xlabel('Date', fontsize=8)
             ax8.set_ylabel('Positive Ratio', fontsize=8)
