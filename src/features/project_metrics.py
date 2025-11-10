@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any
 import json
 import os
+import re
 from src.config.path import DEFAULT_DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,10 @@ def add_lines_info_to_dataframe(df: pd.DataFrame, project_name: str) -> pd.DataF
 def _get_major_version(version_string: str) -> int | None:
     """
     バージョン文字列からメジャーバージョン番号を抽出します。
-    例: "13.0.0.0b3" -> 13
+    例: "13.0.0" -> 13
+    
+    注意: この関数は単にメジャー番号を抽出するだけです。
+    メジャーリリースかどうかの判定には _is_major_release を使用してください。
     """
     if not isinstance(version_string, str):
         return None
@@ -93,6 +97,37 @@ def _get_major_version(version_string: str) -> int | None:
     except (ValueError, IndexError):
         return None
 
+
+def _is_major_release(version_string: str) -> bool:
+    """
+    バージョン文字列が厳密なメジャーリリース（X.0.0）かどうかを判定します。
+
+    許可する形式の例:
+      - "20.0.0"
+      - "7.0.0"
+
+    除外する例:
+      - "20.0.0.0rc1"
+      - "20.0.0.0b1"
+      - "20.0.1"
+      - "20.1.0"
+
+    Args:
+        version_string: バージョン文字列
+
+    Returns:
+        True  -> 正確に "<major>.0.0" の形式
+        False -> それ以外
+    """
+    if not isinstance(version_string, str):
+        return False
+
+    s = version_string.strip()
+    # 正確に3パートで、minor==0 and patch==0、かつ追加のサフィックスがないもののみ許可
+    # 正規表現で厳密にマッチ: ^\d+\.0\.0$
+    return bool(re.match(r"^\d+\.0\.0$", s))
+
+
 def calculate_days_to_major_release(
     analysis_time: datetime, 
     component_name: str, 
@@ -101,6 +136,8 @@ def calculate_days_to_major_release(
     """
     指定された分析時点から、対象コンポーネントの次のメジャーバージョンアップリリース日までの
     残り日数を計算
+
+    メジャーリリースは厳密に "X.0.0" 形式のみを対象とします（rc/beta等サフィックスは除外）。
 
     Args:
         analysis_time (datetime): メトリクスを計算する基準となる分析時点の時刻
@@ -115,31 +152,39 @@ def calculate_days_to_major_release(
     # 対象コンポーネントのリリースをフィルタリング
     component_releases = all_releases_df[all_releases_df['component'] == component_name].copy()
     
-    # メジャーバージョンを抽出し、Noneは除外
-    component_releases['major_version_num'] = component_releases['version'].apply(_get_major_version)
-    component_releases = component_releases.dropna(subset=['major_version_num'])
+    # メジャーリリース（X.0.0形式）のみをフィルタリング
+    component_releases['is_major'] = component_releases['version'].apply(_is_major_release)
+    major_releases_only = component_releases[component_releases['is_major']].copy()
+    
+    if major_releases_only.empty:
+        logger.warning(f"No major releases found for component '{component_name}'.")
+        return -1.0
+    
+    # メジャーバージョン番号を抽出
+    major_releases_only['major_version_num'] = major_releases_only['version'].apply(_get_major_version)
+    major_releases_only = major_releases_only.dropna(subset=['major_version_num'])
     
     # リリース日とメジャーバージョン番号でソート (昇順)
-    component_releases = component_releases.sort_values(by=['release_date', 'major_version_num'])
+    major_releases_only = major_releases_only.sort_values(by=['release_date', 'major_version_num'])
 
     next_major_release_date = None
     
     # 分析時点以前の最新のメジャーバージョン番号を特定
     current_base_major_version = -1 # 初期値としてありえない低い数値を設定
     
-    # analysis_time 以前の最も新しいリリースを取得し、そのメジャーバージョンを基準とする
-    past_releases_at_analysis_time = component_releases[component_releases['release_date'] <= analysis_time]
+    # analysis_time 以前の最も新しいメジャーリリースを取得し、そのメジャーバージョンを基準とする
+    past_releases_at_analysis_time = major_releases_only[major_releases_only['release_date'] <= analysis_time]
     if not past_releases_at_analysis_time.empty:
         latest_past_release = past_releases_at_analysis_time.iloc[-1]
         current_base_major_version = latest_past_release['major_version_num']
 
-    # 分析時点より後のリリースを順に見ていき、メジャーバージョン番号が増加した最初のリリースを探す
-    for idx, row in component_releases[component_releases['release_date'] > analysis_time].iterrows():
+    # 分析時点より後のメジャーリリースを順に見ていき、メジャーバージョン番号が増加した最初のリリースを探す
+    for idx, row in major_releases_only[major_releases_only['release_date'] > analysis_time].iterrows():
         if row['major_version_num'] > current_base_major_version:
             next_major_release_date = row['release_date']
             break
         # もしanalysis_timeより後のリリースで、まだmajor_versionが上がっていない場合、
-        # そのリリースが新たな基準となりうる（例: 1.0 -> 1.1 -> 2.0 で、analysis_timeが1.0と1.1の間の場合）
+        # そのリリースが新たな基準となりうる（例: 7.0.0 -> 8.0.0 -> 9.0.0 で、analysis_timeが7.0.0と8.0.0の間の場合）
         current_base_major_version = row['major_version_num']
 
 
@@ -149,6 +194,7 @@ def calculate_days_to_major_release(
     else:
         logger.warning(f"No upcoming major version increment release found for component '{component_name}' after {analysis_time}.")
         return -1.0 # 今後のメジャーバージョンアップが見つからない場合
+
 
 def calculate_predictive_target_ticket_count(
     all_prs_df: pd.DataFrame, 
