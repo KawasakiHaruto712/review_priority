@@ -258,18 +258,19 @@ class OpenStackGerritCollector:
     
     def get_merged_changes(self, component, limit=100, skip=0):
         """
-        マージ済みの変更を取得
-        
+        変更を取得（ステータスフィルタなし）
+
         Args:
             component (str): OpenStackのコンポーネント名
             limit (int): 一度に取得する変更の数
             skip (int): スキップする変更の数
-            
+
         Returns:
             list: 変更のリスト
         """
         # GerritのSearchエンドポイントを使用するためのクエリを構築
-        query = f"project:openstack/{component} status:merged after:{self.start_date} before:{self.end_date}"
+        # ステータスフィルタ（例: status:merged）を入れず、期間のみで取得する
+        query = f"project:openstack/{component} after:{self.start_date} before:{self.end_date}"
         
         endpoint = "changes/"
         params = {
