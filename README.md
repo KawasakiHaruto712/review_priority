@@ -60,13 +60,15 @@ review_priority/
 │   ├── preprocessing/      # データ前処理
 │   ├── features/          # 特徴量抽出
 │   ├── learning/          # 機械学習・IRL
+│   ├── release_impact/    # リリース影響分析
 │   ├── config/            # 設定管理
 │   └── utils/             # 共通ユーティリティ
 ├── tests/                 # テストスイート
 ├── data/                  # データディレクトリ
 │   ├── openstack/         # 収集された生データ
 │   ├── processed/         # 前処理済みデータ
-│   └── results/           # 分析結果
+│   ├── results/           # 分析結果
+│   └── release_impact/    # リリース影響分析結果
 ├── main.py               # メインエントリーポイント
 └── README.md             # このファイル
 ```
@@ -102,11 +104,35 @@ OpenStack Gerritシステムから以下のデータを収集：
 - **時系列分析**: 時間窓での段階的学習
 - **モデル評価**: 収束性と特徴量重要度の分析
 
+### 5. リリース影響分析（Release Impact）
+リリース前後でのメトリクス変化を統計的に分析：
+- **期間比較**: リリース直後（early）vs リリース直前（late）
+- **レビュー状態比較**: レビュー済み vs 未レビュー
+- **統計検定**: Mann-Whitney U検定による有意差検定
+- **可視化**: ボックスプロット、ヒートマップの自動生成
+
+```bash
+# リリース影響分析の実行
+python -m src.release_impact.metrics_comparator
+
+# または特定プロジェクトのテスト
+python src/release_impact/test_release_impact.py
+```
+
 ## 📊 出力・結果
 
 ### 学習結果ファイル
 - `data/results/irl_analysis_YYYYMMDD_YYYYMMDD.json`: 学習統計と特徴量重要度
 - `data/results/irl_model_YYYYMMDD_YYYYMMDD.pkl`: 学習済みモデル
+
+### リリース影響分析結果
+各リリースペアについて以下のファイルが生成されます：
+- `data/release_impact/{project}_{release_pair}/metrics_data.csv`: 全メトリクスデータ
+- `data/release_impact/{project}_{release_pair}/summary_statistics.json`: 記述統計量
+- `data/release_impact/{project}_{release_pair}/test_results.json`: Mann-Whitney U検定結果
+- `data/release_impact/{project}_{release_pair}/boxplots_4x4.pdf`: ボックスプロット（4×4グリッド）
+- `data/release_impact/{project}_{release_pair}/heatmap.pdf`: p値ヒートマップ
+- `data/release_impact/{project}_{release_pair}/summary_plot.pdf`: 平均値比較プロット
 
 ### 結果の解釈
 ```json
@@ -184,6 +210,8 @@ export GERRIT_PASSWORD="your_password"
 - [src/features/README.md](src/features/README.md) - 特徴量抽出
 - [src/learning/README.md](src/learning/README.md) - 機械学習・IRL
 - [src/preprocessing/README.md](src/preprocessing/README.md) - データ前処理
+- [src/release_impact/README.md](src/release_impact/README.md) - リリース影響分析
+- [src/release_impact/designs.md](src/release_impact/designs.md) - リリース影響分析設計書
 
 ## 🙏 謝辞
 
