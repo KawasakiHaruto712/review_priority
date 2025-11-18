@@ -1,0 +1,90 @@
+# src/collectors/config/endpoint_config.yaml
+
+# エンドポイント設定
+endpoints:
+  # 変更リスト取得
+  changes:
+    enabled: true
+    class: ChangesEndpoint
+    priority: 1  # 実行優先度（低い方が先）
+    
+  # 変更詳細取得
+  change_detail:
+    enabled: true
+    class: ChangeDetailEndpoint
+    priority: 2
+    depends_on: [changes]  # 依存関係
+    
+  # コメント取得
+  comments:
+    enabled: false
+    class: CommentsEndpoint
+    priority: 3
+    depends_on: [change_detail]
+    
+  # レビュワー取得
+  reviewers:
+    enabled: false
+    class: ReviewersEndpoint
+    priority: 3
+    depends_on: [change_detail]
+    
+  # ファイル内容取得
+  file_content:
+    enabled: false
+    class: FileContentEndpoint
+    priority: 4
+    depends_on: [change_detail]
+    filter:
+      language: Python  # Pythonファイルのみ
+    
+  # ファイル差分取得
+  file_diff:
+    enabled: false
+    class: FileDiffEndpoint
+    priority: 4
+    depends_on: [change_detail]
+    
+  # コミット情報取得
+  commit:
+    enabled: false
+    class: CommitEndpoint
+    priority: 5
+    depends_on: [change_detail]
+    
+  # 親コミット取得
+  commit_parents:
+    enabled: false
+    class: CommitParentsEndpoint
+    priority: 6
+    depends_on: [commit]
+
+# 収集設定
+collection:
+  # バッチサイズ
+  batch_size: 100
+  
+  # 対象コンポーネント（constants.pyから読み込み可能）
+  components: null  # nullの場合はconstants.OPENSTACK_CORE_COMPONENTSを使用
+  
+  # 期間設定（constants.pyから読み込み可能）
+  start_date: null  # nullの場合はconstants.START_DATEを使用
+  end_date: null    # nullの場合はconstants.END_DATEを使用
+
+# リトライ設定
+retry:
+  max_retries: 10
+  base_delay: 30.0
+  max_delay: 3840.0
+  backoff_factor: 2.0
+  jitter: true
+
+# ストレージ設定
+storage:
+  # 出力ディレクトリ
+  output_dir: data/openstack_collected  # dataディレクトリ配下に保存（既存のopenstackディレクトリとは別）
+  
+  # 保存形式
+  formats:
+    - json  # 個別JSONファイル
+    - csv   # サマリーCSV
