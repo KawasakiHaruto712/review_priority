@@ -1,5 +1,7 @@
 import re
 import logging
+from typing import Dict, Any, Union
+from src.features.change_metrics import get_change_text_data
 
 logger = logging.getLogger(__name__)
 
@@ -7,7 +9,7 @@ logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def calculate_bug_fix_confidence(pr_title: str, pr_description: str | None) -> int:
+def calculate_bug_fix_confidence(pr_title_or_data: Union[str, Dict[str, Any]], pr_description: str | None = None) -> int:
     """
     Pull Requestのタイトルと概要テキストに基づき、バグ修正確信度を算出
     この確信度は、0-2の範囲でスコアリングされる
@@ -20,17 +22,22 @@ def calculate_bug_fix_confidence(pr_title: str, pr_description: str | None) -> i
        キーワードが含まれている、または、テキストが数字と特定の記号のみで構成される場合、+1点
 
     Args:
-        pr_title (str): Pull Requestのタイトル
-        pr_description (str | None): Pull Requestの概要 存在しない場合はNone
+        pr_title_or_data (Union[str, Dict[str, Any]]): Pull Requestのタイトル、またはChangeデータ辞書
+        pr_description (str | None): Pull Requestの概要 存在しない場合はNone (第一引数が辞書の場合は無視される)
 
     Returns:
         int: 算出されたバグ修正確信度スコア (0-2)。
     """
+    if isinstance(pr_title_or_data, dict):
+        pr_title, pr_description = get_change_text_data(pr_title_or_data)
+    else:
+        pr_title = pr_title_or_data
+
     score = 0
     
     # 分析対象となるテキストを準備
     texts_to_analyze = []
-    if pr_title.strip():  # 空文字列でない場合のみ追加
+    if pr_title and pr_title.strip():  # 空文字列でない場合のみ追加
         texts_to_analyze.append(pr_title.strip())
     if pr_description and pr_description.strip():  # 空文字列でない場合のみ追加
         texts_to_analyze.append(pr_description.strip())

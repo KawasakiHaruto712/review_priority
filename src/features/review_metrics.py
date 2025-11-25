@@ -196,7 +196,22 @@ class ReviewStatusAnalyzer:
         
         return False
 
-    def analyze_pr_status(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _get_all_messages(self, pr_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        PRデータからメッセージリストを取得する
+        トップレベルの 'messages' がない場合、他の場所を探すなどのフォールバックを行う
+        """
+        messages = pr_data.get('messages', [])
+        if messages:
+            return messages
+            
+        # フォールバック: 'comments' フィールドを確認
+        if 'comments' in pr_data:
+             return pr_data['comments']
+             
+        return []
+
+    def analyze_pr_status(self, pr_data: Dict[str, Any], analysis_time: datetime = None) -> int:
         """
         PRの各時点における修正要求の対応状況を分析する関数
 
@@ -227,6 +242,7 @@ class ReviewStatusAnalyzer:
                                        Gerritのシステムから取得された生データ形式を想定
                                        'messages' (コメント), 'revisions' (リビジョン情報),
                                        'last_updated' (最終更新日時) などのキーが含まれる
+            analysis_time (datetime, optional): 分析時点。指定された場合、この時刻までのイベントのみを考慮する。
 
         Returns:
             uncompleted_requests_count (int): PRのライフサイクル全体を通しての未完了の修正要求数
@@ -237,11 +253,15 @@ class ReviewStatusAnalyzer:
         pr_data['completed_requests_count'] = 0
 
         events = []
-        for msg in pr_data.get('messages', []):
+        for msg in self._get_all_messages(pr_data):
+            # authorの取得を堅牢にする
+            author_data = msg.get('author', {})
+            author_name = author_data.get('name') if isinstance(author_data, dict) else str(author_data)
+
             events.append({
                 'type': 'message',
                 'timestamp': datetime.fromisoformat(msg['date'].replace('Z', '+00:00')),
-                'author': msg.get('author', {}).get('name'),
+                'author': author_name,
                 'message_id': msg.get('id'),
                 'comment_text': msg.get('message', ''),
                 'revision_number': msg.get('revision_number')
@@ -252,6 +272,21 @@ class ReviewStatusAnalyzer:
                 'timestamp': datetime.fromisoformat(rev_data['created'].replace('Z', '+00:00')),
                 'revision_number': rev_data.get('_number')
             })
+
+        # analysis_time が指定されている場合、それより後のイベントを除外
+        if analysis_time:
+            filtered_events = []
+            for event in events:
+                event_ts = event['timestamp']
+                # タイムゾーンの調整 (naive vs aware の比較エラー防止)
+                if event_ts.tzinfo is None and analysis_time.tzinfo is not None:
+                    event_ts = event_ts.replace(tzinfo=analysis_time.tzinfo)
+                elif event_ts.tzinfo is not None and analysis_time.tzinfo is None:
+                    event_ts = event_ts.replace(tzinfo=None)
+                
+                if event_ts <= analysis_time:
+                    filtered_events.append(event)
+            events = filtered_events
 
         events.sort(key=lambda x: x['timestamp'])
 

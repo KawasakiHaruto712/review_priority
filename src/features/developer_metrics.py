@@ -9,6 +9,33 @@ logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+def get_owner_email(change_data: Dict[str, Any]) -> str:
+    """
+    Changeデータからオーナーのメールアドレスを取得する
+    
+    Args:
+        change_data (Dict[str, Any]): Changeデータ
+        
+    Returns:
+        str: オーナーのメールアドレス。見つからない場合は空文字
+    """
+    # 1. トップレベルのownerフィールドを確認
+    owner = change_data.get('owner', {})
+    if isinstance(owner, dict) and owner.get('email'):
+        return owner.get('email')
+    
+    # 2. revisionsからauthorを確認
+    revisions = change_data.get('revisions', {})
+    if revisions:
+        # 最初に見つかったリビジョンのauthorを使用
+        for rev_id, rev_data in revisions.items():
+            commit = rev_data.get('commit', {})
+            author = commit.get('author', {})
+            if author.get('email'):
+                return author.get('email')
+                
+    return ''
+
 def calculate_past_report_count(
     developer_email: str, 
     all_prs_df: pd.DataFrame, 
