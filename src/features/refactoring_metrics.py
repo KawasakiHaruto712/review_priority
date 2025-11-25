@@ -1,5 +1,7 @@
 import re
 import logging
+from typing import Dict, Any, Union
+from src.features.change_metrics import get_change_text_data
 
 logger = logging.getLogger(__name__)
 
@@ -107,18 +109,23 @@ SAR_REGEX = re.compile(
     re.IGNORECASE # 大文字・小文字を区別しない
 )
 
-def calculate_refactoring_confidence(pr_title: str, pr_description: str | None) -> int:
+def calculate_refactoring_confidence(pr_title_or_data: Union[str, Dict[str, Any]], pr_description: str | None = None) -> int:
     """
     Pull Requestのタイトルと概要テキストに基づき、リファクタリング確信度を算出
     特定されたSARパターンにテキストがマッチするかどうかで0または1の値を返す
 
     Args:
-        pr_title (str): Pull Requestのタイトル
-        pr_description (str | None): Pull Requestの概要，存在しない場合はNone
+        pr_title_or_data (Union[str, Dict[str, Any]]): Pull Requestのタイトル、またはChangeデータ辞書
+        pr_description (str | None): Pull Requestの概要，存在しない場合はNone (第一引数が辞書の場合は無視される)
 
     Returns:
         int: リファクタリングである確信度 (マッチすれば1、しなければ0)
     """
+    if isinstance(pr_title_or_data, dict):
+        pr_title, pr_description = get_change_text_data(pr_title_or_data)
+    else:
+        pr_title = pr_title_or_data
+
     # 分析対象となるすべてのテキストを結合
     combined_text = pr_title + " " + (pr_description if pr_description is not None else "")
     

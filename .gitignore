@@ -2,3 +2,5 @@ data
 tests
 src/review_priority.egg-info
 .env
+
+*.pyc

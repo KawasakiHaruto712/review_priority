@@ -68,7 +68,7 @@ feature_vector = [
     days_to_major_release,   # リリースまで日数
     open_ticket_count,       # オープンチケット数
     reviewed_lines_in_period, # 期間内レビュー行数
-    refactoring_confidence,  # リファクタリング確信度 (0-2)
+    refactoring_confidence,  # リファクタリング確信度 (0-1)
     uncompleted_requests     # 未完了リクエスト数
 ]
 ```
