@@ -80,74 +80,89 @@ def plot_boxplots_8groups(
         logger.warning("可視化対象のデータがありません")
         return []
     
-    # グリッドプロット（全メトリクスをまとめて出力）
-    # 4x4のグリッドなどで出力（メトリクス数に応じて調整）
-    n_metrics = len(metrics)
-    n_cols = 4
-    n_rows = (n_metrics + n_cols - 1) // n_cols
+    # プロット設定: (showfliers, filename_suffix)
+    plot_configs = [
+        (True, ""),
+        (False, "_no_outliers")
+    ]
     
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 5 * n_rows))
-    axes = axes.flatten()
-    
-    # 表示順序の定義
-    hue_order = ['Early', 'Late']
-    order = ['Core Reviewed', 'Core Not Reviewed', 'Non-Core Reviewed', 'Non-Core Not Reviewed']
-    
-    # 凡例用のハンドルとラベル
-    handles, labels = None, None
+    for show_outliers, suffix in plot_configs:
+        # グリッドプロット（全メトリクスをまとめて出力）
+        # 4x4のグリッドなどで出力（メトリクス数に応じて調整）
+        n_metrics = len(metrics)
+        n_cols = 4
+        n_rows = (n_metrics + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 5 * n_rows))
+        axes = axes.flatten()
+        
+        # 表示順序の定義
+        hue_order = ['Early', 'Late']
+        order = ['Core Reviewed', 'Core Not Reviewed', 'Non-Core Reviewed', 'Non-Core Not Reviewed']
+        
+        # 凡例用のハンドルとラベル
+        handles, labels = None, None
 
-    for i, metric in enumerate(metrics):
-        if i < len(axes):
-            ax = axes[i]
+        for i, metric in enumerate(metrics):
+            if i < len(axes):
+                ax = axes[i]
+                
+                # データが存在するか確認
+                if df[metric].notna().sum() > 0:
+                    sns.boxplot(
+                        data=df,
+                        x='Reviewer Type',
+                        y=metric,
+                        hue='Period',
+                        order=order,
+                        hue_order=hue_order,
+                        ax=ax,
+                        showfliers=show_outliers,  # 外れ値の表示設定
+                        palette="Set2"
+                    )
+                    
+                    # 凡例情報を取得（最初の有効なプロットから）
+                    if handles is None and ax.get_legend() is not None:
+                        handles, labels = ax.get_legend_handles_labels()
+                    
+                    # 個別の凡例は削除
+                    if ax.get_legend() is not None:
+                        ax.get_legend().remove()
+                    
+                    ax.set_title(metric, fontsize=14, fontweight='bold')
+                    ax.set_xlabel('')
+                    ax.set_ylabel('Value')
+                    ax.tick_params(axis='x', rotation=45)
+                else:
+                    ax.text(0.5, 0.5, 'No Data', ha='center', va='center')
+                    ax.set_title(metric)
+        
+        # 余ったサブプロットを非表示
+        for i in range(n_metrics, len(axes)):
+            axes[i].axis('off')
             
-            # データが存在するか確認
-            if df[metric].notna().sum() > 0:
-                sns.boxplot(
-                    data=df,
-                    x='Reviewer Type',
-                    y=metric,
-                    hue='Period',
-                    order=order,
-                    hue_order=hue_order,
-                    ax=ax,
-                    showfliers=True,  # 外れ値を表示
-                    palette="Set2"
-                )
-                
-                # 凡例情報を取得（最初の有効なプロットから）
-                if handles is None and ax.get_legend() is not None:
-                    handles, labels = ax.get_legend_handles_labels()
-                
-                # 個別の凡例は削除
-                if ax.get_legend() is not None:
-                    ax.get_legend().remove()
-                
-                ax.set_title(metric, fontsize=14, fontweight='bold')
-                ax.set_xlabel('')
-                ax.set_ylabel('Value')
-                ax.tick_params(axis='x', rotation=45)
-            else:
-                ax.text(0.5, 0.5, 'No Data', ha='center', va='center')
-                ax.set_title(metric)
+        # 共通の凡例を図の上部に追加
+        if handles and labels:
+            fig.legend(
+                handles, 
+                labels, 
+                loc='upper center', 
+                bbox_to_anchor=(0.5, 1.02), 
+                ncol=2, 
+                title='Period', 
+                fontsize=12, 
+                title_fontsize=12
+            )
+            
+        plt.tight_layout()
+        
+        output_path = output_dir / f'boxplots_8groups_grid{suffix}.pdf'
+        plt.savefig(output_path, bbox_inches='tight')
+        plt.close(fig)
+        generated_files.append(output_path)
+        logger.info(f"ボックスプロットを保存しました: {output_path}")
     
-    # 余ったサブプロットを非表示
-    for i in range(n_metrics, len(axes)):
-        axes[i].axis('off')
-        
-    # 共通の凡例を図の上部に追加
-    if handles and labels:
-        fig.legend(
-            handles, 
-            labels, 
-            loc='upper center', 
-            bbox_to_anchor=(0.5, 1.02), 
-            ncol=2, 
-            title='Period', 
-            fontsize=12, 
-            title_fontsize=12
-        )
-        
-    plt.tight_layout()
+    return generated_files
     
     output_path = output_dir / 'boxplots_8groups_grid.pdf'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
