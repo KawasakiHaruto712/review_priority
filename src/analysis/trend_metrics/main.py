@@ -250,9 +250,13 @@ class TrendMetricsAnalyzer:
         
         logger.info("  前期のChangeを抽出しています...")
         early_changes = extract_changes_in_period(all_changes, early_period, next_release_date)
+        # Changeオブジェクトをコピーして独立させる（重複Changeのメトリクス上書き防止）
+        early_changes = [c.copy() for c in early_changes]
         
         logger.info("  後期のChangeを抽出しています...")
         late_changes = extract_changes_in_period(all_changes, late_period, next_release_date)
+        # Changeオブジェクトをコピーして独立させる（重複Changeのメトリクス上書き防止）
+        late_changes = [c.copy() for c in late_changes]
         
         logger.info("  レビューア情報を抽出しています...")
         early_changes = add_reviewer_info_to_changes(early_changes, bot_names, early_period)
@@ -396,8 +400,13 @@ class TrendMetricsAnalyzer:
                     'created': change.get('created'),
                     'status': change.get('status'),
                     'subject': change.get('subject'),
-                    'reviewers': ','.join(change.get('reviewers', []))
+                    'reviewers': ','.join(change.get('reviewers', [])),
+                    'owner_email': change.get('owner_email', '')
                 }
+                # メトリクスを追加
+                for metric in METRIC_COLUMNS:
+                    if metric in change:
+                        record[metric] = change[metric]
                 records.append(record)
         
         df = pd.DataFrame(records)
