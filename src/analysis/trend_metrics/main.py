@@ -73,31 +73,66 @@ class TrendMetricsAnalyzer:
     def __init__(
         self,
         project_name: Optional[str] = None,
-        target_releases: Optional[List[str]] = None
+        releases: Optional[List[str]] = None
     ):
         """
         Args:
             project_name (str, optional): プロジェクト名（例: 'nova', 'neutron'）
                 指定しない場合はconstants.pyの設定を使用
-            target_releases (List[str], optional): 分析対象リリース [current, next]
+            releases (List[str], optional): 分析対象リリースリスト
                 指定しない場合はconstants.pyの設定を使用
         """
         self.project_name = project_name or TREND_ANALYSIS_CONFIG['project']
-        self.target_releases = target_releases or TREND_ANALYSIS_CONFIG['target_releases']
+        self.releases = releases or TREND_ANALYSIS_CONFIG.get('release')
         
-        if len(self.target_releases) != 2:
-            raise ValueError("target_releasesは[current_release, next_release]の2要素が必要です")
-        
-        self.current_release = self.target_releases[0]
-        self.next_release = self.target_releases[1]
-        
-        # 出力ディレクトリの設定
-        self.output_dir = Path(OUTPUT_DIR_BASE) / (
-            f"{self.project_name}_{self.current_release}"
-        )
+        if not self.releases:
+             # Fallback for backward compatibility or if 'release' key is missing but 'current_release' exists
+             current = TREND_ANALYSIS_CONFIG.get('current_release')
+             if current:
+                 self.releases = [current]
+             else:
+                 raise ValueError("No releases specified in config.")
+
+        # 出力ディレクトリの設定 (複数リリースの場合は combined を付与)
+        if len(self.releases) > 1:
+            dir_name = f"{self.project_name}_combined_{self.releases[0]}-{self.releases[-1]}"
+        else:
+            dir_name = f"{self.project_name}_{self.releases[0]}"
+            
+        self.output_dir = Path(OUTPUT_DIR_BASE) / dir_name
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        logger.info(f"TrendMetricsAnalyzer initialized")
+        logger.info(f"TrendMetricsAnalyzer initialized: Project={self.project_name}, Releases={self.releases}")
+
+    def _get_next_release_version(self, current_release: str) -> str:
+        """
+        指定されたリリースから次のリリースバージョンを特定する
+        """
+        releases_df = load_major_releases_summary()
+        
+        # プロジェクトでフィルタリング
+        project_releases = releases_df[releases_df['component'] == self.project_name].copy()
+        if project_releases.empty:
+            raise ValueError(f"Project '{self.project_name}' not found in release summary.")
+            
+        # 日付順にソート
+        project_releases = project_releases.sort_values('release_date')
+        project_releases = project_releases.reset_index(drop=True)
+        
+        # 現在のリリースのインデックスを取得
+        current_indices = project_releases.index[project_releases['version'] == current_release].tolist()
+        
+        if not current_indices:
+             raise ValueError(f"Release '{current_release}' not found for project '{self.project_name}'.")
+        
+        current_index = current_indices[0]
+        
+        # 次のリリースが存在するか確認
+        if current_index + 1 >= len(project_releases):
+            raise ValueError(f"No next release found after '{current_release}' for project '{self.project_name}'.")
+            
+        next_version = project_releases.iloc[current_index + 1]['version']
+        return next_version
         logger.info(f"  Project: {self.project_name}")
         logger.info(f"  Releases: {self.current_release} -> {self.next_release}")
         logger.info(f"  Output: {self.output_dir}")
@@ -152,8 +187,7 @@ class TrendMetricsAnalyzer:
     def _prepare_data(self) -> Dict:
         """
         データ準備フェーズ
-        - リリース日付の取得
-        - 期間の計算
+        - リリース情報の読み込み
         - Changeデータの読み込み
         - コアレビューア情報の読み込み
         - bot名の読み込み
@@ -163,14 +197,6 @@ class TrendMetricsAnalyzer:
         """
         logger.info("  メジャーリリース情報を読み込んでいます...")
         releases_df = load_major_releases_summary()
-        
-        logger.info("  リリース日を取得しています...")
-        current_release_date = get_release_date(releases_df, self.project_name, self.current_release)
-        next_release_date = get_release_date(releases_df, self.project_name, self.next_release)
-        
-        logger.info("  期間を計算しています...")
-        periods = calculate_periods(current_release_date, next_release_date, ANALYSIS_PERIODS)
-        early_period, late_period = periods
         
         logger.info("  Changeデータを読み込んでいます...")
         all_changes = load_all_changes(self.project_name)
@@ -183,10 +209,6 @@ class TrendMetricsAnalyzer:
         
         data_context = {
             'releases_df': releases_df,
-            'current_release_date': current_release_date,
-            'next_release_date': next_release_date,
-            'early_period': early_period,
-            'late_period': late_period,
             'all_changes': all_changes,
             'core_reviewers': core_reviewers,
             'bot_names': bot_names
@@ -199,7 +221,7 @@ class TrendMetricsAnalyzer:
     def _extract_period_data(self, data_context: Dict) -> Dict:
         """
         期間別データ抽出フェーズ
-        - 前期/後期のChangeを抽出
+        - 各リリースの前期/後期のChangeを抽出・集約
         - レビューア情報を抽出
         - メトリクスを計算して付与
         
@@ -210,18 +232,11 @@ class TrendMetricsAnalyzer:
             Dict: 期間別データ
         """
         all_changes = data_context['all_changes']
-        early_period = data_context['early_period']
-        late_period = data_context['late_period']
         bot_names = data_context['bot_names']
-        next_release_date = data_context['next_release_date']
         releases_df = data_context['releases_df']
         
         # DataFrameの準備（開発者メトリクス計算用）
-        # 事前にlines_addedとlines_deletedを計算して追加
-        # これにより、project_metrics.pyのcalculate_reviewed_lines_in_periodでの警告を回避
         enrich_changes_with_line_metrics(all_changes)
-        
-        # owner_emailも事前に計算して追加（get_owner_emailのロジックを使用するため）
         enrich_changes_with_owner_email(all_changes)
 
         all_changes_df = pd.DataFrame(all_changes)
@@ -231,8 +246,6 @@ class TrendMetricsAnalyzer:
             if col not in all_changes_df.columns:
                 all_changes_df[col] = pd.NaT
         
-        # owner_emailカラムはenrich_changes_with_owner_emailで追加済みなので、ここでは何もしない
-        # ただし、万が一欠損している場合のためにfillnaしておく
         if 'owner_email' not in all_changes_df.columns:
              all_changes_df['owner_email'] = ''
         all_changes_df['owner_email'] = all_changes_df['owner_email'].fillna('')
@@ -243,37 +256,57 @@ class TrendMetricsAnalyzer:
                 all_changes_df[col] = all_changes_df[col].astype(str).str.replace('.000000000', '', regex=False)
                 all_changes_df[col] = pd.to_datetime(all_changes_df[col], errors='coerce')
         
-        # mergedカラムがNaTの場合、submittedカラムの値で埋める
-        # Gerritのデータではsubmittedがマージ日時を表すことが多いため
         if 'submitted' in all_changes_df.columns and 'merged' in all_changes_df.columns:
             all_changes_df['merged'] = all_changes_df['merged'].fillna(all_changes_df['submitted'])
         
-        logger.info("  前期のChangeを抽出しています...")
-        early_changes = extract_changes_in_period(all_changes, early_period, next_release_date)
-        # Changeオブジェクトをコピーして独立させる（重複Changeのメトリクス上書き防止）
-        early_changes = [c.copy() for c in early_changes]
-        
-        logger.info("  後期のChangeを抽出しています...")
-        late_changes = extract_changes_in_period(all_changes, late_period, next_release_date)
-        # Changeオブジェクトをコピーして独立させる（重複Changeのメトリクス上書き防止）
-        late_changes = [c.copy() for c in late_changes]
-        
-        logger.info("  レビューア情報を抽出しています...")
-        early_changes = add_reviewer_info_to_changes(early_changes, bot_names, early_period)
-        late_changes = add_reviewer_info_to_changes(late_changes, bot_names, late_period)
-        
-        logger.info("  メトリクスを計算しています...")
-        for change in early_changes:
-            metrics = calculate_metrics(change, all_changes_df, releases_df, self.project_name, early_period[0])
-            change.update(metrics)
-            
-        for change in late_changes:
-            metrics = calculate_metrics(change, all_changes_df, releases_df, self.project_name, late_period[0])
-            change.update(metrics)
-        
+        aggregated_early_changes = []
+        aggregated_late_changes = []
+
+        for current_release in self.releases:
+            try:
+                next_release = self._get_next_release_version(current_release)
+                logger.info(f"  Processing Release: {current_release} -> {next_release}")
+                
+                current_release_date = get_release_date(releases_df, self.project_name, current_release)
+                next_release_date = get_release_date(releases_df, self.project_name, next_release)
+                
+                periods = calculate_periods(current_release_date, next_release_date, ANALYSIS_PERIODS)
+                early_period, late_period = periods
+                
+                # 前期
+                early_changes = extract_changes_in_period(all_changes, early_period, next_release_date)
+                early_changes = [c.copy() for c in early_changes]
+                early_changes = add_reviewer_info_to_changes(early_changes, bot_names, early_period)
+                for change in early_changes:
+                    metrics = calculate_metrics(change, all_changes_df, releases_df, self.project_name, early_period[0])
+                    change.update(metrics)
+                    # リリース情報を付与（分析用）
+                    change['analysis_release'] = current_release
+                    change['analysis_period_type'] = 'early'
+                aggregated_early_changes.extend(early_changes)
+                
+                # 後期
+                late_changes = extract_changes_in_period(all_changes, late_period, next_release_date)
+                late_changes = [c.copy() for c in late_changes]
+                late_changes = add_reviewer_info_to_changes(late_changes, bot_names, late_period)
+                for change in late_changes:
+                    metrics = calculate_metrics(change, all_changes_df, releases_df, self.project_name, late_period[0])
+                    change.update(metrics)
+                    # リリース情報を付与（分析用）
+                    change['analysis_release'] = current_release
+                    change['analysis_period_type'] = 'late'
+                aggregated_late_changes.extend(late_changes)
+                
+            except ValueError as e:
+                logger.warning(f"  Skipping release {current_release}: {e}")
+                continue
+
+        logger.info(f"  Total Early Changes: {len(aggregated_early_changes)}")
+        logger.info(f"  Total Late Changes: {len(aggregated_late_changes)}")
+
         period_data = {
-            'early_changes': early_changes,
-            'late_changes': late_changes
+            'early_changes': aggregated_early_changes,
+            'late_changes': aggregated_late_changes
         }
         
         return period_data
@@ -438,7 +471,7 @@ class TrendMetricsAnalyzer:
         # サマリー作成
         summary = {
             'project': self.project_name,
-            'releases': self.target_releases,
+            'releases': self.releases,
             'output_dir': str(self.output_dir),
             'groups_count': group_stats,
             'total_changes': len(df),
@@ -467,7 +500,7 @@ def main():
         print("分析サマリー")
         print("=" * 80)
         print(f"プロジェクト: {summary['project']}")
-        print(f"リリース: {summary['releases'][0]} -> {summary['releases'][1]}")
+        print(f"リリース: {summary['releases']}")
         print(f"出力先: {summary['output_dir']}")
         print(f"総Change数: {summary['total_changes']}")
         print(f"\nグループ別件数:")
