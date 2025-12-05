@@ -20,6 +20,7 @@ from src.collectors.storage.commit_storage import CommitStorage
 # エンドポイントクラスのインポート
 from src.collectors.endpoints.changes_endpoint import ChangesEndpoint
 from src.collectors.endpoints.change_detail_endpoint import ChangeDetailEndpoint
+from src.collectors.endpoints.included_in_endpoint import IncludedInEndpoint
 from src.collectors.endpoints.comments_endpoint import CommentsEndpoint
 from src.collectors.endpoints.reviewers_endpoint import ReviewersEndpoint
 from src.collectors.endpoints.file_content_endpoint import FileContentEndpoint
@@ -37,6 +38,7 @@ class ChangeCollector:
     ENDPOINT_CLASSES = {
         'ChangesEndpoint': ChangesEndpoint,
         'ChangeDetailEndpoint': ChangeDetailEndpoint,
+        'IncludedInEndpoint': IncludedInEndpoint,
         'CommentsEndpoint': CommentsEndpoint,
         'ReviewersEndpoint': ReviewersEndpoint,
         'FileContentEndpoint': FileContentEndpoint,
@@ -195,6 +197,11 @@ class ChangeCollector:
             if self.config.is_endpoint_enabled('change_detail'):
                 detail = self.endpoints['change_detail'].fetch(change_id=change_id)
                 result['change'].update(detail)
+
+            # Included In 情報
+            if self.config.is_endpoint_enabled('included_in'):
+                included_in = self.endpoints['included_in'].fetch(change_id=change_id)
+                result['change']['included_in'] = included_in
             
             # コメント
             if self.config.is_endpoint_enabled('comments'):
