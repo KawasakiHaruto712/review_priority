@@ -14,6 +14,13 @@ endpoints:
     class: ChangeDetailEndpoint
     priority: 2
     depends_on: [changes]  # 依存関係
+
+  # Included In取得
+  included_in:
+    enabled: true
+    class: IncludedInEndpoint
+    priority: 3
+    depends_on: [change_detail]
     
   # コメント取得
   comments:
