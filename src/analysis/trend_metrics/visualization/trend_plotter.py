@@ -11,7 +11,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-from src.analysis.trend_metrics.utils.constants import METRIC_COLUMNS
+from src.analysis.trend_metrics.utils.constants import METRIC_COLUMNS, SEPARATE_CORE_REVIEWERS
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ def plot_boxplots_8groups(
     metrics: List[str] = None
 ) -> List[Path]:
     """
-    8グループのメトリクス分布をボックスプロットで可視化
+    グループのメトリクス分布をボックスプロットで可視化
     
     Args:
         groups: グループ別のChangeデータ
@@ -49,16 +49,24 @@ def plot_boxplots_8groups(
         # グループ名から属性を抽出
         period = 'Early' if group_name.startswith('early_') else 'Late'
         
-        if '_non_core_reviewed' in group_name:
-            reviewer_type = 'Non-Core Reviewed'
-        elif '_non_core_not_reviewed' in group_name:
-            reviewer_type = 'Non-Core Not Reviewed'
-        elif '_core_reviewed' in group_name:
-            reviewer_type = 'Core Reviewed'
-        elif '_core_not_reviewed' in group_name:
-            reviewer_type = 'Core Not Reviewed'
+        if SEPARATE_CORE_REVIEWERS:
+            if '_non_core_reviewed' in group_name:
+                reviewer_type = 'Non-Core Reviewed'
+            elif '_non_core_not_reviewed' in group_name:
+                reviewer_type = 'Non-Core Not Reviewed'
+            elif '_core_reviewed' in group_name:
+                reviewer_type = 'Core Reviewed'
+            elif '_core_not_reviewed' in group_name:
+                reviewer_type = 'Core Not Reviewed'
+            else:
+                reviewer_type = 'Unknown'
         else:
-            reviewer_type = 'Unknown'
+            if '_not_reviewed' in group_name:
+                reviewer_type = 'Not Reviewed'
+            elif '_reviewed' in group_name:
+                reviewer_type = 'Reviewed'
+            else:
+                reviewer_type = 'Unknown'
             
         for change in changes:
             record = {
@@ -98,80 +106,67 @@ def plot_boxplots_8groups(
         
         # 表示順序の定義
         hue_order = ['Early', 'Late']
-        order = ['Core Reviewed', 'Core Not Reviewed', 'Non-Core Reviewed', 'Non-Core Not Reviewed']
+        if SEPARATE_CORE_REVIEWERS:
+            order = ['Core Reviewed', 'Core Not Reviewed', 'Non-Core Reviewed', 'Non-Core Not Reviewed']
+        else:
+            order = ['Reviewed', 'Not Reviewed']
+            
+        # データに含まれるタイプのみにフィルタリング
+        existing_types = df['Reviewer Type'].unique()
+        order = [t for t in order if t in existing_types]
         
-        # 凡例用のハンドルとラベル
-        handles, labels = None, None
-
         for i, metric in enumerate(metrics):
-            if i < len(axes):
-                ax = axes[i]
+            ax = axes[i]
+            
+            # データが存在するか確認
+            if df[metric].isnull().all():
+                ax.text(0.5, 0.5, 'No Data', ha='center', va='center')
+                ax.set_title(metric)
+                continue
                 
-                # データが存在するか確認
-                if df[metric].notna().sum() > 0:
-                    sns.boxplot(
-                        data=df,
-                        x='Reviewer Type',
-                        y=metric,
-                        hue='Period',
-                        order=order,
-                        hue_order=hue_order,
-                        ax=ax,
-                        showfliers=show_outliers,  # 外れ値の表示設定
-                        palette="Set2"
-                    )
-                    
-                    # 凡例情報を取得（最初の有効なプロットから）
-                    if handles is None and ax.get_legend() is not None:
-                        handles, labels = ax.get_legend_handles_labels()
-                    
-                    # 個別の凡例は削除
-                    if ax.get_legend() is not None:
-                        ax.get_legend().remove()
-                    
-                    ax.set_title(metric, fontsize=14, fontweight='bold')
-                    ax.set_xlabel('')
-                    ax.set_ylabel('Value')
-                    ax.tick_params(axis='x', rotation=45)
-                else:
-                    ax.text(0.5, 0.5, 'No Data', ha='center', va='center')
-                    ax.set_title(metric)
+            sns.boxplot(
+                data=df,
+                x='Reviewer Type',
+                y=metric,
+                hue='Period',
+                hue_order=hue_order,
+                order=order,
+                ax=ax,
+                showfliers=show_outliers,
+                palette="Set2"
+            )
+            
+            ax.set_title(metric)
+            ax.set_xlabel('')
+            ax.tick_params(axis='x', rotation=45)
+            
+            # 凡例は最初のグラフのみ（または別途配置）
+            if i == 0:
+                ax.legend(title='Period')
+            else:
+                if ax.get_legend():
+                    ax.get_legend().remove()
         
         # 余ったサブプロットを非表示
         for i in range(n_metrics, len(axes)):
             axes[i].axis('off')
             
-        # 共通の凡例を図の上部に追加
-        if handles and labels:
-            fig.legend(
-                handles, 
-                labels, 
-                loc='upper center', 
-                bbox_to_anchor=(0.5, 1.02), 
-                ncol=2, 
-                title='Period', 
-                fontsize=12, 
-                title_fontsize=12
-            )
-            
+        # 凡例をグラフ外に配置（オプション）
+        # handles, labels = axes[0].get_legend_handles_labels()
+        # fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 1.02), ncol=2)
+        
         plt.tight_layout()
         
-        output_path = output_dir / f'boxplots_8groups_grid{suffix}.pdf'
+        output_path = output_dir / f'boxplots_groups_grid{suffix}.pdf'
         plt.savefig(output_path, bbox_inches='tight')
         plt.close(fig)
         generated_files.append(output_path)
         logger.info(f"ボックスプロットを保存しました: {output_path}")
     
     return generated_files
+
     
-    output_path = output_dir / 'boxplots_8groups_grid.pdf'
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    generated_files.append(output_path)
-    logger.info(f"8グループ比較ボックスプロットを生成しました: {output_path}")
-    
-    return generated_files
+
 
 
 def plot_trend_lines(

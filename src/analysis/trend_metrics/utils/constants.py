@@ -5,31 +5,50 @@ Trend Metrics Analysis用の定数定義
 
 # 分析対象プロジェクトとリリース
 TREND_ANALYSIS_CONFIG = {
-    'project': 'nova',
-    'release': [
-        '12.0.0',
-        '13.0.0',
-        '14.0.0',
-        '15.0.0',
-        '16.0.0',
-        '17.0.0',
-        '18.0.0',
-        '19.0.0',
-        '20.0.0',
-        '21.0.0',
-        '22.0.0',
-        '23.0.0',
-        '24.0.0',
-        '25.0.0',
-        '26.0.0',
-        '27.0.0',
-        '28.0.0',
-        '29.0.0',
-        '30.0.0'
-    ]
+    'project': {
+        'nova': [
+            '12.0.0',
+            '13.0.0',
+            '14.0.0',
+            '15.0.0',
+            '16.0.0',
+            '17.0.0',
+            '18.0.0',
+            '19.0.0',
+            '20.0.0',
+            '21.0.0',
+            '22.0.0',
+            '23.0.0',
+            '24.0.0',
+            '25.0.0',
+            '26.0.0',
+            '27.0.0',
+            '28.0.0',
+            '29.0.0',
+            '30.0.0'
+        ]
+    }
 }
 
+# TREND_ANALYSIS_CONFIG = {
+#     'project': {
+#         'nova': [
+#             '12.0.0',
+#             '13.0.0',
+#         ]
+#     }
+# }
+
 # 分析期間の定義（日数）
+# 期間定義方法の選択
+# 'fixed_days': 固定日数（例：30日）で区切る（ANALYSIS_PERIODSの設定を使用）
+# 'split_ratio': リリース間隔を等分割して区切る（PERIOD_SPLIT_RATIOを使用）
+PERIOD_DEFINITION_METHOD = 'fixed_days'
+
+# 分割数（PERIOD_DEFINITION_METHOD = 'split_ratio' の場合に使用）
+# 例: 6 の場合、リリース間隔を6等分し、最初の1つを前期、最後の1つを後期とする
+PERIOD_SPLIT_RATIO = 6
+
 ANALYSIS_PERIODS = {
     'early': {
         'base_date': 'current_release',  # 基準日：現在のリリース日
@@ -45,41 +64,67 @@ ANALYSIS_PERIODS = {
     }
 }
 
-# レビューアタイプの定義
-REVIEWER_TYPES = {
-    'core_reviewed': {
-        'label': 'core_reviewed',
-        'description': 'コアレビューアがレビューした',
-        'condition': 'has_core_review == True'
-    },
-    'core_not_reviewed': {
-        'label': 'core_not_reviewed',
-        'description': 'コアレビューアがレビューしていない',
-        'condition': 'has_core_review == False'
-    },
-    'non_core_reviewed': {
-        'label': 'non_core_reviewed',
-        'description': '非コアレビューアのみがレビューした',
-        'condition': 'has_core_review == False and has_non_core_review == True'
-    },
-    'non_core_not_reviewed': {
-        'label': 'non_core_not_reviewed',
-        'description': '誰もレビューしていない',
-        'condition': 'has_core_review == False and has_non_core_review == False'
-    }
-}
+# コアレビューアと非コアレビューアを区別するかどうか
+SEPARATE_CORE_REVIEWERS = False
 
-# 分析グループの定義（期間 × レビューアタイプ）
-ANALYSIS_GROUPS = [
-    'early_core_reviewed',
-    'early_core_not_reviewed',
-    'early_non_core_reviewed',
-    'early_non_core_not_reviewed',
-    'late_core_reviewed',
-    'late_core_not_reviewed',
-    'late_non_core_reviewed',
-    'late_non_core_not_reviewed'
-]
+if SEPARATE_CORE_REVIEWERS:
+    # レビューアタイプの定義
+    REVIEWER_TYPES = {
+        'core_reviewed': {
+            'label': 'core_reviewed',
+            'description': 'コアレビューアがレビューした',
+            'condition': 'has_core_review == True'
+        },
+        'core_not_reviewed': {
+            'label': 'core_not_reviewed',
+            'description': 'コアレビューアがレビューしていない',
+            'condition': 'has_core_review == False'
+        },
+        'non_core_reviewed': {
+            'label': 'non_core_reviewed',
+            'description': '非コアレビューアのみがレビューした',
+            'condition': 'has_core_review == False and has_non_core_review == True'
+        },
+        'non_core_not_reviewed': {
+            'label': 'non_core_not_reviewed',
+            'description': '誰もレビューしていない',
+            'condition': 'has_core_review == False and has_non_core_review == False'
+        }
+    }
+
+    # 分析グループの定義（期間 × レビューアタイプ）
+    ANALYSIS_GROUPS = [
+        'early_core_reviewed',
+        'early_core_not_reviewed',
+        'early_non_core_reviewed',
+        'early_non_core_not_reviewed',
+        'late_core_reviewed',
+        'late_core_not_reviewed',
+        'late_non_core_reviewed',
+        'late_non_core_not_reviewed'
+    ]
+else:
+    # レビューアタイプの定義（区別しない場合）
+    REVIEWER_TYPES = {
+        'reviewed': {
+            'label': 'reviewed',
+            'description': 'レビューされた',
+            'condition': 'has_core_review == True or has_non_core_review == True'
+        },
+        'not_reviewed': {
+            'label': 'not_reviewed',
+            'description': 'レビューされていない',
+            'condition': 'has_core_review == False and has_non_core_review == False'
+        }
+    }
+
+    # 分析グループの定義（期間 × レビューアタイプ）
+    ANALYSIS_GROUPS = [
+        'early_reviewed',
+        'early_not_reviewed',
+        'late_reviewed',
+        'late_not_reviewed'
+    ]
 
 # メトリクス一覧
 METRIC_COLUMNS = [

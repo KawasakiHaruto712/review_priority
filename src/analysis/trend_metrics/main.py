@@ -53,7 +53,8 @@ from src.analysis.trend_metrics.visualization import (
     plot_boxplots_8groups,
     plot_trend_lines,
     plot_metric_changes,
-    generate_heatmap
+    generate_heatmap,
+    generate_aggregated_heatmap
 )
 
 # ロギング設定
@@ -82,8 +83,21 @@ class TrendMetricsAnalyzer:
             releases (List[str], optional): 分析対象リリースリスト
                 指定しない場合はconstants.pyの設定を使用
         """
-        self.project_name = project_name or TREND_ANALYSIS_CONFIG['project']
-        self.releases = releases or TREND_ANALYSIS_CONFIG.get('release')
+        # プロジェクト名の設定
+        if project_name:
+            self.project_name = project_name
+        else:
+            # configから取得（辞書の場合は最初のキーを使用）
+            config_project = TREND_ANALYSIS_CONFIG.get('project')
+            self.project_name = list(config_project.keys())[0]
+
+        # リリースリストの設定
+        if releases:
+            self.releases = releases
+        else:
+            # configから取得
+            config_project = TREND_ANALYSIS_CONFIG.get('project')
+            self.releases = config_project.get(self.project_name)
         
         if not self.releases:
              # Fallback for backward compatibility or if 'release' key is missing but 'current_release' exists
@@ -91,15 +105,10 @@ class TrendMetricsAnalyzer:
              if current:
                  self.releases = [current]
              else:
-                 raise ValueError("No releases specified in config.")
+                 raise ValueError(f"No releases found for project '{self.project_name}' in config.")
 
-        # 出力ディレクトリの設定 (複数リリースの場合は combined を付与)
-        if len(self.releases) > 1:
-            dir_name = f"{self.project_name}_combined_{self.releases[0]}-{self.releases[-1]}"
-        else:
-            dir_name = f"{self.project_name}_{self.releases[0]}"
-            
-        self.output_dir = Path(OUTPUT_DIR_BASE) / dir_name
+        # 出力ディレクトリのベース設定
+        self.output_dir = Path(OUTPUT_DIR_BASE)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"TrendMetricsAnalyzer initialized: Project={self.project_name}, Releases={self.releases}")
@@ -133,9 +142,6 @@ class TrendMetricsAnalyzer:
             
         next_version = project_releases.iloc[current_index + 1]['version']
         return next_version
-        logger.info(f"  Project: {self.project_name}")
-        logger.info(f"  Releases: {self.current_release} -> {self.next_release}")
-        logger.info(f"  Output: {self.output_dir}")
     
     def run_analysis(self) -> Dict:
         """
@@ -153,32 +159,55 @@ class TrendMetricsAnalyzer:
             logger.info("\n[Phase 1] データ準備")
             data_context = self._prepare_data()
             
-            # 2. データ抽出フェーズ
-            logger.info("\n[Phase 2] 期間別データ抽出")
-            period_data = self._extract_period_data(data_context)
+            overall_summary = {}
+            overall_test_results = {}
+
+            for release in self.releases:
+                logger.info(f"\nAnalyzing release: {release}")
+                
+                # 出力ディレクトリの設定
+                release_output_dir = Path(OUTPUT_DIR_BASE) / f"{self.project_name}_{release}"
+                release_output_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 2. データ抽出フェーズ (単一リリース)
+                logger.info(f"\n[Phase 2] 期間別データ抽出 ({release})")
+                period_data = self._extract_period_data(data_context, target_release=release)
+                
+                if not period_data['early_changes'] and not period_data['late_changes']:
+                    logger.warning(f"Release {release} has no data. Skipping.")
+                    continue
+
+                # 3. レビューア分類フェーズ
+                logger.info(f"\n[Phase 3] レビューアタイプ分類 ({release})")
+                classified_data = self._classify_by_reviewer(period_data, data_context)
+                
+                # 4. 統計分析フェーズ
+                logger.info(f"\n[Phase 4] 統計分析 ({release})")
+                analysis_results = self._perform_statistical_analysis(classified_data)
+                overall_test_results[release] = analysis_results['test_results']
+                
+                # 5. 可視化フェーズ
+                logger.info(f"\n[Phase 5] 可視化 ({release})")
+                self._generate_visualizations(classified_data, analysis_results, output_dir=release_output_dir)
+                
+                # 6. データの保存
+                logger.info(f"\n[Phase 6] データの保存 ({release})")
+                summary = self._save_classified_data(classified_data, analysis_results, data_context, output_dir=release_output_dir)
+                
+                overall_summary[release] = summary
             
-            # 3. レビューア分類フェーズ
-            logger.info("\n[Phase 3] レビューアタイプ分類")
-            classified_data = self._classify_by_reviewer(period_data, data_context)
-            
-            # 4. 統計分析フェーズ
-            logger.info("\n[Phase 4] 統計分析")
-            analysis_results = self._perform_statistical_analysis(classified_data)
-            
-            # 5. 可視化フェーズ
-            logger.info("\n[Phase 5] 可視化")
-            self._generate_visualizations(classified_data, analysis_results)
-            
-            # 6. データの保存
-            logger.info("\n[Phase 6] データの保存")
-            summary = self._save_classified_data(classified_data, analysis_results, data_context)
-            
+            if overall_test_results:
+                logger.info("\n[Phase 7] 全リリース集約可視化")
+                generate_aggregated_heatmap(
+                    overall_test_results,
+                    output_dir=self.output_dir / f"{self.project_name}_aggregated_results"
+                )
+
             logger.info("\n" + "=" * 80)
             logger.info("分析完了")
-            logger.info(f"結果は {self.output_dir} に保存されました")
             logger.info("=" * 80)
             
-            return summary
+            return overall_summary
             
         except Exception as e:
             logger.error(f"分析中にエラーが発生しました: {e}", exc_info=True)
@@ -218,15 +247,16 @@ class TrendMetricsAnalyzer:
         
         return data_context
     
-    def _extract_period_data(self, data_context: Dict) -> Dict:
+    def _extract_period_data(self, data_context: Dict, target_release: str) -> Dict:
         """
         期間別データ抽出フェーズ
-        - 各リリースの前期/後期のChangeを抽出・集約
+        - 指定リリースの前期/後期のChangeを抽出
         - レビューア情報を抽出
         - メトリクスを計算して付与
         
         Args:
             data_context (Dict): データコンテキスト
+            target_release (str): 対象リリース
             
         Returns:
             Dict: 期間別データ
@@ -262,44 +292,42 @@ class TrendMetricsAnalyzer:
         aggregated_early_changes = []
         aggregated_late_changes = []
 
-        for current_release in self.releases:
-            try:
-                next_release = self._get_next_release_version(current_release)
-                logger.info(f"  Processing Release: {current_release} -> {next_release}")
-                
-                current_release_date = get_release_date(releases_df, self.project_name, current_release)
-                next_release_date = get_release_date(releases_df, self.project_name, next_release)
-                
-                periods = calculate_periods(current_release_date, next_release_date, ANALYSIS_PERIODS)
-                early_period, late_period = periods
-                
-                # 前期
-                early_changes = extract_changes_in_period(all_changes, early_period, next_release_date)
-                early_changes = [c.copy() for c in early_changes]
-                early_changes = add_reviewer_info_to_changes(early_changes, bot_names, early_period)
-                for change in early_changes:
-                    metrics = calculate_metrics(change, all_changes_df, releases_df, self.project_name, early_period[0])
-                    change.update(metrics)
-                    # リリース情報を付与（分析用）
-                    change['analysis_release'] = current_release
-                    change['analysis_period_type'] = 'early'
-                aggregated_early_changes.extend(early_changes)
-                
-                # 後期
-                late_changes = extract_changes_in_period(all_changes, late_period, next_release_date)
-                late_changes = [c.copy() for c in late_changes]
-                late_changes = add_reviewer_info_to_changes(late_changes, bot_names, late_period)
-                for change in late_changes:
-                    metrics = calculate_metrics(change, all_changes_df, releases_df, self.project_name, late_period[0])
-                    change.update(metrics)
-                    # リリース情報を付与（分析用）
-                    change['analysis_release'] = current_release
-                    change['analysis_period_type'] = 'late'
-                aggregated_late_changes.extend(late_changes)
-                
-            except ValueError as e:
-                logger.warning(f"  Skipping release {current_release}: {e}")
-                continue
+        try:
+            next_release = self._get_next_release_version(target_release)
+            logger.info(f"  Processing Release: {target_release} -> {next_release}")
+            
+            current_release_date = get_release_date(releases_df, self.project_name, target_release)
+            next_release_date = get_release_date(releases_df, self.project_name, next_release)
+            
+            periods = calculate_periods(current_release_date, next_release_date, ANALYSIS_PERIODS)
+            early_period, late_period = periods
+            
+            # 前期
+            early_changes = extract_changes_in_period(all_changes, early_period, next_release_date, target_version=next_release)
+            early_changes = [c.copy() for c in early_changes]
+            early_changes = add_reviewer_info_to_changes(early_changes, bot_names, early_period)
+            for change in early_changes:
+                metrics = calculate_metrics(change, all_changes_df, releases_df, self.project_name, early_period[0])
+                change.update(metrics)
+                # リリース情報を付与（分析用）
+                change['analysis_release'] = target_release
+                change['analysis_period_type'] = 'early'
+            aggregated_early_changes.extend(early_changes)
+            
+            # 後期
+            late_changes = extract_changes_in_period(all_changes, late_period, next_release_date, target_version=next_release)
+            late_changes = [c.copy() for c in late_changes]
+            late_changes = add_reviewer_info_to_changes(late_changes, bot_names, late_period)
+            for change in late_changes:
+                metrics = calculate_metrics(change, all_changes_df, releases_df, self.project_name, late_period[0])
+                change.update(metrics)
+                # リリース情報を付与（分析用）
+                change['analysis_release'] = target_release
+                change['analysis_period_type'] = 'late'
+            aggregated_late_changes.extend(late_changes)
+            
+        except ValueError as e:
+            logger.warning(f"  Skipping release {target_release}: {e}")
 
         logger.info(f"  Total Early Changes: {len(aggregated_early_changes)}")
         logger.info(f"  Total Late Changes: {len(aggregated_late_changes)}")
@@ -370,7 +398,7 @@ class TrendMetricsAnalyzer:
             'comparison_results': comparison_results
         }
     
-    def _generate_visualizations(self, classified_data: Dict, analysis_results: Dict):
+    def _generate_visualizations(self, classified_data: Dict, analysis_results: Dict, output_dir: Path):
         """
         可視化フェーズ
         - 箱ひげ図の生成
@@ -381,26 +409,28 @@ class TrendMetricsAnalyzer:
         Args:
             classified_data (Dict): 分類済みデータ
             analysis_results (Dict): 分析結果
+            output_dir (Path): 出力先ディレクトリ
         """
         logger.info("  グラフを生成しています...")
         
         # 1. 分布の可視化
-        plot_boxplots_8groups(classified_data, self.output_dir)
+        plot_boxplots_8groups(classified_data, output_dir)
         
         # 2. トレンドの可視化
-        plot_trend_lines(analysis_results['comparison_results'], self.output_dir)
+        plot_trend_lines(analysis_results['comparison_results'], output_dir)
         
         # 3. 変化率の可視化
-        plot_metric_changes(analysis_results['comparison_results'], self.output_dir)
+        plot_metric_changes(analysis_results['comparison_results'], output_dir)
         
         # 4. 統計検定結果のヒートマップ
-        generate_heatmap(analysis_results['test_results'], self.output_dir)
+        generate_heatmap(analysis_results['test_results'], output_dir)
     
     def _save_classified_data(
         self,
         classified_data: Dict,
         analysis_results: Dict,
-        data_context: Dict
+        data_context: Dict,
+        output_dir: Path
     ) -> Dict:
         """
         分類済みデータの保存
@@ -412,6 +442,7 @@ class TrendMetricsAnalyzer:
             classified_data (Dict): 分類済みデータ
             analysis_results (Dict): 分析結果
             data_context (Dict): データコンテキスト
+            output_dir (Path): 出力先ディレクトリ
             
         Returns:
             Dict: サマリー情報
@@ -445,7 +476,7 @@ class TrendMetricsAnalyzer:
         df = pd.DataFrame(records)
         
         # CSVに保存
-        csv_path = self.output_dir / 'classified_changes.csv'
+        csv_path = output_dir / 'classified_changes.csv'
         df.to_csv(csv_path, index=False, encoding='utf-8')
         logger.info(f"  分類データを保存: {csv_path}")
         
@@ -455,13 +486,13 @@ class TrendMetricsAnalyzer:
             for group, changes in classified_data.items()
         }
         
-        stats_path = self.output_dir / 'group_statistics.json'
+        stats_path = output_dir / 'group_statistics.json'
         with open(stats_path, 'w', encoding='utf-8') as f:
             json.dump(group_stats, f, indent=2, ensure_ascii=False)
         logger.info(f"  グループ統計を保存: {stats_path}")
         
         # 統計分析結果を保存
-        analysis_path = self.output_dir / 'statistical_analysis.json'
+        analysis_path = output_dir / 'statistical_analysis.json'
         # numpy型などをシリアライズ可能にするためのカスタムエンコーダが必要かもしれないが
         # ここでは簡易的にdefault=strを使用
         with open(analysis_path, 'w', encoding='utf-8') as f:
@@ -472,13 +503,13 @@ class TrendMetricsAnalyzer:
         summary = {
             'project': self.project_name,
             'releases': self.releases,
-            'output_dir': str(self.output_dir),
+            'output_dir': str(output_dir),
             'groups_count': group_stats,
             'total_changes': len(df),
             'timestamp': pd.Timestamp.now().isoformat()
         }
         
-        summary_path = self.output_dir / 'analysis_summary.json'
+        summary_path = output_dir / 'analysis_summary.json'
         with open(summary_path, 'w', encoding='utf-8') as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
         logger.info(f"  サマリーを保存: {summary_path}")
@@ -494,19 +525,23 @@ def main():
     analyzer = TrendMetricsAnalyzer()
     
     try:
-        summary = analyzer.run_analysis()
+        overall_summary = analyzer.run_analysis()
         
         print("\n" + "=" * 80)
         print("分析サマリー")
         print("=" * 80)
-        print(f"プロジェクト: {summary['project']}")
-        print(f"リリース: {summary['releases']}")
-        print(f"出力先: {summary['output_dir']}")
-        print(f"総Change数: {summary['total_changes']}")
-        print(f"\nグループ別件数:")
-        for group, count in summary['groups_count'].items():
-            print(f"  {group}: {count}")
-        print(f"\n完了時刻: {summary['timestamp']}")
+        print(f"プロジェクト: {analyzer.project_name}")
+        print(f"対象リリース: {analyzer.releases}")
+        
+        for release, summary in overall_summary.items():
+            print(f"\n[Release: {release}]")
+            print(f"  出力先: {summary['output_dir']}")
+            print(f"  総Change数: {summary['total_changes']}")
+            print(f"  グループ別件数:")
+            for group, count in summary['groups_count'].items():
+                print(f"    {group}: {count}")
+                
+        print(f"\n完了時刻: {pd.Timestamp.now().isoformat()}")
         print("=" * 80)
         
     except Exception as e:

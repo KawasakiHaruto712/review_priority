@@ -7,6 +7,7 @@ import logging
 from typing import Dict, List
 
 from src.analysis.trend_metrics.utils.core_reviewer_checker import get_project_core_reviewers, is_core_reviewer
+from src.analysis.trend_metrics.utils.constants import SEPARATE_CORE_REVIEWERS, ANALYSIS_GROUPS
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +27,6 @@ def classify_by_reviewer_type(
     
     Returns:
         List[str]: レビューアタイプのリスト
-                   常に以下の組み合わせで返される：
-                   - 'core_reviewed' または 'core_not_reviewed'
-                   - 'non_core_reviewed' または 'non_core_not_reviewed'
-    
-    重要な注意点:
-    - botのレビューは除外済み（period_extractorで除外）
-    - コアレビューアの判定は、分析対象プロジェクトのコアレビューアリストのみを使用
-    - レビューアのメールアドレスで判定
     """
     reviewer_emails = change.get('reviewers', [])
     
@@ -50,17 +43,24 @@ def classify_by_reviewer_type(
     # レビューアタイプを決定
     result = []
     
-    # コアレビューアの観点
-    if has_core_reviewer:
-        result.append('core_reviewed')
+    if SEPARATE_CORE_REVIEWERS:
+        # コアレビューアの観点
+        if has_core_reviewer:
+            result.append('core_reviewed')
+        else:
+            result.append('core_not_reviewed')
+            
+        # 非コアレビューアの観点
+        if has_non_core_reviewer:
+            result.append('non_core_reviewed')
+        else:
+            result.append('non_core_not_reviewed')
     else:
-        result.append('core_not_reviewed')
-        
-    # 非コアレビューアの観点
-    if has_non_core_reviewer:
-        result.append('non_core_reviewed')
-    else:
-        result.append('non_core_not_reviewed')
+        # 単純にレビューされたかどうか
+        if has_core_reviewer or has_non_core_reviewer:
+            result.append('reviewed')
+        else:
+            result.append('not_reviewed')
     
     return result
 
@@ -72,7 +72,7 @@ def classify_changes_into_groups(
     project_name: str
 ) -> Dict[str, List[Dict]]:
     """
-    前期・後期のChangeを8グループに分類
+    前期・後期のChangeをグループに分類
     
     Args:
         early_changes: 前期のChangeリスト
@@ -81,38 +81,29 @@ def classify_changes_into_groups(
         project_name: プロジェクト名
     
     Returns:
-        Dict[str, List[Dict]]: 8グループに分類されたChange
+        Dict[str, List[Dict]]: 分類されたChange
     """
-    groups = {
-        'early_core_reviewed': [],
-        'early_core_not_reviewed': [],
-        'early_non_core_reviewed': [],
-        'early_non_core_not_reviewed': [],
-        'late_core_reviewed': [],
-        'late_core_not_reviewed': [],
-        'late_non_core_reviewed': [],
-        'late_non_core_not_reviewed': []
-    }
+    # ANALYSIS_GROUPSに基づいて初期化
+    groups = {group: [] for group in ANALYSIS_GROUPS}
     
     # 前期の分類
     for change in early_changes:
         reviewer_types = classify_by_reviewer_type(change, core_reviewers_data, project_name)
         for reviewer_type in reviewer_types:
-            group_key = f'early_{reviewer_type}'
-            groups[group_key].append(change)
-    
+            group_key = f"early_{reviewer_type}"
+            if group_key in groups:
+                groups[group_key].append(change)
+            
     # 後期の分類
     for change in late_changes:
         reviewer_types = classify_by_reviewer_type(change, core_reviewers_data, project_name)
         for reviewer_type in reviewer_types:
-            group_key = f'late_{reviewer_type}'
-            groups[group_key].append(change)
-    
-    # ログ出力
-    logger.info("=" * 60)
-    logger.info("Changeの分類結果:")
-    for group_name, changes in groups.items():
-        logger.info(f"  {group_name}: {len(changes)} 件")
+            group_key = f"late_{reviewer_type}"
+            if group_key in groups:
+                groups[group_key].append(change)
+                
+    return groups
+
     logger.info("=" * 60)
     
     return groups
