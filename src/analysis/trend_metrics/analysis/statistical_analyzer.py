@@ -201,6 +201,80 @@ def calculate_effect_size_cohens_d(
         return None
 
 
+def _parse_group_name(group_name: str) -> Dict[str, str]:
+    """
+    グループ名を要素に分解する
+    
+    Args:
+        group_name: グループ名
+        
+    Returns:
+        Dict[str, str]: 要素の辞書 {'period': ..., 'reviewer_type': ..., 'review_status': ...}
+        解析できない場合はNone
+    """
+    parts = {}
+    
+    # 1. Period (early/late)
+    if group_name.startswith('early_'):
+        parts['period'] = 'early'
+        remainder = group_name[6:] # len('early_')
+    elif group_name.startswith('late_'):
+        parts['period'] = 'late'
+        remainder = group_name[5:] # len('late_')
+    else:
+        return None
+
+    # 2. Reviewer Type (core/non_core/all)
+    if remainder.startswith('non_core_'):
+        parts['reviewer_type'] = 'non_core'
+        remainder = remainder[9:] # len('non_core_')
+    elif remainder.startswith('core_'):
+        parts['reviewer_type'] = 'core'
+        remainder = remainder[5:] # len('core_')
+    else:
+        # SEPARATE_CORE_REVIEWERS=False の場合
+        parts['reviewer_type'] = 'all'
+        
+    # 3. Review Status (reviewed/not_reviewed)
+    if remainder == 'reviewed':
+        parts['review_status'] = 'reviewed'
+    elif remainder == 'not_reviewed':
+        parts['review_status'] = 'not_reviewed'
+    else:
+        return None
+        
+    return parts
+
+
+def _are_comparable_groups(group1: str, group2: str) -> bool:
+    """
+    2つのグループが比較可能か（要素が1つだけ異なるか）を判定する
+    
+    Args:
+        group1: グループ名1
+        group2: グループ名2
+        
+    Returns:
+        bool: 比較可能な場合True
+    """
+    p1 = _parse_group_name(group1)
+    p2 = _parse_group_name(group2)
+    
+    if not p1 or not p2:
+        return False
+        
+    diff_count = 0
+    if p1['period'] != p2['period']:
+        diff_count += 1
+    if p1['reviewer_type'] != p2['reviewer_type']:
+        diff_count += 1
+    if p1['review_status'] != p2['review_status']:
+        diff_count += 1
+    
+    # 1つだけ異なる場合のみ比較対象とする
+    return diff_count == 1
+
+
 def perform_pairwise_tests(
     groups: Dict[str, List[Dict]],
     metric: str,
@@ -208,6 +282,7 @@ def perform_pairwise_tests(
 ) -> Dict[str, Dict[str, Any]]:
     """
     全グループ間でペアワイズ検定を実行
+    ただし、要素が1つだけ異なるペアのみを比較対象とする
     
     Args:
         groups: グループ別のChangeデータ
@@ -216,15 +291,6 @@ def perform_pairwise_tests(
     
     Returns:
         Dict[str, Dict[str, Any]]: ペア別の検定結果
-        例: {
-            'early_core_reviewed_vs_late_core_reviewed': {
-                'p_value': 0.032,
-                'significant': True,
-                'effect_size': 0.45,
-                ...
-            },
-            ...
-        }
     """
     if test_config is None:
         test_config = STATISTICAL_TEST_CONFIG
@@ -235,43 +301,54 @@ def perform_pairwise_tests(
     group_names = list(groups.keys())
     results = {}
     
-    # ペア数を計算（Bonferroni補正用）
-    num_comparisons = len(group_names) * (len(group_names) - 1) // 2
-    adjusted_alpha = alpha / num_comparisons if use_bonferroni else alpha
-    
-    # 全ペア組み合わせで検定
+    # 比較対象となるペアを抽出
+    comparable_pairs = []
     for i, group1_name in enumerate(group_names):
         for group2_name in group_names[i+1:]:
-            # メトリクス値を抽出
-            group1_values = [
-                change.get(metric)
-                for change in groups[group1_name]
-                if change.get(metric) is not None
-            ]
-            group2_values = [
-                change.get(metric)
-                for change in groups[group2_name]
-                if change.get(metric) is not None
-            ]
-            
-            # 検定を実行
-            test_result = mann_whitney_u_test(group1_values, group2_values, adjusted_alpha)
-            
-            # 効果量を計算
-            effect_size = calculate_effect_size_cohens_d(group1_values, group2_values)
-            
-            # 結果を保存
-            pair_key = f"{group1_name}_vs_{group2_name}"
-            results[pair_key] = {
-                **test_result,
-                'effect_size': effect_size,
-                'alpha': adjusted_alpha,
-                'bonferroni_corrected': use_bonferroni,
-                'group1_name': group1_name,
-                'group2_name': group2_name,
-                'group1_n': len(group1_values),
-                'group2_n': len(group2_values)
-            }
+            if _are_comparable_groups(group1_name, group2_name):
+                comparable_pairs.append((group1_name, group2_name))
+    
+    # ペア数を計算（Bonferroni補正用）
+    # 実際に比較を行うペア数で補正する
+    num_comparisons = len(comparable_pairs)
+    if num_comparisons == 0:
+        logger.warning(f"メトリクス {metric} について比較可能なペアが見つかりませんでした")
+        return {}
+        
+    adjusted_alpha = alpha / num_comparisons if use_bonferroni else alpha
+    
+    # 抽出したペアで検定
+    for group1_name, group2_name in comparable_pairs:
+        # メトリクス値を抽出
+        group1_values = [
+            change.get(metric)
+            for change in groups[group1_name]
+            if change.get(metric) is not None
+        ]
+        group2_values = [
+            change.get(metric)
+            for change in groups[group2_name]
+            if change.get(metric) is not None
+        ]
+        
+        # 検定を実行
+        test_result = mann_whitney_u_test(group1_values, group2_values, adjusted_alpha)
+        
+        # 効果量を計算
+        effect_size = calculate_effect_size_cohens_d(group1_values, group2_values)
+        
+        # 結果を保存
+        pair_key = f"{group1_name}_vs_{group2_name}"
+        results[pair_key] = {
+            **test_result,
+            'effect_size': effect_size,
+            'alpha': adjusted_alpha,
+            'bonferroni_corrected': use_bonferroni,
+            'group1_name': group1_name,
+            'group2_name': group2_name,
+            'group1_n': len(group1_values),
+            'group2_n': len(group2_values)
+        }
     
     logger.info(
         f"メトリクス {metric} について {num_comparisons} ペアの検定を完了しました "

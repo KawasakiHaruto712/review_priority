@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple
 import pandas as pd
 
 from src.analysis.trend_metrics.utils.data_loader import is_bot
+import src.analysis.trend_metrics.utils.constants as constants
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,27 @@ def calculate_periods(
         Tuple[Tuple[datetime, datetime], Tuple[datetime, datetime]]: 
             (前期の開始・終了, 後期の開始・終了)
     """
+    if constants.PERIOD_DEFINITION_METHOD == 'split_ratio':
+        # リリース間隔を計算
+        interval = next_release_date - current_release_date
+        # 1区間の長さを計算
+        split_duration = interval / constants.PERIOD_SPLIT_RATIO
+        
+        # 前期: current ~ current + split
+        early_start = current_release_date
+        early_end = current_release_date + split_duration
+        
+        # 後期: next - split ~ next
+        late_start = next_release_date - split_duration
+        late_end = next_release_date
+        
+        logger.info(f"期間定義: リリース間隔分割 (1/{constants.PERIOD_SPLIT_RATIO})")
+        logger.info(f"前期: {early_start} ~ {early_end}")
+        logger.info(f"後期: {late_start} ~ {late_end}")
+        
+        return (early_start, early_end), (late_start, late_end)
+
+    # 固定日数（fixed_days）の場合
     # 前期（early）の計算
     early_config = period_config['early']
     early_start = current_release_date + timedelta(days=early_config['offset_start'])
@@ -40,16 +62,47 @@ def calculate_periods(
     late_start = next_release_date + timedelta(days=late_config['offset_start'])
     late_end = next_release_date + timedelta(days=late_config['offset_end'])
     
+    logger.info(f"期間定義: 固定日数")
     logger.info(f"前期: {early_start} ~ {early_end}")
     logger.info(f"後期: {late_start} ~ {late_end}")
     
     return (early_start, early_end), (late_start, late_end)
 
 
+def get_oldest_major_release_tag(tags: List[str]) -> str:
+    """
+    タグリストから最も古いメジャーリリース（X.0.0）を取得する
+    
+    Args:
+        tags: タグリスト
+        
+    Returns:
+        str: 最も古いメジャーリリースタグ。見つからない場合はNone
+    """
+    major_tags = []
+    for tag in tags:
+        # X.0.0 形式のタグを抽出
+        parts = tag.split('.')
+        if len(parts) == 3 and parts[1] == '0' and parts[2] == '0':
+            try:
+                major = int(parts[0])
+                major_tags.append((major, tag))
+            except ValueError:
+                continue
+    
+    if not major_tags:
+        return None
+        
+    # メジャーバージョンでソートして最小のものを返す
+    major_tags.sort(key=lambda x: x[0])
+    return major_tags[0][1]
+
+
 def extract_changes_in_period(
     all_changes: List[Dict],
     period: Tuple[datetime, datetime],
-    next_release_date: pd.Timestamp = None
+    next_release_date: pd.Timestamp = None,
+    target_version: str = None
 ) -> List[Dict]:
     """
     指定期間内にopenだったChangeを抽出
@@ -64,6 +117,7 @@ def extract_changes_in_period(
         all_changes: 全Changeデータ
         period: 期間（開始日時, 終了日時）
         next_release_date: 次のリリース日（1年以内フィルタ用、および判断日フィルタ用）
+        target_version: 対象のリリースバージョン（例: '12.0.0'）。MERGEDの判定に使用
     
     Returns:
         List[Dict]: 期間内にopenだったChangeリスト
@@ -101,6 +155,16 @@ def extract_changes_in_period(
             close_date = None
             
             if status == 'MERGED':
+                # target_versionが指定されている場合、タグによる判定を行う
+                if target_version:
+                    included_in = change.get('included_in', {})
+                    tags = included_in.get('tags', [])
+                    oldest_tag = get_oldest_major_release_tag(tags)
+                    
+                    # メジャーリリースタグがない、または対象バージョンと異なる場合は除外
+                    if not oldest_tag or oldest_tag != target_version:
+                        continue
+
                 submitted_str = change.get('submitted')
                 if submitted_str:
                     close_date = pd.to_datetime(submitted_str)
