@@ -36,6 +36,10 @@ def load_major_releases_summary(csv_path: Optional[Path] = None) -> pd.DataFrame
     df = pd.read_csv(csv_path)
     df['release_date'] = pd.to_datetime(df['release_date'])
     
+    # カラム名を統一（projectをcomponentにリネーム）
+    if 'project' in df.columns and 'component' not in df.columns:
+        df = df.rename(columns={'project': 'component'})
+    
     logger.info(f"メジャーリリース情報を読み込みました: {len(df)} 件")
     
     return df
