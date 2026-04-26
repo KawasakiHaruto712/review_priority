@@ -1,4 +1,4 @@
-# Models - 予測モデルモジュール
+# Classification Models - 分類モデルモジュール
 
 レビュー優先度予測のための機械学習モデルを提供します。
 
@@ -50,7 +50,7 @@
 #### 使用例
 
 ```python
-from src.analysis.trend_models.models.trend_predictor import TrendPredictor
+from src.analysis.trend_models.classification_models.trend_predictor import TrendPredictor
 import numpy as np
 
 # モデルを作成

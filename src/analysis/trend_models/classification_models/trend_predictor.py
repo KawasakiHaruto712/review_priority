@@ -28,7 +28,7 @@ try:
 except ImportError:
     PYTORCH_AVAILABLE = False
 
-from src.analysis.trend_models.models.base_model import BaseModel
+from src.analysis.trend_models.classification_models.base_model import BaseModel
 from src.analysis.trend_models.utils.constants import (
     MODEL_PARAMS,
     DEFAULT_MODEL_TYPE,
