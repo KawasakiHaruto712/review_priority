@@ -105,6 +105,31 @@ MODEL_PARAMS = {
     }
 }
 
+# ランキングモデルパラメータ
+RANKING_MODEL_PARAMS = {
+    'random_forest_regressor': {
+        'random_state': 42,
+        'n_estimators': 200,
+        'max_depth': 10,
+        'min_samples_split': 5,
+        'min_samples_leaf': 2,
+    },
+    'gradient_boosting_regressor': {
+        'random_state': 42,
+        'n_estimators': 200,
+        'max_depth': 3,
+        'learning_rate': 0.05,
+        'subsample': 0.9,
+    },
+    'svr': {
+        'kernel': 'rbf',
+        'C': 1.0,
+        'epsilon': 0.1,
+        'gamma': 'scale',
+    },
+    'linear_regression': {}
+}
+
 # 特徴量名リスト（16種類）
 FEATURE_NAMES = [
     # Bug Metrics
@@ -153,6 +178,32 @@ MODEL_TYPES = [
 
 # デフォルトモデルタイプ（MODEL_TYPESが空の場合に使用）
 DEFAULT_MODEL_TYPE = 'random_forest'
+
+# タスクモード
+TASK_MODES = ['classification', 'ranking', 'both']
+DEFAULT_TASK_MODE = 'ranking'
+
+# ランキング用設定
+RANKING_MODEL_TYPES = [
+    'random_forest_regressor',
+    'gradient_boosting_regressor',
+    'svr',
+    'linear_regression',
+]
+DEFAULT_RANKING_MODEL_TYPE = 'random_forest_regressor'
+
+RANKING_LABEL_COLUMN_BY_MODE = {
+    'rank': 'review_priority_rank',
+    'rank_pct': 'review_priority_rank_pct',
+    'time': 'time_to_review_seconds',
+}
+DEFAULT_RANKING_LABEL_MODE = 'rank_pct'
+
+RANKING_K_VALUES = [5, 10, 20]
+
+# 日次ランキングデータ生成設定
+RANKING_MIN_QUERY_SIZE = 2
+RANKING_MAX_CENSORING_SECONDS = 31_536_000
 
 # 出力ディレクトリ名
 OUTPUT_DIR_NAME = 'trend_models'

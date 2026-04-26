@@ -28,7 +28,12 @@ except ImportError:
     HAS_SEABORN = False
 
 from src.config.path import DEFAULT_DATA_DIR
-from src.analysis.trend_models.evaluation.evaluator import CVResult, summarize_cv_results
+from src.analysis.trend_models.evaluation.evaluator import (
+    CVResult,
+    RankingCVResult,
+    summarize_cv_results,
+    summarize_ranking_cv_results,
+)
 from src.analysis.trend_models.utils.constants import OUTPUT_DIR_NAME
 
 logger = logging.getLogger(__name__)
@@ -352,6 +357,178 @@ class Visualizer:
         logger.info(f"特徴量重要度グラフを保存: {output_path}")
         return output_path
 
+    def save_rank_detail(
+        self,
+        results: List[RankingCVResult],
+        filename: str = None,
+    ) -> Path:
+        """ランキング評価の詳細結果を CSV 保存する。"""
+        if filename is None:
+            filename = self._generate_filename('rank_detail', 'csv')
+
+        df = pd.DataFrame([result.to_dict() for result in results])
+        if 'feature_importances' in df.columns:
+            df['feature_importances'] = df['feature_importances'].apply(
+                lambda value: json.dumps(value) if value else ''
+            )
+
+        output_path = self.output_dir / filename
+        df.to_csv(output_path, index=False)
+        logger.info(f"ランキング詳細結果を保存: {output_path}")
+        return output_path
+
+    def save_rank_summary(
+        self,
+        results: List[RankingCVResult],
+        filename: str = None,
+    ) -> Path:
+        """ランキング評価サマリーを CSV 保存する。"""
+        if filename is None:
+            filename = self._generate_filename('rank_summary', 'csv')
+
+        summary_df = summarize_ranking_cv_results(results)
+        output_path = self.output_dir / filename
+        summary_df.to_csv(output_path, index=False)
+        logger.info(f"ランキングサマリーを保存: {output_path}")
+        return output_path
+
+    def save_ranking_results_json(
+        self,
+        results: List[RankingCVResult],
+        metadata: Dict[str, Any] = None,
+        filename: str = None,
+    ) -> Path:
+        """ランキング評価結果を JSON 保存する。"""
+        if filename is None:
+            filename = self._generate_filename('ranking_results', 'json')
+
+        summary_df = summarize_ranking_cv_results(results)
+        output_data = {
+            'ranking_validation': {
+                'n_results': len(results),
+                'summary': summary_df.to_dict('records'),
+                'detail': [result.to_dict() for result in results],
+            },
+            'metadata': metadata or {
+                'project': self.project_name,
+                'timestamp': datetime.now().isoformat(),
+            },
+        }
+
+        output_path = self.output_dir / filename
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(output_data, f, indent=2, ensure_ascii=False, default=str)
+
+        logger.info(f"ランキング結果 JSON を保存: {output_path}")
+        return output_path
+
+    def plot_ranking_heatmap(
+        self,
+        results: List[RankingCVResult],
+        metric: str = 'ndcg_at_10',
+        filename: str = None,
+    ) -> Optional[Path]:
+        """ランキング評価のヒートマップを作成する。"""
+        if not HAS_MATPLOTLIB or not HAS_SEABORN:
+            logger.warning("matplotlib または seaborn がインストールされていません")
+            return None
+
+        if filename is None:
+            filename = self._generate_filename(f'rank_heatmap_{metric}', 'png')
+
+        df = pd.DataFrame([result.to_dict() for result in results])
+        if df.empty:
+            return None
+
+        if 'developer_type' in df.columns:
+            df = df[df['developer_type'] == 'all']
+
+        pivot = df.pivot_table(
+            index='eval_period',
+            columns='train_period',
+            values=metric,
+            aggfunc='mean',
+        )
+        if pivot.empty:
+            return None
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        sns.heatmap(
+            pivot,
+            annot=True,
+            fmt='.3f',
+            cmap='YlGnBu',
+            vmin=0,
+            vmax=1,
+            ax=ax,
+        )
+        ax.set_title(f'{metric} - Ranking Evaluation ({self.project_name})')
+        ax.set_xlabel('Train Period')
+        ax.set_ylabel('Eval Period')
+
+        plt.tight_layout()
+        output_path = self.output_dir / 'figures' / filename
+        plt.savefig(output_path, dpi=150)
+        plt.close()
+
+        logger.info(f"ランキングヒートマップを保存: {output_path}")
+        return output_path
+
+    def plot_ranking_ndcg(
+        self,
+        results: List[RankingCVResult],
+        filename: str = None,
+    ) -> Optional[Path]:
+        """NDCG@K の比較棒グラフを作成する。"""
+        if not HAS_MATPLOTLIB:
+            logger.warning("matplotlib がインストールされていません")
+            return None
+
+        if filename is None:
+            filename = self._generate_filename('rank_ndcg', 'png')
+
+        df = pd.DataFrame([result.to_dict() for result in results])
+        if df.empty:
+            return None
+
+        if 'developer_type' in df.columns:
+            df = df[df['developer_type'] == 'all']
+
+        if df.empty:
+            return None
+
+        df['period_combo'] = df['train_period'] + ' → ' + df['eval_period']
+        grouped = df.groupby('period_combo').agg({
+            'ndcg_at_5': 'mean',
+            'ndcg_at_10': 'mean',
+            'ndcg_at_20': 'mean',
+        }).reset_index()
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        x = np.arange(len(grouped))
+        width = 0.25
+
+        ax.bar(x - width, grouped['ndcg_at_5'], width, label='NDCG@5')
+        ax.bar(x, grouped['ndcg_at_10'], width, label='NDCG@10')
+        ax.bar(x + width, grouped['ndcg_at_20'], width, label='NDCG@20')
+
+        ax.set_xlabel('Period Combination (Train → Eval)')
+        ax.set_ylabel('Score')
+        ax.set_title(f'Ranking NDCG Results ({self.project_name})')
+        ax.set_xticks(x)
+        ax.set_xticklabels(grouped['period_combo'], rotation=45, ha='right')
+        ax.set_ylim(0, 1)
+        ax.legend()
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+        plt.tight_layout()
+        output_path = self.output_dir / 'figures' / filename
+        plt.savefig(output_path, dpi=150)
+        plt.close()
+
+        logger.info(f"ランキング NDCG グラフを保存: {output_path}")
+        return output_path
+
 
 def generate_evaluation_report(
     results: List[CVResult],
@@ -416,4 +593,47 @@ def generate_evaluation_report(
             outputs['feature_importance'] = importance_path
     
     logger.info(f"評価レポート生成完了: {len(outputs)}ファイル")
+    return outputs
+
+
+def generate_ranking_report(
+    results: List[RankingCVResult],
+    project_name: str,
+    metadata: Dict[str, Any] = None,
+    output_dir: Path = None,
+    filename_suffix: str = None,
+) -> Dict[str, Path]:
+    """ランキング評価レポートを生成する（CSV, JSON, グラフ）。"""
+    visualizer = Visualizer(
+        output_dir=output_dir,
+        project_name=project_name,
+        filename_suffix=filename_suffix,
+    )
+
+    outputs: Dict[str, Path] = {}
+    outputs['rank_detail'] = visualizer.save_rank_detail(results)
+    outputs['rank_summary'] = visualizer.save_rank_summary(results)
+    outputs['ranking_results_json'] = visualizer.save_ranking_results_json(results, metadata)
+
+    heatmap_path = visualizer.plot_ranking_heatmap(results, metric='ndcg_at_10')
+    if heatmap_path:
+        outputs['rank_heatmap'] = heatmap_path
+
+    ndcg_plot_path = visualizer.plot_ranking_ndcg(results)
+    if ndcg_plot_path:
+        outputs['rank_ndcg'] = ndcg_plot_path
+
+    all_importances = {}
+    for result in results:
+        if result.feature_importances:
+            for feature, importance in result.feature_importances.items():
+                all_importances.setdefault(feature, []).append(importance)
+
+    if all_importances:
+        avg_importances = {feature: np.mean(values) for feature, values in all_importances.items()}
+        importance_path = visualizer.plot_feature_importances(avg_importances)
+        if importance_path:
+            outputs['feature_importance'] = importance_path
+
+    logger.info(f"ランキング評価レポート生成完了: {len(outputs)}ファイル")
     return outputs
