@@ -113,7 +113,7 @@ class TrendModelsAnalyzer:
     結果の保存とレポート生成を行います。
     """
 
-    CACHE_VERSION = 'v1'
+    CACHE_VERSION = 'v2-pointwise'
     
     def __init__(
         self,
@@ -233,8 +233,12 @@ class TrendModelsAnalyzer:
         extra: Optional[Dict[str, Any]] = None,
     ) -> str:
         """実行設定に対応するキャッシュキーを生成する。"""
+        # shared_ranking のロジックが更新された場合に派生キャッシュも自動失効させる
+        from src.analysis.shared_ranking import LOGIC_VERSION as SHARED_RANKING_LOGIC_VERSION
+
         payload: Dict[str, Any] = {
             'cache_version': self.CACHE_VERSION,
+            'shared_ranking_logic_version': SHARED_RANKING_LOGIC_VERSION,
             'stage': stage,
             'project_name': self.project_name,
             'releases': self.releases,

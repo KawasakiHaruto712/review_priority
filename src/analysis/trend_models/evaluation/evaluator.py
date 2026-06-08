@@ -20,7 +20,9 @@ from sklearn.metrics import (
     ndcg_score,
     mean_absolute_error,
     mean_squared_error,
+    r2_score,
 )
+from scipy.stats import spearmanr, kendalltau, pearsonr
 
 from src.analysis.trend_models.classification_models.trend_predictor import TrendPredictor
 from src.analysis.trend_models.ranking.ranking_predictor import RankingPredictor
@@ -104,27 +106,54 @@ class RankingEvaluationResult:
 
 @dataclass
 class RankingCVResult:
-    """ランキング LOO-CV 結果を格納するデータクラス"""
+    """ランキング LOO-CV 結果を格納するデータクラス。
+
+    1 trigger PR = 1 行 設計（shared_ranking@2 以降）では、純粋回帰指標
+    （mae, rmse, r2, spearman, kendall, pearson）を主指標として使う。
+    旧 query 単位指標（ndcg_at_*, mrr, pairwise_accuracy 等）は
+    後方互換のため残しているが、各 query が 1 行のため値は退化する。
+    """
     eval_release: str
     eval_period: str
     train_period: str
     developer_type: str
     target_col: str
+    # --- 純粋回帰指標（pointwise）---
+    mae: float
+    rmse: float
+    r2: float
+    spearman: float
+    kendall: float
+    pearson: float
+    # --- 旧 query 単位指標（退化値、後方互換）---
     ndcg_at_5: float
     ndcg_at_10: float
     ndcg_at_20: float
     mrr: float
-    spearman: float
     pairwise_accuracy: float
     precision: float
     recall: float
     f1: float
-    mae: float
-    rmse: float
+    # --- メタ ---
     n_train: int
     n_eval: int
     n_queries: int
     feature_importances: Optional[Dict[str, float]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class RegressionEvaluationResult:
+    """純粋回帰指標（pointwise）の評価結果。"""
+    n_samples: int
+    mae: float
+    rmse: float
+    r2: float
+    spearman: float
+    kendall: float
+    pearson: float
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -620,6 +649,72 @@ def evaluate_ranking_by_query(
     )
 
 
+def evaluate_regression_pooled(
+    eval_df: pd.DataFrame,
+    target_col: str,
+    pred_target_col: str = 'pred_target',
+) -> RegressionEvaluationResult:
+    """全行プールで純粋回帰指標を計算する。
+
+    1 trigger PR = 1 行 設計（shared_ranking@2 以降）における主指標。
+    MAE, RMSE, R², Spearman, Kendall, Pearson を返す。
+    """
+    if eval_df.empty or target_col not in eval_df.columns or pred_target_col not in eval_df.columns:
+        return RegressionEvaluationResult(
+            n_samples=0, mae=0.0, rmse=0.0, r2=0.0,
+            spearman=0.0, kendall=0.0, pearson=0.0,
+        )
+
+    y_true = eval_df[target_col].to_numpy(dtype=float)
+    y_pred = eval_df[pred_target_col].to_numpy(dtype=float)
+
+    # NaN を除外
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
+
+    n = len(y_true)
+    if n == 0:
+        return RegressionEvaluationResult(
+            n_samples=0, mae=0.0, rmse=0.0, r2=0.0,
+            spearman=0.0, kendall=0.0, pearson=0.0,
+        )
+
+    mae = float(mean_absolute_error(y_true, y_pred))
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+    if n >= 2 and np.var(y_true) > 0:
+        r2 = float(r2_score(y_true, y_pred))
+    else:
+        r2 = 0.0
+
+    # 相関は両方の分散がゼロでなければ計算可能
+    if n >= 2 and np.var(y_true) > 0 and np.var(y_pred) > 0:
+        try:
+            spearman = float(spearmanr(y_true, y_pred).correlation)
+        except Exception:
+            spearman = 0.0
+        try:
+            kendall = float(kendalltau(y_true, y_pred).correlation)
+        except Exception:
+            kendall = 0.0
+        try:
+            pearson = float(pearsonr(y_true, y_pred).statistic)
+        except Exception:
+            pearson = 0.0
+        # NaN ガード
+        if not np.isfinite(spearman): spearman = 0.0
+        if not np.isfinite(kendall):  kendall  = 0.0
+        if not np.isfinite(pearson):  pearson  = 0.0
+    else:
+        spearman = kendall = pearson = 0.0
+
+    return RegressionEvaluationResult(
+        n_samples=n, mae=mae, rmse=rmse, r2=r2,
+        spearman=spearman, kendall=kendall, pearson=pearson,
+    )
+
+
 def leave_one_out_ranking_cv(
     release_data: Dict[str, Dict[str, pd.DataFrame]],
     feature_names: List[str] = None,
@@ -707,7 +802,15 @@ def leave_one_out_ranking_cv(
                     eval_df_filtered['pred_target'] = pred_target
                     eval_df_filtered['pred_score'] = pred_scores
 
-                    evaluation = evaluate_ranking_by_query(
+                    # 純粋回帰指標（pointwise）— 主指標
+                    reg = evaluate_regression_pooled(
+                        eval_df=eval_df_filtered,
+                        target_col=target_col,
+                        pred_target_col='pred_target',
+                    )
+
+                    # 旧 query 単位指標（後方互換、各 query 1 行で退化）
+                    legacy = evaluate_ranking_by_query(
                         eval_df=eval_df_filtered,
                         target_col=target_col,
                         score_col='pred_score',
@@ -724,20 +827,26 @@ def leave_one_out_ranking_cv(
                             train_period=train_period,
                             developer_type=dev_type,
                             target_col=target_col,
-                            ndcg_at_5=evaluation.ndcg_at_5,
-                            ndcg_at_10=evaluation.ndcg_at_10,
-                            ndcg_at_20=evaluation.ndcg_at_20,
-                            mrr=evaluation.mrr,
-                            spearman=evaluation.spearman,
-                            pairwise_accuracy=evaluation.pairwise_accuracy,
-                            precision=evaluation.precision,
-                            recall=evaluation.recall,
-                            f1=evaluation.f1,
-                            mae=evaluation.mae,
-                            rmse=evaluation.rmse,
+                            # 純粋回帰指標
+                            mae=reg.mae,
+                            rmse=reg.rmse,
+                            r2=reg.r2,
+                            spearman=reg.spearman,
+                            kendall=reg.kendall,
+                            pearson=reg.pearson,
+                            # 旧 query 単位指標（退化値）
+                            ndcg_at_5=legacy.ndcg_at_5,
+                            ndcg_at_10=legacy.ndcg_at_10,
+                            ndcg_at_20=legacy.ndcg_at_20,
+                            mrr=legacy.mrr,
+                            pairwise_accuracy=legacy.pairwise_accuracy,
+                            precision=legacy.precision,
+                            recall=legacy.recall,
+                            f1=legacy.f1,
+                            # メタ
                             n_train=len(train_df),
                             n_eval=len(eval_df_filtered),
-                            n_queries=evaluation.n_queries,
+                            n_queries=reg.n_samples,
                             feature_importances=model.get_feature_importance_dict(),
                         )
                     )
@@ -753,38 +862,37 @@ def summarize_ranking_cv_results(results: List[RankingCVResult]) -> pd.DataFrame
             'eval_period',
             'train_period',
             'developer_type',
-            'ndcg_at_5_mean',
-            'ndcg_at_10_mean',
-            'ndcg_at_20_mean',
-            'mrr_mean',
-            'spearman_mean',
-            'pairwise_accuracy_mean',
-            'precision_mean',
-            'recall_mean',
-            'f1_mean',
-            'mae_mean',
-            'rmse_mean',
-            'n_train_mean',
-            'n_eval_mean',
-            'n_queries_mean',
+            # 純粋回帰指標
+            'mae_mean', 'rmse_mean', 'r2_mean',
+            'spearman_mean', 'kendall_mean', 'pearson_mean',
+            # 旧 query 単位指標
+            'ndcg_at_5_mean', 'ndcg_at_10_mean', 'ndcg_at_20_mean',
+            'mrr_mean', 'pairwise_accuracy_mean',
+            'precision_mean', 'recall_mean', 'f1_mean',
+            'n_train_mean', 'n_eval_mean', 'n_queries_mean',
         ])
 
     df = pd.DataFrame([result.to_dict() for result in results])
 
     summary = df.groupby(['eval_period', 'train_period', 'developer_type']).agg({
-        'ndcg_at_5': ['mean', 'std'],
-        'ndcg_at_10': ['mean', 'std'],
-        'ndcg_at_20': ['mean', 'std'],
-        'mrr': ['mean', 'std'],
+        # 純粋回帰指標（主指標）
+        'mae':      ['mean', 'std'],
+        'rmse':     ['mean', 'std'],
+        'r2':       ['mean', 'std'],
         'spearman': ['mean', 'std'],
+        'kendall':  ['mean', 'std'],
+        'pearson':  ['mean', 'std'],
+        # 旧 query 単位指標（後方互換）
+        'ndcg_at_5':         ['mean', 'std'],
+        'ndcg_at_10':        ['mean', 'std'],
+        'ndcg_at_20':        ['mean', 'std'],
+        'mrr':               ['mean', 'std'],
         'pairwise_accuracy': ['mean', 'std'],
-        'precision': ['mean', 'std'],
-        'recall': ['mean', 'std'],
-        'f1': ['mean', 'std'],
-        'mae': ['mean', 'std'],
-        'rmse': ['mean', 'std'],
-        'n_train': 'mean',
-        'n_eval': 'mean',
+        'precision':         ['mean', 'std'],
+        'recall':            ['mean', 'std'],
+        'f1':                ['mean', 'std'],
+        'n_train':  'mean',
+        'n_eval':   'mean',
         'n_queries': 'mean',
     }).round(4)
 
