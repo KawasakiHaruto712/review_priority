@@ -97,6 +97,11 @@ class DailyRegressionAnalyzer:
         # 1. データ準備
         data_context = self._prepare_data()
 
+        # 1.5 shared_ranking キャッシュを全 release 分まとめて事前生成
+        #     （プロセス内ランタイムキャッシュへ載せるためで、_analyze_version の
+        #      初日処理のフリーズを避けるための任意の最適化）
+        self._prebuild_shared_ranking_cache(data_context)
+
         all_version_results = {}
         summary_dir = Path(OUTPUT_DIR_BASE) / "summary"
         summary_dir.mkdir(parents=True, exist_ok=True)
@@ -208,6 +213,49 @@ class DailyRegressionAnalyzer:
             df['owner_email'] = df['owner_email'].fillna('')
         return df
 
+    def _prebuild_shared_ranking_cache(self, data_context: Dict) -> None:
+        """
+        全 version 分の event_ranking_<hash>.pkl をまとめてビルド・preload する。
+
+        既にファイルキャッシュがあればロードのみ。プロセス内ランタイムキャッシュに
+        載せて以降の per-day 抽出を高速化する任意の最適化。
+        """
+        from src.analysis.shared_ranking import load_or_build_event_ranking_dataset
+
+        for version in self.versions:
+            try:
+                start_date, end_date = self._get_analysis_period(version, data_context)
+            except Exception as e:
+                logger.warning(
+                    f"shared_ranking preload スキップ: version={version}, error={e}"
+                )
+                continue
+
+            period_start = datetime(start_date.year, start_date.month, start_date.day)
+            period_end = (
+                datetime(end_date.year, end_date.month, end_date.day)
+                + timedelta(days=1)
+            )
+
+            try:
+                df = load_or_build_event_ranking_dataset(
+                    project_name=self.project_name,
+                    release_version=version,
+                    period_start=period_start,
+                    period_end=period_end,
+                    all_changes=data_context['all_changes'],
+                    all_prs_df=data_context['all_changes_df'],
+                    releases_df=data_context['releases_df'],
+                    bot_names=data_context['bot_names'],
+                )
+                logger.info(
+                    f"shared_ranking preload 完了: version={version}, rows={len(df)}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"shared_ranking preload 失敗: version={version}, error={e}"
+                )
+
     def _get_analysis_period(
         self, version: str, data_context: Dict
     ) -> Tuple[date, date]:
@@ -269,6 +317,10 @@ class DailyRegressionAnalyzer:
         """
         start_date, end_date = self._get_analysis_period(version, data_context)
 
+        # shared_ranking に渡す release 全期間（end_date は包含→次日 00:00 を排他端に）
+        period_start = datetime(start_date.year, start_date.month, start_date.day)
+        period_end = datetime(end_date.year, end_date.month, end_date.day) + timedelta(days=1)
+
         daily_results_list = []
         skipped_dates = []
         total_dates = 0
@@ -287,7 +339,13 @@ class DailyRegressionAnalyzer:
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} days [{elapsed}<{remaining}]",
         ):
             total_dates += 1
-            result = self._analyze_single_day(current_date, data_context)
+            result = self._analyze_single_day(
+                current_date,
+                data_context,
+                release_version=version,
+                period_start=period_start,
+                period_end=period_end,
+            )
 
             if result is None:
                 skipped_dates.append(str(current_date))
@@ -326,7 +384,13 @@ class DailyRegressionAnalyzer:
         }
 
     def _analyze_single_day(
-        self, analysis_date: date, data_context: Dict
+        self,
+        analysis_date: date,
+        data_context: Dict,
+        *,
+        release_version: str,
+        period_start: datetime,
+        period_end: datetime,
     ) -> Optional[Dict]:
         """
         1日分の回帰分析を実行する
@@ -334,15 +398,24 @@ class DailyRegressionAnalyzer:
         Args:
             analysis_date: 分析対象日
             data_context: データコンテキスト
+            release_version: 当該日が属するリリース
+            period_start: shared_ranking キャッシュ用の release 全期間開始
+            period_end: shared_ranking キャッシュ用の release 全期間終了（排他）
 
         Returns:
             Optional[Dict]: 回帰結果の行データ。スキップ時はNone
         """
-        # 1. サンプル抽出
+        # 1. サンプル抽出（shared_ranking 経由でキャッシュを共有）
         samples_df = extract_daily_samples(
             analysis_date=analysis_date,
             all_changes=data_context['all_changes'],
             bot_names=data_context['bot_names'],
+            project_name=self.project_name,
+            release_version=release_version,
+            period_start=period_start,
+            period_end=period_end,
+            releases_df=data_context['releases_df'],
+            all_prs_df=data_context['all_changes_df'],
         )
 
         if len(samples_df) < MIN_SAMPLES:
