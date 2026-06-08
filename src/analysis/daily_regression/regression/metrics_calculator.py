@@ -171,7 +171,16 @@ def calculate_daily_metrics(
     if target_col not in samples_df.columns:
         raise ValueError(f"samples_dfに目的変数カラムがありません: {target_col}")
 
-    # change_number → change辞書のマッピングを構築
+    # 高速パス: shared_ranking 経由のサンプルは 16 特徴量がすでに含まれている。
+    if all(col in samples_df.columns for col in METRIC_COLUMNS):
+        keep_cols = ['change_number', target_col] + METRIC_COLUMNS
+        df = samples_df[keep_cols].copy()
+        # 欠損や elapsed_time == -1.0 の行は除外（旧挙動と整合）
+        df = df.dropna(subset=METRIC_COLUMNS)
+        df = df[df['elapsed_time'] != -1.0]
+        return df.reset_index(drop=True)
+
+    # 互換用フォールバック: 特徴量が無い古い samples_df に対する再計算
     change_map = {}
     for change in all_changes:
         cn = change.get('_number') or change.get('change_number', 0)
