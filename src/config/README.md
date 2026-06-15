@@ -7,7 +7,10 @@
 | ファイル | 説明 |
 |---------|------|
 | `path.py` | ファイルパスとディレクトリの設定管理 |
-| `gerrymanderconfig.ini` | Gerrit接続用の設定ファイル |
+| `release_constants.py` | リリース分析用の定数定義 |
+| `gerrymanderconfig.ini` | Gerrit接続用の設定ファイル（ボット名一覧 `[organization] bots` を含む） |
+| `third_party_ci_accounts.csv` | サードパーティCIアカウント一覧（`name,email`）。ボット判定の補完用 |
+| `extra_bots.txt` | 追加のボット/自動アカウント名（`zuul` / `jenkins` 等。1行1名） |
 
 ## 🔧 主要機能
 
@@ -18,8 +21,22 @@
 
 ### 設定ファイル管理 (`gerrymanderconfig.ini`)
 - **Gerrit接続設定**: APIエンドポイント、認証情報
-- **ボット名設定**: 自動化ツールの識別用設定
+- **ボット名設定**: 自動化ツールの識別用設定（`[organization]` セクションの `bots`）
 - **タイムアウト設定**: API接続のタイムアウト値
+
+### ボット/自動アカウント一覧（3つのソース）
+レビューコメントから「人間のレビュー」を抽出する際に除外する、ボット・CI などの
+自動アカウントを定義します。利用側（例: `priority_distribution` の `data_loader.load_bot_names`）は
+次の **3 つの和集合** を用い、`name` / `username` / `email` を**大文字小文字を区別せず**照合します。
+
+| ソース | 内容 | 由来 |
+|--------|------|------|
+| `gerrymanderconfig.ini` の `[organization] bots` | CI/bot の username（カンマ区切り） | OpenStack Wiki「GerrymanderConfig」由来 |
+| `third_party_ci_accounts.csv` | サードパーティ CI の `name,email`（ヘッダ付き） | サードパーティ CI アカウント一覧から抽出 |
+| `extra_bots.txt` | 上記未登録の補完（`zuul` / `jenkins` 等） | 本リポジトリで追加 |
+
+> 注: これらは当時の表記揺れや新規 CI を完全には網羅しません。取りこぼしは
+> `third_party_ci_accounts.csv` / `extra_bots.txt` への追記で補えます。
 
 ## 📋 設定項目
 
@@ -85,9 +102,12 @@ data/                          # DEFAULT_DATA_DIR
 ├── processed/                 # 処理済みデータ
 └── results/                   # 分析結果
 
-src/config/                    # DEFAULT_CONFIG
-├── gerrymanderconfig.ini      # Gerrit設定
-└── path.py                    # パス定義
+src/config/                        # DEFAULT_CONFIG
+├── path.py                        # パス定義
+├── release_constants.py           # リリース分析用の定数
+├── gerrymanderconfig.ini          # Gerrit設定 + ボット名（[organization] bots）
+├── third_party_ci_accounts.csv    # サードパーティCIアカウント一覧（name,email）
+└── extra_bots.txt                 # 追加のボット/自動アカウント名
 ```
 
 ## ⚙️ 環境変数

@@ -1,0 +1,193 @@
+name,email
+A10 Networks CI,a10-openstack-ci@a10networks.com
+Arista CI,arista-openstack-test@aristanetworks.com
+Big Switch CI,openstack-ci@bigswitch.com
+Blockbridge OpenStack CI,openstack-ci@blockbridge.com
+Brocade ADX CI,
+Brocade BNA CI,
+Brocade LBaaS CI,DL-GRP-ENG-brocade-adx-openstack-ci@Brocade.com
+Brocade Openstack CI,Brocade-Openstack-CI@Brocade.com
+Brocade VDX CI,openstack_gerrit@brocade.com
+Brocade Vyatta CI,DL-GRP-VYATTA-OSS@Brocade.com
+Canonical CI,uosci-testing-bot@ubuntu.com
+Cisco APIC CI,apic.ci@cisco.com
+Cisco CI,cisco-openstack-neutron-ci@cisco.com
+Cisco CI,ml2.ci@cisco.com
+Cisco FWaaS CI,fwaas.ci@cisco.com
+Cisco MDS CI,openstack-mds@cisco.com
+Cisco N1kv CI,n1kv.ci@cisco.com
+Cisco PNR CI,pnr.ci@cisco.com
+Cisco Tail-f CI,tailf.ci@cisco.com
+Cisco UCSM CI,ucsm.ci@cisco.com
+Citrix NetScaler CI,Networking-CloudIntegDev@citrix.com
+Citrix XenServer CI,
+CloudByte CI,openstack-dev@cloudbyte.com
+Coho Data Storage CI,openstack-ci@cohodata.com
+Compass CI,dev-team@syscompass.org
+Coraid CI,coraid-openstack-ci-all@mirantis.com
+DB Datasets CI,turbo-hipster@lists.rcbops.com
+DSS Cinder CI,budik_06@list.ru
+Datera CI,datera-openstack-ci@datera.io
+Dell AFC CI,
+Dell EMC Isilon CI,emc.isilon.ci@emc.com
+Dell Storage CI,openstack-cinder-sc-ci@dell.com
+Dell StorageCenter CI,openstack-cinder@dell.com
+DellEMC PowerFlex CI,emc.scaleio.ci@emc.com
+DellEMC PowerMAX CI,emc.vmax.ci@emc.com
+DellEMC VNX CI,emc.vnx.ci@emc.com
+DellEMC XtremIO CI,emc.xio.ci@emc.com
+Deprecated Citrix CI,
+Deprecated Designate CI,dnsaas@hp.com
+Deprecated Nexenta ISCSI NFS CI,
+Deprecated RAX Heat CI,
+Deprecated Trove CI,reddwarf-jenkins@googlegroups.com
+Docker CI,openstack-ci@docker.com
+EMC ViPR CI,
+Eddie Lin,edlin@us.ibm.com
+Embrane CI,
+FalconStor CI,openstack-ci@falconstor.com
+Fnst OpenStackTest CI,openstack_dev@163.com
+Freescale CI,fslosci@freescale.com
+Fuel Bot,afedorova+watcher@mirantis.com
+Fuel CI,
+Fuel Packaging CI,ci+fuel-packaging@mirantis.com
+Fujitsu C-Fabric CI,fj-lsoft-cfabricci@dl.jp.fujitsu.com
+Fujitsu ETERNUS CI,fj-lsoft-eternusci@dl.jp.fujitsu.com
+Fujitsu ETERNUS FC CI,lsoft-openstackci@ml.css.fujitsu.com
+Fujitsu IRMC CI,lsoft-irmcci@ml.css.fujitsu.com
+Fujitsu ISM CI,fj-lsoft-ismci@dl.jp.fujitsu.com
+Fujitsu iRMC CI,fj-lsoft-irmcci@dl.jp.fujitsu.com
+Fusion-io CI,openstack-cinder-iocontrol@fusionio.com
+GlobalLogic CI,openstack-ci@globallogic.com
+HDS HNAS CI,OpenStackDevelopment@hds.com
+HGST Solutions CI,openstack-ci-team@hgst.com
+HP Octavia Sonar CI,octavia.sonar@gmail.com
+HP Storage CI,hp.cinder.ci@external.groups.hp.com
+HPE AlletraMP iSCSI CI,hp.cinder.blr.ci@groups.ext.hpe.com
+HPE Storage CI,hp.cinder.ci@groups.ext.hpe.com
+Hitachi HBSD CI,OpenStackCI@hds.com
+Hitachi HBSD2 CI,OpenStackCI2@hds.com
+Hitachi Manila HNAS CI,OpenstackManilaCI@hds.com
+Huawei FusionStorage CI,294958976@qq.com
+Huawei ML2 CI,huawei-openstack-ci@huawei.com
+Huawei Manila CI,huawei-manila-ci@huawei.com
+Huawei Volume CI,
+IB IPAM CI,sramanathan@infoblox.com
+IBM DB2 CI,scecd@cn.ibm.com
+IBM DS8000 CI,
+IBM FlashSystem CI,flashci@cn.ibm.com
+IBM FlashSystem CI,ibmfsci@cn.ibm.com
+IBM GPFS CI,rsandeep@in.ibm.com
+IBM NAS CI,sasikeda@in.ibm.com
+IBM PowerKVM CI,kvmpower@linux.vnet.ibm.com
+IBM PowerVC CI,pwrdrvci@cn.ibm.com
+IBM PowerVM CI,powervmci@linux.vnet.ibm.com
+IBM SDN-VE CI,ibmsdnve@us.ibm.com
+IBM SitTools,SitTools@163.com
+IBM Storwize CI,
+IBM Storwize CI,ibmswci@cn.ibm.com
+IBM Testing CI,ibm-ci-master@outlook.com
+IBM XIV CI,ibmxivci@il.ibm.com
+IBM ZVM CI,ibmzvmci@163.com
+IBM xCAT CI,xcat@cn.ibm.com
+INSPUR CI,inspur.ci@inspur.com
+ITRI DISCO CI,itri_cinder@itri.org.tw
+ITRI Peregrine CI,itri_neutron@itri.org.tw
+Intel Experimental CI,openstack-networking-ci@intel.com
+Intel NFV CI,openstack-nfv-ci@intel.com
+Intel PCI CI,otc_cloud@163.com
+Intel PCI CI,pci-ci@intel.com
+Intel RSD CI,rsd_ci@intel.com
+Intel SR-IOV CI,openstack_ci@intel.com
+Intel SR-IOV CI,sriov-ci@intel.com
+Jay Pipes Testing CI,jpipes@mirantis.com
+LVS CI,lbaastest@gmail.com
+Lakshman,lakshminarayanat@vedams.com
+Lenovo LXCA CI,lenovo.lxca.ci@gmail.com
+LenovoStorage FCISCSIDriver CI,shankeri@vedams.com
+Limestone Networks CI,openstack-ci@limestonenetworks.com
+MagnetoDB CI,jenkins-magnetodb@mirantis.com
+Mellanox CI,mlnx-openstack-ci@dev.mellanox.co.il
+Mellanox Cinder CI,
+Metaplugin CI,metaplugintest@gmail.com
+Microsoft Hyper-V CI,hyper-v_ci@microsoft.com
+Microsoft iSCSI CI,
+Midokura CI,
+Mikhail Khodos,mikhail.khodos@nexenta.com
+Murano CI,
+NEC CI,nec-openstack-ci@iaas.jp.nec.com
+NEC Cinder CI,nec-cinder-ci@istorage.jp.nec.com
+NTT system-fault-ci masakari-integration-ci,masakari.integration.test@gmail.com
+NetApp CI,
+NetApp E-Series CI,ng-openstack-eseries-ci@netapp.com
+NetApp NAS CI,
+Networking Spp Integration CI,networking.spp.integration@gmail.com
+Nexenta CI,openstackci@nexenta.com
+Nexenta Edge CI,nexentaedge@gmail.com
+Nexenta iSCSI CI,
+Nicira Bot,
+Nimble Storage CI,openstack-ci@nimblestorage.com
+Nuage CI,nuage-ci@nuagenetworks.net
+OPNFV CI,opnfvci@gmail.com
+One Convergence CI,oc-neutron-test@oneconvergence.com
+Open Attic CI,community@open-attic.org
+Open-E CI,open-e-ci-joviandss@open-e.com
+OpenContrail CI,
+OpenDaylight CI,odl-openstack@opendaylight.org
+OpenvStorage CI - unmaintained,eduard.matei@cloudfounders.com
+Oracle ZFSSA CI,
+PLUMgrid CI,plumgrid-ci-os@plumgrid.com
+Phazr.IO CI,phazr-ci@phazr.io
+ProphetStor CI,
+ProphetStor CI,prophetstor.ci@prophetstor.com
+Puppet CI,puppet.openstack.ci@gmail.com
+Puppet Ceph CI,
+Pure Storage CI,
+Quobyte CI,openstack-ci-external@quobyte.com
+RDO Third Party CI,dmsimard+rdothirdparty@redhat.com
+Rackspace CloudDNS CI,raxclouddns+gerritci@gmail.com
+Rackspace GolangSwift CI,mike+goci@weirdlooking.com
+Radware CI,openstack3rdpartytesting@radware.com
+Red Hat CI,redhatci@redhat.com
+RedHat RDO CI,rdo-ci-admins@redhat.com
+RedHat RDO Downstream CI,rdo-ci-admins+downstream@redhat.com
+Ryu CI,ryu-openstack-review@lists.sourceforge.net
+SUSE Cloud CI,bwiedemann+openstackgerritci@suse.de
+SUSE Cloud CI,dmueller+suse-cloud-ci@suse.de
+Sacharya CI,info@sacharya.com
+Sahara Hadoop Cluster CI,elastic-hadoop-ci@mirantis.com
+SandStone Storage CI,yangziguan@szsandstone.com
+Scality CI,openstack-ci@scality.com
+ZadaraStorage VPSA CI,openstack-dev@zadarastorage.com
+SmokeStack CI,
+Snabb NFV CI,openstack-ci@snabb.co
+SolidFire CI,openstack.ci@solidfire.com
+StorPool OpenStack CI,openstack-ci@storpool.com
+SwiftStack Cluster CI,openstack-ci@swiftstack.com
+Synology DSM CI,cinder@synology.com
+THSTACK CI,openstack-ci@thstack.com
+Tail-f NCS CI,tobbe@tail-f.com
+Tegile Storage CI,openstack.ci@tegile.com
+Tintri CI,openstack-ci@tintri.com
+UFCG OneView CI,ufcg-oneview-ci@lsd.ufcg.edu.br
+VMWare Congress CI,congressci@gmail.com
+VMware NSX CI,
+Vanilla Bot,vanillabot@vanillastack.org
+Vedams DotHillDriver CI,vedams_dothill_ci@vedams.com
+Vedams-HPMSA FCISCSIDriver CI,vedams_hp_ci@vedams.com
+Vedams-LenovoStorage FCISCSI CI,vedams_lenovo_ci@vedams.com
+Violin Memory V6000 CI,vmem-openstack-ci@vmem.com
+Virtuozzo CI,virtuozzo6-ci@virtuozzo.com
+Virtuozzo Storage CI,vzstorage-ci@virtuozzo.com
+Wherenow.org CI,jenkins@wherenow.org
+X-IO ISE CI,
+X-IO OpenStack CI,openstack-ci@x-io.com
+XP Cinder CI,xp.cinder.ci@groups.ext.hpe.com
+XenProject CI,openstack-ci@xenproject.org
+Zadara Openstack CI,openstack-dev@zadara.com
+nexenta-iscsi-ci,sbigelow92@gmail.com
+oracle-zfssa-ci,OPENSTCK-CI-TEST_US_GRP@oracle.com
+vArmour CI,openstack-ci-test@varmour.com
+venkata krishnat,venkatakrishnat@vedams.com
+vmwareapi CI run by SAP,openstack-ci@sap.com
+z Systems KVM,zkvm-ci@linux.vnet.ibm.com
