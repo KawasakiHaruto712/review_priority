@@ -26,7 +26,7 @@
 
 | ファイル | 説明 |
 |---------|------|
-| `main.py` | エントリポイント。全プロジェクト×全メトリクスを実行 |
+| `main.py` | エントリポイント。全プロジェクト×全メトリクスを実行 | 
 | `utils/constants.py` | **設定の入口**（対象プロジェクト・リリース・各種パラメータ） |
 | `utils/data_loader.py` | ボット名の読み込み・人間/本人判定（Change/リリース日の読込は `common.data_loader` を再エクスポート） |
 | `utils/time_utils.py` | `common.time_utils` の再エクスポート（後方互換） |

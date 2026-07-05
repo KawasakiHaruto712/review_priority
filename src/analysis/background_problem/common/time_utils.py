@@ -40,6 +40,22 @@ def to_unit(delta: timedelta, unit: str = "hours") -> float:
     raise ValueError(f"未対応の単位です: {unit}（hours / days / seconds のいずれか）")
 
 
+def daily_grid(start: datetime, end: datetime, step_days: int = 1) -> list[datetime]:
+    """[start, end] を覆う毎日 0:00 の計測点グリッド（step_days 刻み）を返す。
+
+    計測点は「Change が投稿された時刻」ではなく毎日 0 時の定点にする
+    （preliminary_analysis/concept_drift_existence と同じ方式）。
+    """
+    t0 = datetime(start.year, start.month, start.day)  # 0 時に正規化
+    grid: list[datetime] = []
+    t = t0
+    while t <= end:
+        if t >= start:
+            grid.append(t)
+        t += timedelta(days=step_days)
+    return grid
+
+
 def relative_x(
     t: datetime,
     cycle_start: datetime,

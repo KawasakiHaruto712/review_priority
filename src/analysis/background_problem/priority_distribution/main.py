@@ -109,8 +109,9 @@ def analyze_project_metric(project: str, metric_name: str, changes, bot_names, r
             logger.warning(f"スキップ [{project} {version}]: {e}")
             continue
 
-        # 計測点（サイクル内の投稿）に加え、その lookback 期間さかのぼった投稿も
-        # アクティブ集合の候補になるため、候補プールは [cycle_start - lookback, cycle_end]。
+        # 計測点は毎日 0 時の定点グリッド（build_distribution 側で生成）。各 T の
+        # アクティブ集合の候補になるのは lookback さかのぼった投稿なので、
+        # 候補プールは [cycle_start - lookback, cycle_end]。
         lookback = pd.Timedelta(days=constants.LOOKBACK_DAYS)
         pool_start = cycle_start - lookback
         cyc_changes = []
@@ -143,6 +144,7 @@ def analyze_project_metric(project: str, metric_name: str, changes, bot_names, r
             lookback_days=constants.LOOKBACK_DAYS,
             percentiles=constants.PERCENTILES,
             release_version=version,
+            step_days=constants.MEASUREMENT_STEP_DAYS,
         )
 
         meta = {
