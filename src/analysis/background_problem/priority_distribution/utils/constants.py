@@ -24,6 +24,7 @@ OUTPUT_ROOT = DEFAULT_DATA_DIR / "analysis" / "background_problem" / "priority_d
 # version は major_releases_summary.csv の version と一致させる。
 TARGET_PROJECTS = {
     "nova": [
+        # "2012.2.0", "2013.1.0", "2013.2.0", "2014.1.0", "2014.2.0", 
         "2015.1.0",
         "12.0.0", "13.0.0", "14.0.0", "15.0.0", "16.0.0", "17.0.0", "18.0.0", "19.0.0", "20.0.0",
     ],
@@ -39,6 +40,11 @@ OUTLIER_METHOD = "iqr"        # "iqr" | "percentile" | "none"
 OUTLIER_IQR_K = 1.5           # フェンス: [Q1 - K*IQR, Q3 + K*IQR] の外を除外（両側）
 OUTLIER_PERCENTILE = 99.0     # method="percentile" のとき、下位(100-p)%/上位(100-p)%を除外
 # 各指標の screening 値が未定義の Change（放置＝レビュー無し / 未決）は常に除外する。
+
+# ── 計測点 T（毎日 0 時の定点グリッド） ──────────────────────
+# 計測点 T は「Change が投稿された時刻」ではなく毎日 0 時の定点にする
+# （preliminary_analysis/concept_drift_existence と同じ方式）。MEASUREMENT_STEP_DAYS=1 なら毎日。
+MEASUREMENT_STEP_DAYS = 1
 
 # ── アクティブ集合（各計測点 T で対象にする Change の範囲） ──────────
 # 計測点 T で「T - LOOKBACK_DAYS <= created <= T < decision_time」を満たす

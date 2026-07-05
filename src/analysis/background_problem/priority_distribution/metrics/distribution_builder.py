@@ -18,6 +18,7 @@ from typing import Optional
 import numpy as np
 
 from src.analysis.background_problem.priority_distribution.utils.time_utils import (
+    daily_grid,
     relative_x,
     to_unit,
 )
@@ -57,12 +58,14 @@ def build_distribution(
     lookback_days: Optional[float] = 365,
     percentiles: Optional[list] = None,
     release_version: Optional[str] = None,
+    step_days: int = 1,
 ) -> list[DistributionPoint]:
     """計測点ごとの DistributionPoint 列を返す。
 
     records は drop_unfinished 済み（decision_time が確定している）前提。
 
-    - 計測点 T = サイクル `[cycle_start, cycle_end]` 内に投稿された Change の `created`。
+    - 計測点 T = サイクル `[cycle_start, cycle_end]` を覆う毎日 0 時の定点グリッド
+      （`step_days` 刻み。Change の投稿時刻ではない。§2.4）。
     - アクティブ集合 = `T - lookback <= created <= T < decision_time`
       （T から lookback_days 以内に投稿され、かつ T 時点で Open な Change）。
       `lookback_days=None` なら下限なし（投稿済みかつ Open のすべて）。
@@ -76,14 +79,8 @@ def build_distribution(
     # 計測点を出力する実効最小件数（分位線の本数を下回らせない）
     effective_min = max(min_active, len(percentiles))
 
-    # 計測点 = サイクル内に投稿された Change の created（重複は 1 点に集約）
-    measurement_points = sorted(
-        {
-            r.created
-            for r in records
-            if r.created is not None and cycle_start <= r.created <= cycle_end
-        }
-    )
+    # 計測点 = サイクルを覆う毎日 0 時の定点グリッド（投稿時刻ではない）
+    measurement_points = daily_grid(cycle_start, cycle_end, step_days)
 
     points: list[DistributionPoint] = []
     for t in measurement_points:
