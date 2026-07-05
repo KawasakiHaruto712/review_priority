@@ -8,16 +8,18 @@ endpoints:
     class: ChangesEndpoint
     priority: 1  # 実行優先度（低い方が先）
     
-  # 変更詳細取得
+  # 変更詳細取得（/detail を Change 1件ごとに叩く=約3.7万リクエストで非常に重い。
+  # 提供する messages/owner/labels 等は changes 一覧クエリの MESSAGES+DETAILED_ACCOUNTS+
+  # ALL_REVISIONS で既に取得済みなので、今回の分析には冗長。普段は無効。）
   change_detail:
-    enabled: true
+    enabled: false
     class: ChangeDetailEndpoint
     priority: 2
     depends_on: [changes]  # 依存関係
 
-  # Included In取得
+  # Included In取得（解析側で未使用。1件ごとに叩くと約3.7万リクエストで重いだけなので無効）
   included_in:
-    enabled: true
+    enabled: false
     class: IncludedInEndpoint
     priority: 3
     depends_on: [change_detail]
@@ -45,16 +47,17 @@ endpoints:
     filter:
       language: Python  # Pythonファイルのみ
     
-  # ファイル差分取得
+  # ファイル差分取得（各 revision・各ファイルの実 diff。diff を学習に使うため有効化。
+  # 取得量は collection.revision_scope で調整: "first"=投稿時点のみ / "all"=全 revision）
   file_diff:
-    enabled: false
+    enabled: true
     class: FileDiffEndpoint
     priority: 4
     depends_on: [change_detail]
-    
-  # コミット情報取得
+
+  # コミット情報取得（revision = patch set 単位の巡回。diff ループの起動に必要）
   commit:
-    enabled: false
+    enabled: true
     class: CommitEndpoint
     priority: 5
     depends_on: [change_detail]
@@ -77,6 +80,14 @@ collection:
   # 期間設定（constants.pyから読み込み可能）
   start_date: null  # nullの場合はconstants.START_DATEを使用
   end_date: null    # nullの場合はconstants.END_DATEを使用
+
+  # diff/commit を取る revision の範囲: "all"=全 revision / "first"=投稿時点(patch set 1)のみ。
+  # commit/file_diff を有効化したときだけ効く。投稿時点だけなら取得量が激減する。
+  revision_scope: first
+
+  # 途中保存の粒度（年）。N=N年ごとにその範囲を取得→即保存（クラッシュ耐性＋レジューム）。
+  # null / 0 なら分割せず最後に一括保存（従来動作）。
+  checkpoint_years: 1
 
 # リトライ設定
 retry:

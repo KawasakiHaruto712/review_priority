@@ -23,6 +23,8 @@ except ImportError:
     from src.config import path as app_path
     from src.utils import constants
 
+from src.collectors.storage.collection_manifest import CollectionManifest
+
 # --- ロガー設定 ---
 logging.basicConfig(
     level=logging.INFO,
@@ -174,8 +176,17 @@ class ReleaseCollector:
                         "release_notes_url": data.get("release-notes")
                     })
 
+        # 収集マニフェスト（どのコンポーネントを・何件・全部日付が取れたかを後から確認できるよう記録）
+        manifest = CollectionManifest(
+            self.data_dir, collector="releases",
+            requested={"components": sorted(self.target_components)},
+        )
+
         if not all_releases:
             logging.warning("リリース情報が1件も収集されませんでした。")
+            for component in sorted(self.target_components):
+                manifest.record_component(component, status="failed", saved=0)
+            manifest.finish("completed")
             return
 
         df = pd.DataFrame(all_releases)
@@ -185,6 +196,20 @@ class ReleaseCollector:
         df.to_csv(self.output_path, index=False, encoding='utf-8')
         logging.info(f"計 {len(df)} 件のリリース情報を収集し、CSVファイルに保存しました。")
         logging.info(f"出力先: {self.output_path}")
+
+        # コンポーネントごとに「何件・日付欠損(skipped)・最古/最新」を記録
+        for component in sorted(self.target_components):
+            sub = df[df["component"] == component]
+            dates = sub["release_date"].dropna()
+            missing = int(sub["release_date"].isna().sum())
+            manifest.record_component(
+                component,
+                status=("completed" if len(sub) else "failed"),
+                saved=int(len(sub)), skipped=missing,  # skipped = リリース日が取れなかった版数
+                earliest=(dates.min() if not dates.empty else None),
+                latest=(dates.max() if not dates.empty else None),
+            )
+        manifest.finish("completed")
 
 
 if __name__ == "__main__":

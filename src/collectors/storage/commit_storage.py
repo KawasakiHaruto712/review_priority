@@ -16,10 +16,29 @@ logger = logging.getLogger(__name__)
 class CommitStorage(BaseStorage):
     """コミットデータストレージクラス"""
     
+    def save_commits(self, component: str, data: List[Dict[str, Any]]) -> int:
+        """個別の commit_<num>_<rev>.json を書き出す（サマリーは書かない）。途中保存用。件数を返す。"""
+        component_dir = self.output_dir / component / "commits"
+        component_dir.mkdir(parents=True, exist_ok=True)
+        for commit in data:
+            change_number = commit.get("change_number")
+            revision_id = commit.get("revision_id", "")
+            if change_number:
+                short_revision_id = revision_id[:8] if len(revision_id) > 8 else revision_id
+                commit_file = component_dir / f"commit_{change_number}_{short_revision_id}.json"
+                self.save_json(commit_file, commit)
+        return len(data)
+
+    def write_summary(self, component: str, total_commits: int):
+        """commits の summary.json を書き出す（件数のみ。途中保存の最後に呼ぶ）。"""
+        component_dir = self.output_dir / component / "commits"
+        component_dir.mkdir(parents=True, exist_ok=True)
+        self.save_json(component_dir / "summary.json", {"total_commits": total_commits})
+
     def save_component_data(self, component: str, data: List[Dict[str, Any]]):
         """
         コンポーネントのコミットデータを保存
-        
+
         Args:
             component: コンポーネント名
             data: コミットデータのリスト
@@ -27,7 +46,7 @@ class CommitStorage(BaseStorage):
         # コンポーネントディレクトリの作成
         component_dir = self.output_dir / component / "commits"
         component_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # 個別のコミットデータを保存
         for commit in data:
             change_number = commit.get("change_number")
@@ -36,10 +55,10 @@ class CommitStorage(BaseStorage):
                 short_revision_id = revision_id[:8] if len(revision_id) > 8 else revision_id
                 commit_file = component_dir / f"commit_{change_number}_{short_revision_id}.json"
                 self.save_json(commit_file, commit)
-        
+
         # サマリーデータを保存
         self._save_summary(component, data)
-        
+
         logger.info(f"{component}: {len(data)}件のコミットデータを保存しました")
     
     def _save_summary(self, component: str, commits: List[Dict[str, Any]]):
