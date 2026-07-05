@@ -201,12 +201,15 @@ def calculate_predictive_target_ticket_count(
     analysis_time: datetime
 ) -> int:
     """
-    指定された分析時点においてオープンであるChangeの数を算出
-    オープンとは、分析時点までに作成され、かつ分析時点までにマージされていないChangeを指す
+    指定された分析時点においてオープン（まだ決着していない）であるChangeの数を算出
+
+    オープンとは、分析時点までに作成され、かつ分析時点までに **決着（マージまたは放棄）していない**
+    Changeを指す。マージだけでなく放棄(ABANDONED)も「閉じた」とみなす。
 
     Args:
         all_prs_df (pd.DataFrame): 全てのChange履歴を含むDataFrame。
-                                   'created', 'merged' (datetime型) カラムが必要です。
+                                   'created', 'decision_time' (datetime型。マージ/放棄の時刻。
+                                   未決は NaT) カラムが必要です。
         analysis_time (datetime): メトリクスを計算する基準となる分析時点の時刻。
 
     Returns:
@@ -215,12 +218,11 @@ def calculate_predictive_target_ticket_count(
     # 分析時点までに作成されたChange
     created_by_analysis_time = all_prs_df[all_prs_df['created'] <= analysis_time]
 
-    # その中で、分析時点までにマージされていないChange
-    # 'merged' がNaNである（まだマージされていない）か、
-    # 'merged' が analysis_time より後である（分析時点ではまだマージされていない）
+    # その中で、分析時点までに決着（マージまたは放棄）していないChange
+    # 'decision_time' が NaT（まだ未決）か、'decision_time' が analysis_time より後（その時点では未決）
     open_changes_at_analysis_time = created_by_analysis_time[
-        (created_by_analysis_time['merged'].isna()) | 
-        (created_by_analysis_time['merged'] > analysis_time)
+        (created_by_analysis_time['decision_time'].isna()) |
+        (created_by_analysis_time['decision_time'] > analysis_time)
     ]
 
     return len(open_changes_at_analysis_time)
