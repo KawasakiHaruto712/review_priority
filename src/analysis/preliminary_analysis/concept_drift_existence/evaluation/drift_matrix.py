@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from src.analysis.preliminary_analysis.concept_drift_existence.dataset import splitter
-from src.analysis.preliminary_analysis.concept_drift_existence.evaluation import pooled_metrics, ranking_metrics
+from src.analysis.preliminary_analysis.concept_drift_existence.evaluation import (
+    binary_metrics, pooled_metrics, ranking_metrics)
 from src.analysis.preliminary_analysis.concept_drift_existence.model import regressor
 from src.analysis.preliminary_analysis.concept_drift_existence.utils import constants
 
@@ -34,9 +35,9 @@ class MatrixResult:
     per_repeat: dict = field(default_factory=dict)  # (d, p) -> 各反復の代表値リスト
 
 
-def _xy(records):
+def _xy(records, target: str = "time_to_next_review"):
     x = np.array([r.features for r in records], dtype=float)
-    y = np.array([r.label for r in records], dtype=float)
+    y = np.array([r.labels[target] for r in records], dtype=float)
     return x, y
 
 
@@ -94,13 +95,25 @@ def _repeat_value(groups: dict, metric_names, ndcg_n, t_agg, buckets) -> dict:
     return out
 
 
+def _repeat_value_binary(groups: dict, metric_names) -> dict:
+    """1反復ぶんの二値分類指標（§2.8.5）。全レコードをプールして算出（y_true=0/1, y_pred=正例確率）。"""
+    yt = np.array([a for pairs in groups.values() for a, _ in pairs], dtype=float)
+    yp = np.array([b for pairs in groups.values() for _, b in pairs], dtype=float)
+    if yt.size == 0:
+        return {m: np.nan for m in metric_names}
+    return binary_metrics.compute(yt, yp, metric_names)
+
+
 def compute_matrices(rows, *, metric_names=None, n_repeats=None, t_agg=None,
-                     repeat_agg=None, ndcg_n=None, bin_count=None, buckets=None) -> dict[str, MatrixResult]:
+                     repeat_agg=None, ndcg_n=None, bin_count=None, buckets=None,
+                     objective="regression") -> dict[str, MatrixResult]:
     """予測行から全指標の四角行列を作る（実行時・再計算の両方で使う単一経路）。
 
-    rows: (d, p, repeat, t, change_id, y_true, y_pred) のタプル列。
-        p・d は 1 始まり、t は計測点（同一 T で同じ値ならキーは何でもよい）、値は hours 単位。
-    指標は系統で集約が違う（§2.8.4）: 順位は per-T 集約、回帰誤差・分類は評価ビン内プール。
+    rows: (d, p, repeat, t, change_id, y_true, y_pred) のタプル列（p・d は 1 始まり）。
+        objective="regression" のとき y_true/y_pred は hours、"classification" のとき y_true=0/1・y_pred=正例確率。
+    指標の集約は目的で分岐する（§2.8）:
+        regression → 順位は per-T 集約、回帰誤差・分類（バケツ）は評価ビン内プール。
+        classification → 二値分類指標を評価ビン内プールで算出（§2.8.5）。
     この関数だけが「予測 → 指標 → 行列（2段集約・IQR・per_repeat）」を担うので、
     実行時のメモリ上予測でも、保存済み predictions.csv.gz の読み直しでも同じ結果になる。
     """
@@ -125,7 +138,10 @@ def compute_matrices(rows, *, metric_names=None, n_repeats=None, t_agg=None,
     for (d, p), reps_map in cells.items():
         reps = {m: [] for m in metric_names}
         for _k, groups in reps_map.items():
-            vals = _repeat_value(groups, metric_names, ndcg_n, t_agg, buckets)
+            if objective == "classification":
+                vals = _repeat_value_binary(groups, metric_names)
+            else:
+                vals = _repeat_value(groups, metric_names, ndcg_n, t_agg, buckets)
             for m in metric_names:
                 if not np.isnan(vals[m]):
                     reps[m].append(vals[m])
@@ -139,14 +155,17 @@ def compute_matrices(rows, *, metric_names=None, n_repeats=None, t_agg=None,
     return results
 
 
-def build_matrices(bins: dict, model_name: str, *, metric_names=None, n_train=None, n_eval=None,
+def build_matrices(bins: dict, model_name: str, *, target="time_to_next_review",
+                   objective="regression", metric_names=None, n_train=None, n_eval=None,
                    n_repeats=None, t_agg=None, repeat_agg=None, ndcg_n=None,
                    bin_count=None, base_seed=None, pred_sink=None) -> dict[str, MatrixResult]:
-    """指定モデルで全指標の四角行列をまとめて構築する。
+    """指定モデル・目的変数で全指標の四角行列をまとめて構築する。
 
+    target: 目的変数名（各レコードの labels[target] を使う。その目的変数の値が付いた Change のみ対象）。
+    objective: "regression"（time_to_next_review 等）/ "classification"（decision_result 等）。
     pred_sink: list を渡すと、各評価レコードの予測を
-        (d, p, repeat, t(ISO日付), change_id, y_true(hours), y_pred(hours)) として追記する。
-        後から再学習なしで別指標を計算し直すための生データ（None なら保存しない）。
+        (d, p, repeat, t(ISO日付), change_id, y_true, y_pred) として追記する。
+        regression では y_true/y_pred は hours、classification では y_true=0/1・y_pred=正例確率。
     """
     metric_names = metric_names or constants.ENABLED_METRICS
     n_train = constants.N_TRAIN if n_train is None else n_train
@@ -158,34 +177,40 @@ def build_matrices(bins: dict, model_name: str, *, metric_names=None, n_train=No
     bin_count = constants.BIN_COUNT if bin_count is None else bin_count
     base_seed = constants.RANDOM_SEED if base_seed is None else base_seed
 
+    log_tf = (objective == "regression") and constants.LABEL_LOG_TRANSFORM
+    # この目的変数のラベルが付いたレコードだけを対象にする（打ち切りは除外済み）。
+    bins_f = {b: [r for r in recs if target in r.labels] for b, recs in bins.items()}
+
     # 1) 学習・予測して生の予測行を作る。2) その行から compute_matrices で指標化する（単一経路）。
     rows = []
     for p in range(bin_count):            # 位置（当該リリース内ビン）
         for d in range(1, bin_count + 1):  # 距離（滞留期間）
             i = p - d                      # 学習側ビン（前リリースに及びうる）
             for k in range(n_repeats):
-                out = splitter.split_train_eval(bins, i, p, n_train, n_eval, base_seed + k)
+                out = splitter.split_train_eval(bins_f, i, p, n_train, n_eval, base_seed + k)
                 if out is None:
                     continue
                 train_recs, eval_recs = out
                 if not train_recs or not eval_recs:
                     continue
-                x_tr, y_tr = _xy(train_recs)
-                x_ev, _ = _xy(eval_recs)
-                # heavy-tail 対策: 学習 target を log1p 変換（評価は順位ベースで log は単調＝順位不変）。
-                if constants.LABEL_LOG_TRANSFORM:
+                x_tr, y_tr = _xy(train_recs, target)
+                x_ev, y_ev = _xy(eval_recs, target)
+                # heavy-tail 対策: 回帰は学習 target を log1p 変換（順位は単調＝不変）。分類は変換しない。
+                if log_tf:
                     y_tr = np.log1p(y_tr)
                 # 重複観測の偏り是正: 各行に 1/(その Change の重複数) を与える（合計重みが Change ごとに 1）。§2.6
                 w_tr = _change_balanced_weights(train_recs) if constants.CHANGE_BALANCED_WEIGHT else None
-                model = regressor.train(x_tr, y_tr, model_name, base_seed + k, sample_weight=w_tr)
-                y_pred = regressor.predict(model, x_ev)
-                # 予測は hours 単位に戻して保持（log は順位不変なので順位指標も同じ結果）。
-                yp_hours = np.expm1(y_pred) if constants.LABEL_LOG_TRANSFORM else y_pred
-                for r, ypd in zip(eval_recs, yp_hours):
+                model = regressor.train(x_tr, y_tr, model_name, base_seed + k,
+                                        sample_weight=w_tr, objective=objective)
+                y_pred = regressor.predict(model, x_ev, objective=objective)
+                if log_tf:
+                    y_pred = np.expm1(y_pred)  # 回帰予測を hours に戻す（分類は確率のまま）
+                for r, yt_i, ypd in zip(eval_recs, y_ev, y_pred):
                     rows.append((d, p + 1, k, r.t.date().isoformat(),
-                                 r.change_id, float(r.label), float(ypd)))
+                                 r.change_id, float(yt_i), float(ypd)))
 
     if pred_sink is not None:
         pred_sink.extend(rows)
     return compute_matrices(rows, metric_names=metric_names, n_repeats=n_repeats,
-                            t_agg=t_agg, repeat_agg=repeat_agg, ndcg_n=ndcg_n, bin_count=bin_count)
+                            t_agg=t_agg, repeat_agg=repeat_agg, ndcg_n=ndcg_n,
+                            bin_count=bin_count, objective=objective)

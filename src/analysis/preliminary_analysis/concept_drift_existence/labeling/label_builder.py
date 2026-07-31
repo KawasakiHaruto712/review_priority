@@ -21,7 +21,7 @@ def _to_unit(seconds: float, unit: str) -> float:
 def time_to_next_review(change: dict, t: datetime, bot_names: set[str]) -> float | None:
     """T から次の人間レビューまでの時間（DURATION_UNIT）。次が無ければ None（打ち切り）。
 
-    観測窓は呼び出し側で渡す change の messages 全体（収集末尾まで）に依存する（§2.3）。
+    観測窓は呼び出し側で渡す change の messages 全体（収集末尾まで）に依存する（§2.3.1）。
     """
     nxt = review_utils.next_human_review_after(change, t, bot_names)
     if nxt is None:
@@ -29,9 +29,24 @@ def time_to_next_review(change: dict, t: datetime, bot_names: set[str]) -> float
     return _to_unit((nxt - t).total_seconds(), constants.DURATION_UNIT)
 
 
+def decision_result(change: dict, t: datetime, bot_names: set[str]) -> float | None:
+    """その Change の最終的な決着結果（2値分類のラベル。§2.3.2）。
+
+    MERGED なら 1.0（merge）、ABANDONED なら 0.0（reject）。まだ決着していない（NEW 等）は None（打ち切り）。
+    最終結果は計測時点 T に依存しないので、同一 Change の全 T で同じ値になる（bot_names/t は未使用）。
+    """
+    status = change.get("status")
+    if status == "MERGED":
+        return 1.0
+    if status == "ABANDONED":
+        return 0.0
+    return None
+
+
 # ラベル registry（名前 -> 計算関数）。
 LABEL_REGISTRY = {
     "time_to_next_review": time_to_next_review,
+    "decision_result": decision_result,
 }
 
 
