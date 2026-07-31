@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager
 import numpy as np
 
-from src.analysis.preliminary_analysis.concept_drift_existence.evaluation.drift_matrix import MatrixResult
+from src.analysis.preliminary_analysis.concept_drift_detection.evaluation.drift_matrix import MatrixResult
 
 logger = logging.getLogger(__name__)
 

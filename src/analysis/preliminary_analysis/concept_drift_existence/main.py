@@ -5,10 +5,12 @@
 
 モデルを最外ループにして「1 モデルで全リリース → 次モデル」で回す。レコード/ビンはモデル非依存なので
 リリースごとに 1 回だけ作って（特徴量計算はここで一度）モデル間で使い回す。
-出力は <project>/<model>/<version>/<metric>/ と <project>/<model>/summary/<metric>/。
+出力は <project>/<model>/<version>/<target>/<metric>/ と <project>/<model>/summary/<target>/<metric>/。
+目的変数 (target) は constants.TARGETS で選ぶ（time_to_next_review / decision_result / 両方）。
 """
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -30,8 +32,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def _build_bins_for_versions(changes, project, versions, rel_df, bot_names, all_prs):
-    """各リリースのビンを 1 回だけ作る（特徴量計算はここで一度。モデル間で使い回す）。"""
+def _build_bins_for_versions(changes, project, versions, rel_df, bot_names, all_prs, targets):
+    """各リリースのビンを 1 回だけ作る（特徴量計算はここで一度。全目的変数・モデル間で使い回す）。"""
     bins_by_version = {}
     for version in versions:
         try:
@@ -41,55 +43,63 @@ def _build_bins_for_versions(changes, project, versions, rel_df, bot_names, all_
             continue
         pool_start = cs - (ce - cs)  # 当該リリース長ぶん前（§2.5, §6.1）
         records = record_builder.build_records(changes, project, pool_start, ce,
-                                               bot_names, all_prs, rel_df)
+                                               bot_names, all_prs, rel_df, targets=targets)
         bins = binning.make_bins(records, constants.BIN_COUNT, constants.BINNING, cs, ce)
         bins_by_version[version] = bins
         logger.info(f"[{project} {version}] bins={len(bins)} records={len(records)}")
     return bins_by_version
 
 
-def analyze(changes, rel_df, project, versions, models, out_root, bot_names=None):
-    """1 プロジェクトの全モデル×全リリース×全指標を実行して出力する（テスト可能なコア）。"""
+def analyze(changes, rel_df, project, versions, out_root, bot_names=None, targets=None):
+    """1 プロジェクトの全目的変数×全モデル×全リリース×全指標を実行して出力する（テスト可能なコア）。"""
     out_root = Path(out_root)
     bot_names = review_utils.load_bot_names() if bot_names is None else bot_names
+    targets = targets or constants.TARGETS
     all_prs = feature_builder.build_all_prs_df(changes)
 
-    bins_by_version = _build_bins_for_versions(changes, project, versions, rel_df, bot_names, all_prs)
+    # レコード/ビンは目的変数・モデル非依存（特徴量は共通）。全目的変数ぶんのラベルを付けて1回だけ作る。
+    bins_by_version = _build_bins_for_versions(changes, project, versions, rel_df, bot_names, all_prs, targets)
 
-    for model_name in models:  # ← 最外: モデル
-        logger.info(f"=== モデル: {model_name} ===")
-        results_by_metric = {m: [] for m in constants.ENABLED_METRICS}
-        for version, bins in bins_by_version.items():
-            # 生予測を貯める器（後から再学習なしで別指標を計算し直すため）。リリースごとに逐一保存。
-            pred_sink = [] if constants.SAVE_PREDICTIONS else None
-            matrices = drift_matrix.build_matrices(bins, model_name, pred_sink=pred_sink)
-            if pred_sink is not None:
-                result_writer.write_predictions(
-                    pred_sink,
-                    {"project": project, "model": model_name, "version": version,
-                     "bin_count": constants.BIN_COUNT, "n_repeats": constants.N_REPEATS,
-                     "label_name": constants.LABEL_NAME, "duration_unit": constants.DURATION_UNIT,
-                     "label_log_transform": constants.LABEL_LOG_TRANSFORM},
-                    out_root / project / model_name / version)
-            for metric, res in matrices.items():
-                drift = drift_detector.detect_drift(res, constants.PERMUTATION_N,
-                                                    constants.SIGNIFICANCE, seed=constants.RANDOM_SEED)
-                out_dir = out_root / project / model_name / version / metric
-                meta = {"project": project, "model": model_name, "version": version,
-                        "bin_count": constants.BIN_COUNT, "n_train": constants.N_TRAIN,
-                        "n_eval": constants.N_EVAL, "n_repeats": constants.N_REPEATS,
-                        "t_agg": constants.T_AGG, "repeat_agg": constants.REPEAT_AGG,
-                        "save_per_repeat": constants.SAVE_PER_REPEAT}
-                result_writer.write_matrix(res, meta, out_dir)
-                result_writer.write_drift_test(drift, out_dir)
-                plotter.plot_all(res, out_dir, dpi=constants.PLOT_DPI)
-                results_by_metric[metric].append(
-                    {"version": version, "drift_exists": drift["drift_exists"],
-                     "min_p_value": drift["min_p_value"]})
-        for metric, per_version in results_by_metric.items():
-            meta = {"project": project, "model": model_name, "metric": metric}
-            result_writer.write_summary(per_version, meta,
-                                        out_root / project / model_name / "summary" / metric)
+    for target in targets:                          # ← 最外: 目的変数
+        spec = constants.TARGET_SPEC[target]
+        objective, metric_names, models = spec["objective"], spec["metrics"], spec["models"]
+        logger.info(f"=== 目的変数: {target}（{objective}）===")
+        for model_name in models:                   # モデル
+            logger.info(f"--- モデル: {model_name} ---")
+            results_by_metric = {m: [] for m in metric_names}
+            for version, bins in bins_by_version.items():
+                pred_sink = [] if constants.SAVE_PREDICTIONS else None
+                matrices = drift_matrix.build_matrices(
+                    bins, model_name, target=target, objective=objective,
+                    metric_names=metric_names, pred_sink=pred_sink)
+                base_dir = out_root / project / model_name / version / target
+                if pred_sink is not None:
+                    result_writer.write_predictions(
+                        pred_sink,
+                        {"project": project, "model": model_name, "version": version,
+                         "target": target, "objective": objective,
+                         "bin_count": constants.BIN_COUNT, "n_repeats": constants.N_REPEATS},
+                        base_dir)
+                for metric, res in matrices.items():
+                    drift = drift_detector.detect_drift(res, constants.PERMUTATION_N,
+                                                        constants.SIGNIFICANCE, seed=constants.RANDOM_SEED)
+                    out_dir = base_dir / metric
+                    meta = {"project": project, "model": model_name, "version": version,
+                            "target": target, "objective": objective,
+                            "bin_count": constants.BIN_COUNT, "n_train": constants.N_TRAIN,
+                            "n_eval": constants.N_EVAL, "n_repeats": constants.N_REPEATS,
+                            "t_agg": constants.T_AGG, "repeat_agg": constants.REPEAT_AGG,
+                            "save_per_repeat": constants.SAVE_PER_REPEAT}
+                    result_writer.write_matrix(res, meta, out_dir)
+                    result_writer.write_drift_test(drift, out_dir)
+                    plotter.plot_all(res, out_dir, dpi=constants.PLOT_DPI)
+                    results_by_metric[metric].append(
+                        {"version": version, "drift_exists": drift["drift_exists"],
+                         "min_p_value": drift["min_p_value"]})
+            for metric, per_version in results_by_metric.items():
+                meta = {"project": project, "model": model_name, "target": target, "metric": metric}
+                result_writer.write_summary(per_version, meta,
+                                            out_root / project / model_name / "summary" / target / metric)
 
 
 def replot(out_root=None) -> int:
@@ -119,52 +129,67 @@ def recompute(out_root=None) -> int:
 
     out_root = Path(out_root or constants.OUTPUT_ROOT)
     count = 0
-    summary_acc: dict = defaultdict(lambda: defaultdict(list))  # (project, model) -> metric -> [per_version]
+    # (project, model, target) -> metric -> [per_version]
+    summary_acc: dict = defaultdict(lambda: defaultdict(list))
     for pred_path in sorted(out_root.rglob("predictions.csv.gz")):
-        version = pred_path.parent.name
-        model_name = pred_path.parent.parent.name
-        project = pred_path.parent.parent.parent.name
+        base = pred_path.parent                       # .../<version>/<target>
+        # project/model/version/target/objective は predictions_meta.json から読む（パス深さ推定に依存しない）。
+        meta_path = base / "predictions_meta.json"
+        meta = json.load(open(meta_path, encoding="utf-8")) if meta_path.exists() else {}
+        target = meta.get("target")
+        if not target:
+            # 旧レイアウト（target 情報が無い予測）はスキップ。誤った階層に書き出さないため。
+            logger.warning(f"target 情報が無い予測をスキップ（旧レイアウト？）: {pred_path}")
+            continue
+        objective = meta.get("objective", "regression")
+        project = meta.get("project") or base.parent.parent.parent.name
+        model_name = meta.get("model") or base.parent.parent.name
+        version = meta.get("version") or base.parent.name
+        metric_names = constants.TARGET_SPEC.get(target, {}).get("metrics")
+
         df = result_writer.load_predictions(pred_path)
         rows = list(df.itertuples(index=False, name=None))
-        matrices = drift_matrix.compute_matrices(rows)
+        matrices = drift_matrix.compute_matrices(rows, metric_names=metric_names, objective=objective)
         for metric, res in matrices.items():
             drift = drift_detector.detect_drift(res, constants.PERMUTATION_N,
                                                 constants.SIGNIFICANCE, seed=constants.RANDOM_SEED)
-            out_dir = pred_path.parent / metric
+            out_dir = base / metric
             meta = {"project": project, "model": model_name, "version": version,
+                    "target": target, "objective": objective,
                     "bin_count": constants.BIN_COUNT, "n_repeats": constants.N_REPEATS,
                     "t_agg": constants.T_AGG, "repeat_agg": constants.REPEAT_AGG,
                     "save_per_repeat": constants.SAVE_PER_REPEAT, "recomputed": True}
             result_writer.write_matrix(res, meta, out_dir)
             result_writer.write_drift_test(drift, out_dir)
             plotter.plot_all(res, out_dir, dpi=constants.PLOT_DPI)
-            summary_acc[(project, model_name)][metric].append(
+            summary_acc[(project, model_name, target)][metric].append(
                 {"version": version, "drift_exists": drift["drift_exists"],
                  "min_p_value": drift["min_p_value"]})
         count += 1
-        logger.info(f"再計算: {pred_path.parent}")
-    for (project, model_name), metrics in summary_acc.items():
+        logger.info(f"再計算: {base}")
+    for (project, model_name, target), metrics in summary_acc.items():
         for metric, per_version in metrics.items():
-            result_writer.write_summary(per_version, {"project": project, "model": model_name,
-                                                      "metric": metric},
-                                        out_root / project / model_name / "summary" / metric)
+            result_writer.write_summary(
+                per_version,
+                {"project": project, "model": model_name, "target": target, "metric": metric},
+                out_root / project / model_name / "summary" / target / metric)
     logger.info(f"完了。{count} 件の予測から再計算しました（出力先: {out_root}）")
     return count
 
 
-def run(projects=None, models=None):
-    """全プロジェクト × 全モデルを実行する（既定は constants の設定）。"""
+def run(projects=None, targets=None):
+    """全プロジェクト × 全目的変数 × 全モデルを実行する（既定は constants の設定）。"""
     rel_df = load_release_dates()
     bot_names = review_utils.load_bot_names()
     projects = projects or constants.TARGET_PROJECTS
-    models = models or constants.MODEL_NAME
+    targets = targets or constants.TARGETS
     for project, versions in projects.items():
         logger.info(f"=== プロジェクト: {project} ===")
         changes = load_changes(project)
         if not changes:
             logger.warning(f"Change が無いためスキップ: {project}")
             continue
-        analyze(changes, rel_df, project, versions, models, constants.OUTPUT_ROOT, bot_names)
+        analyze(changes, rel_df, project, versions, constants.OUTPUT_ROOT, bot_names, targets=targets)
     logger.info(f"完了。出力先: {constants.OUTPUT_ROOT}")
 
 

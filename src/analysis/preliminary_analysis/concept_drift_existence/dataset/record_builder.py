@@ -23,13 +23,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Record:
-    """1 件の (Change, T) レコード。"""
+    """1 件の (Change, T) レコード。
+
+    labels: 目的変数名 -> ラベル値。要求した目的変数のうち、値が付いた（打ち切りでない）ものだけを持つ。
+        例: {"time_to_next_review": 12.0, "decision_result": 1.0}
+    """
     change_id: object
     t: datetime
     created: datetime
     decision_time: datetime | None  # None なら未決（Open のまま）
     features: list[float]
-    label: float
+    labels: dict
     bin: int | None = field(default=None)  # binning で付与（§5.5）
 
 
@@ -66,17 +70,23 @@ def _is_active(created: datetime, decision: datetime | None, t: datetime,
 
 def build_records(changes: list[dict], project: str, pool_start: datetime, cycle_end: datetime,
                   bot_names: set[str], all_prs_df: pd.DataFrame,
-                  releases_df: pd.DataFrame) -> list[Record]:
-    """毎日 0 時グリッド × アクティブ集合から (Change, T) レコードを作る。"""
+                  releases_df: pd.DataFrame, targets: list[str] | None = None) -> list[Record]:
+    """毎日 0 時グリッド × アクティブ集合から (Change, T) レコードを作る。
+
+    targets: 計算する目的変数名のリスト（既定は constants.LABEL_NAME 単体）。
+        各レコードには、要求した目的変数のうち値が付いた（打ち切りでない）ラベルだけを持たせる。
+        特徴量は目的変数に依らないので一度だけ計算し、両目的変数で共有する。
+    """
+    targets = targets or [constants.LABEL_NAME]
+    want_ttnr = "time_to_next_review" in targets
+    other_targets = [t for t in targets if t != "time_to_next_review"]  # registry 経由（T非依存含む）
+
     grid = daily_grid(pool_start, cycle_end, constants.MEASUREMENT_STEP_DAYS)
     if not grid:
         return []
     index = feature_builder.build_index(all_prs_df)
     comp = feature_builder.build_releases_df(releases_df, project)
     lookback = timedelta(days=constants.LOOKBACK_DAYS)
-
-    label_name = constants.LABEL_NAME
-    use_ttnr = label_name == "time_to_next_review"  # 既定ラベルは高速経路（人間レビュー時刻をキャッシュ）
     unit_div = label_builder._UNIT_DIV.get(constants.DURATION_UNIT, 3600.0)
 
     records: list[Record] = []
@@ -85,9 +95,8 @@ def build_records(changes: list[dict], project: str, pool_start: datetime, cycle
         if created is None:
             continue
         dec = decision_time(change)
-        # 人間レビュー時刻は Change ごとに 1 回だけ集計（各 T で再計算しない）
-        review_times = review_utils.human_comment_times(change, bot_names) if use_ttnr else None
-        # この Change がアクティブになりうる T の範囲を grid から切り出す（高速化）
+        # 人間レビュー時刻は Change ごとに 1 回だけ集計（time_to_next_review の高速経路）
+        review_times = review_utils.human_comment_times(change, bot_names) if want_ttnr else None
         lo = bisect.bisect_left(grid, created)
         cid = change.get("change_number", idx)
         for t in grid[lo:]:
@@ -95,18 +104,19 @@ def build_records(changes: list[dict], project: str, pool_start: datetime, cycle
                 break  # これ以降は LOOKBACK 超過（grid 昇順なので打ち切ってよい）
             if dec is not None and t >= dec:
                 break  # 決着以降は Open でない
-            # ここまで来れば created<=t かつ LOOKBACK 内かつ Open
-            if use_ttnr:
-                # T より後の最初の人間レビュー（二分探索）。無ければ打ち切り。
-                j = bisect.bisect_right(review_times, t)
-                if j >= len(review_times):
-                    continue
-                label = (review_times[j] - t).total_seconds() / unit_div
-            else:
-                label = label_builder.build_label(change, t, bot_names, label_name)
-                if label is None:
-                    continue
+            # ここまで来れば created<=t かつ LOOKBACK 内かつ Open。要求目的変数のラベルを集める。
+            labels: dict = {}
+            if want_ttnr:
+                j = bisect.bisect_right(review_times, t)  # T より後の最初の人間レビュー
+                if j < len(review_times):
+                    labels["time_to_next_review"] = (review_times[j] - t).total_seconds() / unit_div
+            for name in other_targets:
+                v = label_builder.build_label(change, t, bot_names, name)
+                if v is not None:
+                    labels[name] = v
+            if not labels:
+                continue  # どの目的変数も打ち切り → このレコードは作らない
             feats = feature_builder.build_features(change, t, index, comp, project)
-            records.append(Record(cid, t, created, dec, feats, label))
-    logger.info(f"[{project}] レコード数: {len(records)}（計測点 {len(grid)}）")
+            records.append(Record(cid, t, created, dec, feats, labels))
+    logger.info(f"[{project}] レコード数: {len(records)}（計測点 {len(grid)}, 目的変数={targets}）")
     return records

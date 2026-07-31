@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-REGRESSION_METRICS = {"mae_log", "rmse_log", "r2_log"}
+REGRESSION_METRICS = {"mae_log", "me_log", "rmse_log", "r2_log"}
 CLASSIFICATION_METRICS = {"macro_f1", "micro_f1", "qwk"}
 POOLED_METRICS = REGRESSION_METRICS | CLASSIFICATION_METRICS
 
@@ -29,6 +29,15 @@ def _log(values: np.ndarray) -> np.ndarray:
 def mae_log(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """log10 時間上の平均絶対誤差（小さいほど良い）。値 1 ≒ 典型的に 10倍ズレ。"""
     return float(np.mean(np.abs(_log(y_pred) - _log(y_true))))
+
+
+def me_log(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """log10 時間上の平均誤差（符号付き＝バイアス。0 に近いほど偏り無し）。
+
+    mae_log の絶対値を外した版。予測 − 実測なので、+ = 予測が長め(過大)、− = 短め(過小)。
+    過大・過小が相殺するため誤差の大きさは測らない（mae_log の補足）。§2.8.2。
+    """
+    return float(np.mean(_log(y_pred) - _log(y_true)))
 
 
 def rmse_log(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -87,7 +96,7 @@ def qwk(y_true, y_pred, buckets) -> float:
     return float(cohen_kappa_score(yt, yp, labels=labels, weights="quadratic"))
 
 
-_REG_FUNCS = {"mae_log": mae_log, "rmse_log": rmse_log, "r2_log": r2_log}
+_REG_FUNCS = {"mae_log": mae_log, "me_log": me_log, "rmse_log": rmse_log, "r2_log": r2_log}
 _CLS_FUNCS = {"macro_f1": macro_f1, "micro_f1": micro_f1, "qwk": qwk}
 
 

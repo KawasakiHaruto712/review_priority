@@ -25,10 +25,32 @@ TARGET_PROJECTS = {
 MEASUREMENT_STEP_DAYS = 1  # 計測点 T = 毎日 0 時の定点グリッド（刻み日数。1=毎日）
 LOOKBACK_DAYS = 365        # T 時点のアクティブ判定: T-LOOKBACK <= created <= T < decision_time
 
+# ── 目的変数（どれを実行するか。§2.3）────────────────────
+# 実行する目的変数をリストで選ぶ。(A)のみ / (B)のみ / 両方 を切替可能（両方なら別ディレクトリに出力）。
+#   "time_to_next_review" … (A) 時間・回帰。指標=順位/回帰誤差/分類（§2.8.1〜2.8.4）
+#   "decision_result"     … (B) merge(1)/reject(0) の2値分類。指標=二値分類（§2.8.5）
+TARGETS = ["time_to_next_review", "decision_result"]  # 例: ["time_to_next_review"] なら (A) のみ
+
+# 目的変数ごとの 目的(objective)・モデル・評価指標の対応（registry。§5.3）
+TARGET_SPEC = {
+    "time_to_next_review": {
+        "objective": "regression",
+        "models": ["lightgbm", "random_forest"],
+        "metrics": ["mae", "rmse", "ndcg",
+                    "mae_log", "me_log", "rmse_log", "r2_log",  # me_log=符号付きバイアス（mae_logの補足）
+                    "macro_f1", "micro_f1", "qwk"],
+    },
+    "decision_result": {
+        "objective": "classification",
+        "models": ["lightgbm", "random_forest"],
+        "metrics": ["mcc", "f1", "precision", "recall", "accuracy"],
+    },
+}
+
 # ── ラベル ───────────────────────────────────────────
-LABEL_NAME = "time_to_next_review"  # registry で将来差替可（§5.2）
-DURATION_UNIT = "hours"              # ラベルの時間単位
-CENSORING_MODE = "drop"             # "drop"(末尾まで未レビューは除外) | "survival"(将来)
+LABEL_NAME = "time_to_next_review"  # 単体実行/テスト時の既定（main は TARGETS を使う）
+DURATION_UNIT = "hours"              # (A) の時間単位
+CENSORING_MODE = "drop"             # 末尾まで未決/未レビューは除外（両目的変数共通）| "survival"(将来)
 # 学習時に target を log1p 変換するか（time は指数的に広がるため heavy-tail 対策）。
 # 評価は順位ベースで log は単調変換＝順位不変なので、指標の定義は変わらず「モデルの当てやすさ」だけが上がる。
 LABEL_LOG_TRANSFORM = True
@@ -79,7 +101,7 @@ NDCG_AT = 10
 #   回帰誤差: mae_log / rmse_log / r2_log（log 時間。誤差そのもの）
 #   分類:   macro_f1 / micro_f1 / qwk（時間バケツに離散化）
 ENABLED_METRICS = ["mae", "rmse", "ndcg",
-                   "mae_log", "rmse_log", "r2_log",
+                   "mae_log", "me_log", "rmse_log", "r2_log",
                    "macro_f1", "micro_f1", "qwk"]
 
 # 分類のバケツ境界（hours 昇順）。既定 = 1日 / 1週間 / 1ヶ月 → 4 クラス（≤1日/≤1週/≤1ヶ月/>1ヶ月）。
