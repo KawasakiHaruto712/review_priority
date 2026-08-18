@@ -57,10 +57,18 @@ def _resolve_cutoff(rel_df: pd.DataFrame, project: str, first_version: str):
     return cs.to_pydatetime(), label
 
 
-def build_and_save(n: int | None = None) -> None:
-    """N 個（seed 違い）の共有エンコーダ＋汎用ヘッドを作って保存する。"""
+def build_and_save(n: int | None = None, seed_indices=None) -> None:
+    """共有エンコーダ＋汎用ヘッドを作って保存する。
+
+    seed_indices を渡すと、その index(k) だけを作る（不足分の追加ビルド用）。
+    未指定なら 0..n-1（n 既定 N_REPEATS）。
+    """
     project = constants.TARGET_PROJECT
-    n = constants.N_REPEATS if n is None else n
+    if seed_indices is None:
+        n = constants.N_REPEATS if n is None else n
+        seed_indices = list(range(n))
+    else:
+        seed_indices = list(seed_indices)
 
     # 1. データ読み込み
     rel_df = load_release_dates()
@@ -82,10 +90,10 @@ def build_and_save(n: int | None = None) -> None:
     logger.info(f"事前学習用 集合数: {len(pre_sets)}（総レコード {set_builder.count_records(pre_sets)}）")
     scaler = st.Scaler.fit(pre_sets)
 
-    # 4. N 個のエンコーダ＋汎用ヘッドを事前学習して保存
-    for k in range(n):
+    # 4. 指定 index のエンコーダ＋汎用ヘッドを事前学習して保存
+    for i, k in enumerate(seed_indices):
         seed = constants.RANDOM_SEED + k
-        logger.info(f"事前学習 {k + 1}/{n}（seed={seed}）")
+        logger.info(f"事前学習 {i + 1}/{len(seed_indices)}（seed{k}, torch_seed={seed}）")
         enc, gh = st.pretrain(pre_sets, scaler, seed, device)
         out = store.save_pretrained(project, cutoff_label, k, enc, gh, scaler, {"torch_seed": seed})
         logger.info(f"保存: {out}")

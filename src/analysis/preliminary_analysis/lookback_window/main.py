@@ -39,19 +39,20 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_seeds(project: str, n_seeds: int | None) -> list[int]:
-    """使う事前学習 seed を返す。モデルが未作成なら、その場で build_encoders を実行して作る
-    （lookback_window さえ実行すれば必ず probe 結果まで出せるようにするため）。"""
+    """使う事前学習 seed を返す。保存済みが要求数に満たなければ、不足分だけ build する
+    （lookback_window さえ実行すれば必要数まで揃えて probe 結果まで出せるように）。"""
     cutoff = constants.PRETRAINED_CUTOFF
-    seeds = store.list_seeds(project, cutoff)
-    if not seeds:
-        n_build = n_seeds if n_seeds else pre_constants.N_REPEATS
-        logger.info(f"事前学習モデルが未作成（{project} cutoff={cutoff}）。"
-                    f"先に build_encoders を実行します（{n_build} 個）…")
-        build_encoders.build_and_save(n_build)
-        seeds = store.list_seeds(project, cutoff)
-        if not seeds:
+    saved = store.list_seeds(project, cutoff)
+    target = n_seeds if n_seeds else pre_constants.N_REPEATS
+    missing = [k for k in range(target) if k not in saved]
+    if missing:
+        logger.info(f"事前学習モデルが不足（保存 {len(saved)} / 要求 {target}、{project} cutoff={cutoff}）。"
+                    f"不足分 seed{missing} を作成します…")
+        build_encoders.build_and_save(seed_indices=missing)
+        saved = store.list_seeds(project, cutoff)
+        if not saved:
             raise RuntimeError("事前学習モデルの作成に失敗しました。")
-    return seeds if n_seeds is None else seeds[:n_seeds]
+    return saved if n_seeds is None else saved[:n_seeds]
 
 
 def run(project: str, versions: list[str], n_seeds: int | None) -> None:
