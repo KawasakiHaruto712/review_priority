@@ -9,7 +9,7 @@
 - 詳細仕様は [design.md](./design.md)。用語は **Change** で統一。
 
 ## 前提
-事前学習エンコーダ（`pretrained_encoders` の保存物）を load して使う。**未作成なら run 時に自動で作成する**ので、`lookback_window` 単体を実行すれば必ず probe 結果まで出る。
+事前学習エンコーダ（`pretrained_encoders` の保存物）を load して使う。**保存済みが要求 seed 数に満たなければ、run 時に不足分を自動作成する**ので、`lookback_window` 単体を実行すれば必要数まで揃えて probe 結果まで出る。
 
 （明示的に先に作っておくことも可能。初回の自動作成は全履歴の特徴生成で数十分かかる点に注意。）
 
