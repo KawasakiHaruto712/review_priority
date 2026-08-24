@@ -1,74 +1,80 @@
-"""レビュー優先順位ドリフト検出（Phase1）: オーケストレーション（design.md）。
+"""レビュー優先順位ドリフト検出（Phase1 / step2）: オーケストレーション（design.md）。
 
 実行:
-    python -m src.analysis.preliminary_analysis.concept_drift_detection.main   # 事前学習＋probe＋評価＋作図
+    python -m src.analysis.preliminary_analysis.concept_drift_detection.main
 
-流れ（design.md §6, §8。上から順に追える構成にしている＝§14）:
+流れ（上から順に追える構成）:
   1. データ読み込み（changes / release_dates / bot 名 / 特徴用 DataFrame）
-  2. 共有エンコーダの事前学習（プロジェクト初期〜分析対象の直前。N_REPEATS 個。§6.1）
+  2. 事前学習エンコーダ＋汎用ヘッドを pretrained_encoders から load（不足 seed は自動作成。§6.1）
   3. 各対象リリースで:
-       レコード生成 → per-release ビン割当（§4）
-       → 距離×時期行列（probe / 汎用ヘッド / 差分）を構築（§6.2, §8.3）
-       → ドリフト検定（§8.2）→ 保存・作図（§10）
+       レコード生成 → per-release 26 分割ビン割当（§4）
+       → 距離×位置行列（probe / 汎用ヘッド / 差分）を構築（§6.2, §8.3）
+       → ドリフト検定（§8.2）→ 保存・作図（26×26 ヒートマップ。§10）
 出力: <project>/<model>/<version>/{probe,general,diff}/<metric>/ ＋ predictions ＋ summary。
 """
 from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime
 from pathlib import Path
 
-from src.analysis.background_problem.common.data_loader import (
-    load_changes, load_release_dates,
+from src.analysis.background_problem.common.data_loader import load_changes, load_release_dates
+from src.analysis.preliminary_analysis.concept_drift_detection.dataset import binning
+from src.analysis.preliminary_analysis.concept_drift_detection.evaluation import (
+    drift_detector, drift_matrix, metrics,
 )
-from src.analysis.preliminary_analysis.concept_drift_detection.dataset import (
-    binning, record_builder, set_builder,
-)
-from src.analysis.preliminary_analysis.concept_drift_detection.evaluation import drift_detector, drift_matrix
-from src.analysis.preliminary_analysis.concept_drift_detection.features import feature_builder
 from src.analysis.preliminary_analysis.concept_drift_detection.io import result_writer
-from src.analysis.preliminary_analysis.concept_drift_detection.model import set_transformer as st
-from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants, review_utils
+from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants
 from src.analysis.preliminary_analysis.concept_drift_detection.visualization import plotter
+from src.analysis.preliminary_analysis.pretrained_encoders import build_encoders
+from src.analysis.preliminary_analysis.pretrained_encoders.dataset import record_builder
+from src.analysis.preliminary_analysis.pretrained_encoders.features import feature_builder
+from src.analysis.preliminary_analysis.pretrained_encoders.io import store
+from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import review_utils
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 
-def _pretrain_cutoff(rel_df, project, versions) -> datetime:
-    """事前学習の締め切り（分析対象の直前）。PRETRAIN_CUTOFF 指定が無ければ最も早い対象の cycle_start。"""
-    if constants.PRETRAIN_CUTOFF:
-        return datetime.fromisoformat(constants.PRETRAIN_CUTOFF)
-    cs_R, _ce, _cs_prev = binning.target_cycles(rel_df, project, versions[0])
-    return cs_R
+def _resolve_encoders(project: str, device):
+    """pretrained_encoders から N_REPEATS 個の (encoder, general_head) を load（不足は自動作成）。
 
-
-def build_shared_encoders(changes, project, versions, rel_df, bot_names, all_prs, device):
-    """共有エンコーダを事前学習する（全リリース共通。N_REPEATS 個＝seed 違い。§6.1）。"""
-    cutoff = _pretrain_cutoff(rel_df, project, versions)
-    data_start = all_prs["created"].min().to_pydatetime()
-    logger.info(f"事前学習データ: {data_start.date()} 〜 {cutoff.date()}（分析対象の直前まで）")
-    pre_records = record_builder.build_records(changes, project, data_start, cutoff,
-                                               bot_names, all_prs, rel_df)
-    pre_sets = set_builder.build_sets(pre_records, constants.MAX_SET_SIZE)
-    logger.info(f"事前学習用 集合数: {len(pre_sets)}（総レコード {set_builder.count_records(pre_sets)}）")
-    scaler = st.Scaler.fit(pre_sets)
-    encoders = []
-    for k in range(constants.N_REPEATS):
-        logger.info(f"共有エンコーダ 事前学習 {k + 1}/{constants.N_REPEATS}（seed={constants.RANDOM_SEED + k}）")
-        enc, gh = st.pretrain(pre_sets, scaler, constants.RANDOM_SEED + k, device)
+    scaler は全 seed で同一（同じ事前学習データで fit）なので先頭のものを共有で使う。
+    """
+    cutoff = constants.PRETRAINED_CUTOFF
+    saved = store.list_seeds(project, cutoff)
+    target = constants.N_REPEATS
+    missing = [k for k in range(target) if k not in saved]
+    if missing:
+        logger.info(f"事前学習モデルが不足（保存 {len(saved)} / 要求 {target}）。不足 seed{missing} を作成します…")
+        build_encoders.build_and_save(seed_indices=missing)
+        saved = store.list_seeds(project, cutoff)
+    seeds = saved[:target]
+    encoders, scaler = [], None
+    for s in seeds:
+        enc, gh, sc, _cfg = store.load_pretrained(project, cutoff, s, device)
         encoders.append((enc, gh))
+        if scaler is None:
+            scaler = sc
+    logger.info(f"load したエンコーダ数: {len(encoders)}（seed={seeds}）")
     return encoders, scaler
 
 
+def _should_plot(metric: str) -> bool:
+    """この指標のヒートマップを描くか（既定は AUC のみ。差分 '*_diff' も base で判定）。"""
+    base = metric[:-5] if metric.endswith("_diff") else metric
+    return base in constants.PLOT_METRICS
+
+
 def _save_kind(res_by_metric: dict, base_dir: Path, meta: dict) -> None:
-    """probe/general/diff いずれかの {metric: MatrixResult} を metric ごとに保存・作図する。"""
+    """probe/general/diff いずれかの {metric: MatrixResult} を保存（全指標）・作図（PLOT_METRICS のみ）。"""
     for m, mr in res_by_metric.items():
         out = base_dir / m
         result_writer.write_matrix(mr, meta, out)
-        plotter.plot_all(mr, out, constants.PLOT_DPI)
+        if _should_plot(m):
+            plotter.plot_all(mr, out, constants.PLOT_DPI)
 
 
 def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
@@ -78,12 +84,13 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
     all_prs = feature_builder.build_all_prs_df(changes)
     device = st.resolve_device()
     logger.info(f"device = {device}")
-    model_name = constants.MODEL_NAME[0]  # 今回は set_transformer のみ
+    model_name = constants.MODEL_NAME[0]
 
-    # 2. 共有エンコーダを事前学習（全リリース共通で1回だけ作る）
-    encoders, scaler = build_shared_encoders(changes, project, versions, rel_df, bot_names, all_prs, device)
+    # 2. 事前学習エンコーダ＋汎用ヘッドを load（不足は自動作成）
+    encoders, scaler = _resolve_encoders(project, device)
 
-    summary = {m: [] for m in constants.ENABLED_METRICS}
+    metric_names = metrics.metric_columns(constants.K_LIST)
+    summary = {m: [] for m in constants.PLOT_METRICS}
     for version in versions:
         try:
             cs_R, ce_R, _cs_prev = binning.target_cycles(rel_df, project, version)
@@ -97,7 +104,7 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
         bins = binning.make_local_bins(records, rel_df, project, version,
                                        constants.BIN_COUNT, constants.BIN_DAY_ALIGNED)
 
-        # 距離×時期行列（probe / 汎用 / 差分）
+        # 距離×位置行列（probe / 汎用 / 差分）
         probe_sink = [] if constants.SAVE_PREDICTIONS else None
         general_sink = [] if constants.SAVE_PREDICTIONS else None
         res = drift_matrix.build_matrices(bins, encoders=encoders, scaler=scaler,
@@ -110,8 +117,11 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
         _save_kind(res["general"], base / "general", meta)
         _save_kind(res["diff"], base / "diff", meta)
 
-        # ドリフト検定は probe 行列に対して指標ごとに実施（§8.2）
-        for m, mr in res["probe"].items():
+        # ドリフト検定は主指標（PLOT_METRICS）の probe 行列に対して実施（§8.2）
+        for m in constants.PLOT_METRICS:
+            mr = res["probe"].get(m)
+            if mr is None:
+                continue
             dr = drift_detector.detect_drift(mr, constants.PERMUTATION_N, constants.SIGNIFICANCE)
             result_writer.write_drift_test(dr, base / "probe" / m)
             summary[m].append({"version": version, "drift_exists": dr["drift_exists"],

@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from src.analysis.background_problem.common.data_loader import _drop_release_anomalies
-from src.analysis.preliminary_analysis.concept_drift_detection.dataset.record_builder import Record
+from src.analysis.preliminary_analysis.pretrained_encoders.dataset.record_builder import Record
 
 
 def _midnight(dt: datetime) -> datetime:

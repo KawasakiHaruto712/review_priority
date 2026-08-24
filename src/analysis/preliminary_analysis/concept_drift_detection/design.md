@@ -6,6 +6,8 @@
 
 - **アプローチ**：同一計測点の Change を**集合として文脈込みで学習する Transformer**（自己注意）＋
   **転移学習（事前学習エンコーダ ＋ linear probing）**。
+- **事前学習エンコーダ＋汎用ヘッドは `pretrained_encoders`（共有基盤）から load する**（本ディレクトリでは事前学習しない）。共有部品（model / dataset / features / labeling / review_utils / store）も pretrained_encoders から import する。
+- **ビンは per-release 26 分割（1 コマ ＝ サイクル/26 ≒ 1 週間）**。これは事前分析 step1（`lookback_window`：チューニング窓の長さ調査）で「有効窓 ≒ 1〜2 週間」を確認した結果に基づく（1 コマ＝1 週）。
 - 従来手法（LightGBM/RF・pointwise）は本ディレクトリから削除済み（git commit `bcea00a` に保全。将来ベースラインとして復元可能）。**今回の実行対象は集合Transformer のみ**。
 - **本設計は Phase1（ドリフトの検出）に限定**。Phase2（適応）や各種拡張は §12 に「将来の方針」として明記し、実装は**拡張しやすい形**に留める。
 
@@ -41,8 +43,8 @@
 
 ## 4. ビン（距離 `d` × 位置 `p`）
 
-- **各リリースを、そのリリース自身の期間で 6 分割**（`BIN_COUNT = 6`）。**リリース境界に整合**、境界は **0 時に揃える**（`BIN_DAY_ALIGNED`）。
-- **`d = 6` がちょうど 1 リリース**（同フェーズ）に対応。
+- **各リリースを、そのリリース自身の期間で 26 分割**（`BIN_COUNT = 26`。1 コマ ＝ サイクル/26 ≒ 1 週間、版で 6.5〜7.5 日）。**リリース境界に整合**、境界は **0 時に揃える**（`BIN_DAY_ALIGNED`）。
+- **`d = 26` がちょうど 1 リリース**（同フェーズ）に対応。
   - 距離 `d`：滞留（**リリースフェーズ単位**。時間一定ではない点に注意）。
   - 位置 `p`：当該リリース内の位置。
 - **ドリフトの読み方**：**距離 `d` 固定で位置 `p` を横断**したときの精度変化を見る。
@@ -72,18 +74,17 @@
 
 ## 6. 学習手順：転移学習（事前学習 ＋ linear probing）
 
-### 6.1 事前学習（教師あり・共有エンコーダ）
-- **プロジェクト開発初期 〜 25.0.0（＝26.0.0 の直前 2022-03-30 まで）の全過去データ**で、
-  **「集合エンコーダ ＋ 仮ヘッド」を『Δ以内レビュー(0/1)』予測で学習**。
-- 学習後、**仮ヘッドは破棄、エンコーダを凍結**。**共有エンコーダ**として全セルで使い回す。
-- 方式は**教師あり**（constants で自己教師ありへ切替可能な形にする）。
+### 6.1 事前学習エンコーダ＋汎用ヘッド（pretrained_encoders から load）
+- **本ディレクトリでは事前学習しない**。`pretrained_encoders` が保存した**共有エンコーダ＋汎用ヘッド**（cutoff=25.0.0＝プロジェクト初期〜26.0.0 サイクル開始まで）を **load** して使う。
+- **エンコーダは凍結**したまま全セルで使い回す。**汎用ヘッド**は §8.3 の比較（無調整ベースライン）に使う。Scaler も load 済み（事前学習データで fit）。
+- **不足 seed は自動作成**（`lookback_window` と同挙動：要求数に満たなければ `pretrained_encoders.build_encoders` を呼ぶ）。
 
 ### 6.2 linear probing（per-bin）
 - 各**学習ビン `i`** について、**凍結エンコーダの埋め込み**の上に**ヘッド（linear probe）を学習** → **評価ビン `p`** で評価。
 - **学習 Change 数は固定しない（フル集合）**。集合を間引かない（間引くと文脈が歪む・train/eval ミスマッチ）。
 
 ### 6.3 リーク防止
-- **エンコーダは分析対象（26.0.0–30.0.0）のビンを学習に含めない**（締め切り 2022-03-30 より前のみで事前学習）。
+- **エンコーダは分析対象（26.0.0–30.0.0）のデータを学習に含めない**（load するエンコーダは cutoff=25.0.0＝2022-03-30 より前のみで事前学習済み。pretrained_encoders 側で保証）。
   - 分析対象のビンは「どこかのセルの評価ビン」になりうるため、共有エンコーダに含めると評価リークになる。
   - 25.0.0 以前（学習ビンにしか使われない範囲）は含めてよい（評価ビンにならない）。
 - **凍結エンコーダを分析対象データに“推論で”当てるのはリークではない**（重みは学習していない）。
@@ -92,12 +93,10 @@
 - 凍結エンコーダで **(Change, T集合) 単位に埋め込みを 1 回計算してキャッシュ**（集合ごとに 1 回順伝播）。
 - 以降の linear probe・反復・評価は**キャッシュ済み埋め込みの上で高速に**行う。
 
-### 6.5 反復（N_REPEATS ＝ 事前学習の反復）
-- **`N_REPEATS = 10`** は「**別 seed（`RANDOM_SEED + k`）で事前学習を 10 回 → 10 個のエンコーダ**」を意味する。
-  - linear probe は凍結表現の上で**ほぼ決定的**なため、probe だけの反復では真のばらつきが出ない。
-  - **ばらつきの主因は事前学習（NN 学習：初期値・データ順・非凸）** → **事前学習を反復してこそ意味のある不確かさ**が得られる。
-- 各エンコーダで d×p の probe を回し、**10 個の行列を集約（中央値＝セル値、IQR＝エンコーダ間ばらつき）**。
-- **実装初期に「1 回の事前学習時間」を実測**し、10 回が現実的か確認（規模的には軽い見込み。重ければ回数を下げる）。
+### 6.5 反復（＝ load する事前学習エンコーダの数）
+- **`pretrained_encoders` の 10 個のエンコーダ（seed0〜9）を load** し、各エンコーダで d×p の probe を回して集約（**中央値＝セル値、IQR＝エンコーダ間ばらつき**）。
+  - linear probe は凍結表現の上で**ほぼ決定的**。ばらつきの主因は事前学習（初期値・データ順・非凸）なので、**別 seed のエンコーダを跨いで**こそ意味のある不確かさが出る。
+- エンコーダは pretrained_encoders 側で作成済み。本分析は **load するだけ（作り直さない）**。不足時のみ自動作成（§6.1）。
 
 ### 6.6 fine-tuning を採用しない理由と拡張性
 
@@ -124,7 +123,7 @@
 |---|---|
 | ① ヘッド（linear probe）学習：学習ビン | **固定しない ＋ サイズ記録・チェック ＋ MIN 床** |
 | ② 評価：位置ビン | **固定しない ＋ チェック ＋ MIN 床** |
-| ③ 事前学習：エンコーダ | **プロジェクト初期〜2022-03-30 の全過去データ（1回／反復時は seed 違い）** |
+| ③ エンコーダ | **pretrained_encoders から load（cutoff=25.0.0・10 seed・不足は自動作成）** |
 
 - **サイズは固定しない**（フル集合）。旧手法の「学習 Change 500 固定」は**廃止**。
 - 公平性は**「サイズの記録＋サニティチェック（精度差が量差で説明できないか）」**で担保。
@@ -135,10 +134,11 @@
 ## 8. 評価
 
 ### 8.1 指標
-- **主指標：AUC**（しきい値フリー・不均衡に頑健。Δ=1 は正例が稀なため）。必要に応じ **AP（PR曲線下面積）**も。
-- **補助：precision / recall / f1**。しきい値は**当面 0.5**（constants `CLASSIFY_THRESHOLD` で変更可、後で全セル共通の調整済みしきい値に置換可能）。**per-cell のしきい値調整はしない**（比較の交絡を避ける）。
-- プールして算出（評価レコード全体）。
-- **距離×時期行列のプロットは AUC と f1 の両方を必ず出力**（＋ precision / recall）。AUC は主判断、f1 は運用的な見え方の補助として並べて確認する（§10）。
+- **`lookback_window` と同一の指標一式を算出・保存**（本ディレクトリに複製＝B2）：AUC / precision・recall・F1（しきい値0.5）/ **precision@k・recall@k・f1@k**（k=5,10,20 ＋ 正例数）/ MAP / 正規化順位 / MRR。
+- **主に見る指標は AUC**（ヒートマップの既定表示）。他は保存し随時参照（constants の描画指標で切替）。
+- **算出方法は全指標で統一**：**セル内を「日ごと」に算出 → ビンの日数で平均**（同一 probe で採点）。**AUC も日次平均でそろえる**（top-k はスナップショット単位のため、指標間で計算法を統一）。その後 **seed 中央値＋IQR** で集約。
+  - 注：AUC が日次（正例約4/日）で荒すぎて色が読めない場合のみ、AUC をビンプール算出に切替可（constants）。
+- しきい値系（precision/recall/f1@0.5）は不均衡下でほぼ0になりやすく、実質は **top-k / AUC** を見る。
 
 ### 8.2 ドリフト検定
 - **既存の並べ替え検定（permutation test）＋変化点（changepoint）**で、位置横断の精度変化が有意か判定（予測に対して実施、再学習しない）。
@@ -146,14 +146,14 @@
 - ドリフトの**有無は検定で判断**（反復 IQR ではない）。
 
 ### 8.3 「汎用ヘッド」vs「per-bin probe」比較
-- **事前学習の仮ヘッド（＝広い平均的な読み取り。以下「汎用ヘッド」）を各位置 p で評価**（推論のみ・安価）し、
+- **`pretrained_encoders` から load した汎用ヘッド（＝無調整の広い平均的な読み取り）を各位置 p で評価**（推論のみ・安価）し、
   **per-bin の probe の位置別精度と並べて比較** → **「セルごとに特化させる価値があるか」**を見る。
 - 両者とも同じ評価ビンで評価（公平）。汎用ヘッドの学習締め切りは分析対象より前（リークなし）。
 - **汎用ヘッドの結果も保存し、距離×時期行列のプロットを作成する**（per-bin probe と同じ形式で並べて比較できるように）。
   - **注意：汎用ヘッドは距離 `d` に依存しない**（学習ビンを持たない単一の固定モデルのため、値は位置 `p` のみで決まる）。
   - したがって行列表示では **各行 `d` に同じ値を入れる（列 `p` ごとに一定＝横帯）**形で d×p 図に落とす（probe 行列と同一の軸・形式で視覚比較するため）。
-  - **AUC と f1 の両方**を出力（§8.1）。
-- **差分行列（probe − 汎用ヘッド）を必ず作成する**（値 ＋ プロット png、AUC・f1 の両方）。
+  - 指標一式を出力（主に AUC。§8.1）。
+- **差分行列（probe − 汎用ヘッド）を必ず作成する**（値 ＋ ヒートマップ png、主に AUC）。
   - probe 行列は `d` に依存、汎用ヘッドは列 `p` ごとに一定なので、差分 `probe(d,p) − 汎用(p)` は**正常な d×p 行列**になる。
   - **正＝特化が効く（probe が汎用より良い）、負＝特化が悪化（少データで probe が汎用に負ける）**。→ 「どの `(d, p)` で特化が効くか」を直接可視化。
 
@@ -166,19 +166,20 @@
 
 ## 9. 反復・集約・計算環境
 
-- 反復＝**事前学習の反復（`N_REPEATS = 10` エンコーダ）**。集約：**中央値（セル値）＋ IQR（不確かさ）**。
-- **torch ＋ MPS（Apple M2）**。CUDA は無し。主コストは**事前学習 ＋ 埋め込みキャッシュ**、probe は安い。
+- 反復＝**load する事前学習エンコーダの数（`N_REPEATS = 10`）**。集約：**中央値（セル値）＋ IQR（不確かさ）**。
+- **torch ＋ MPS（Apple M2）**。CUDA は無し。事前学習は pretrained_encoders 側で済み。本分析の主コストは**埋め込みキャッシュ**、probe は安い。
 
 ---
 
 ## 10. 出力
 
-- **d×p 行列（値 ＋ プロット png）を指標ごとに出力**（セル値＝中央値、IQR）。**プロットは AUC と f1 の両方を必ず出力**（＋ precision / recall）。
-- **汎用ヘッドの d×p 行列（値 ＋ プロット png）も保存・出力**（§8.3。距離 `d` に非依存なので列 `p` ごとに一定＝横帯）。AUC・f1 の両方。
-- **差分行列（probe − 汎用ヘッド）を必ず出力**（値 ＋ プロット png、AUC・f1）。正＝特化が効く／負＝特化が悪化（§8.3）。
-- **drift_test.json**（p値・有意判定・変化点）、**drift_count**（リリース横断の本数集計）。
-- **predictions**（評価レコードの `y_true(0/1)` / `y_pred(正例確率)` を保存）→ 後から指標・検定を再計算可能。
-- 出力の構造は旧 `concept_drift_detection` を踏襲（`<project>/<model>/<version>/<metric>/` ＋ summary）。
+- **d×p 行列を指標ごとに出力**（セル値＝seed 中央値、IQR）。図は **26×26 ヒートマップ（列＝位置 p・行＝距離 d・色＝AUC 等）**。
+  - **既定は色のみ（セル数値なし）**。`HEATMAP_SHOW_CELL_VALUES`（既定 False）で数値表示を後から切替可能（桁は `HEATMAP_VALUE_FMT`）。
+  - **既定の表示指標は AUC**。他指標（top-k / MAP / 正規化順位 / MRR 等）も同形式で出力。
+- **probe / 汎用ヘッド / 差分（probe − 汎用）の 3 種**をヒートマップで出力（§8.3）。汎用は距離 `d` 非依存＝横帯。差分は 正＝特化が効く／負＝悪化。
+- **drift_test.json**（p値・有意判定・変化点）、**drift_count**（リリース横断の本数集計）。主判断は AUC。
+- **predictions**（評価レコードの `y_true(0/1)` / `y_pred(正例確率)`・日付付きを保存）→ 後から指標・検定を再計算可能。
+- 出力の構造は旧 `concept_drift_detection` を踏襲（`<project>/<model>/<version>/{probe,general,diff}/<metric>/` ＋ summary）。
 
 ---
 
@@ -186,11 +187,12 @@
 
 主なもの（すべて constants で変更可能に）：
 - 目的変数：`REVIEW_HORIZON_DAYS = 1`、`CLASSIFY_THRESHOLD = 0.5`。
-- ビン：`BIN_COUNT = 6`、`BINNING`、`BIN_DAY_ALIGNED`、per-release 分割。
+- ビン：`BIN_COUNT = 26`（1コマ≒1週）、`BINNING`、`BIN_DAY_ALIGNED`、per-release 分割。
 - 計測点：`MEASUREMENT_STEP_DAYS = 1`、`LOOKBACK_DAYS = 365`。
-- モデル：エンコーダ規模（`d_model`・層数・ヘッド数・dropout）、**ヘッド種別（linear / small-MLP）**、事前学習方式（教師あり / 自己教師あり）。
-- 学習：事前学習の締め切り（2022-03-30）、`N_REPEATS = 10`（＝事前学習反復）、`MIN_TRAIN` / `MIN_EVAL`、`RANDOM_SEED`。
-- 指標：`ENABLED_METRICS`（AUC 主 ＋ precision/recall/f1）、検定 `PERMUTATION_N`・`SIGNIFICANCE`。
+- モデル：エンコーダ規模（`d_model`・層数・ヘッド数・dropout）、**ヘッド種別（linear / small-MLP）**（＝pretrained_encoders の config と一致）。
+- 事前学習の読み込み：`PRETRAINED_CUTOFF = "25.0.0"`、`N_REPEATS = 10`（＝load するエンコーダ数・不足は自動作成）、`RANDOM_SEED`、`MIN_TRAIN` / `MIN_EVAL`。
+- 指標：`ENABLED_METRICS`（lookback 一式・主 AUC）、`K_LIST = [5,10,20]`、`CLASSIFY_THRESHOLD`、検定 `PERMUTATION_N`・`SIGNIFICANCE`。
+- 図：`HEATMAP_SHOW_CELL_VALUES = False`、`HEATMAP_VALUE_FMT`、既定描画指標。
 
 ---
 
@@ -212,17 +214,16 @@
 
 ---
 
-## 13. ディレクトリ・コード構成（予定）
+## 13. ディレクトリ・コード構成
 
-`src/analysis/preliminary_analysis/concept_drift_detection/` に新規作成：
-- `utils/constants.py`：全パラメータ。
-- `labeling/`：Δ以内2値ラベル。
-- `dataset/`：レコード生成（(Change,T)）・集合構築・ビン割当（per-release 6分割・0時揃え）。
-- `model/`：集合Transformer（エンコーダ）・ヘッド（linear/small-MLP）・事前学習（教師あり）・埋め込みキャッシュ。
-- `evaluation/`：指標（AUC 主 ＋ precision/recall/f1）・d×p 行列（学習ビン使い回し）・ドリフト検定・汎用ヘッド vs probe 比較。
-- `io/`：行列/検定/本数集計/predictions の入出力。
-- `main.py`：run / analyze / recompute / replot。
-- torch（MPS）を実装時に導入。
+- **共有部品は `pretrained_encoders` から import**（`model/set_transformer`・`dataset/record_builder`・`set_builder`・`features`・`labeling`・`utils/review_utils`・`io/store`）。**concept_drift 側の重複コピー（dataset/features/labeling/model/utils.review_utils）は削除**。
+- **concept_drift 固有として残す/作る**：
+  - `utils/constants.py`：全パラメータ（`BIN_COUNT=26`・`PRETRAINED_CUTOFF` 等）。
+  - `dataset/binning.py`：per-release 26 分割・ビン割当（`Record` は pretrained_encoders から import）。
+  - `evaluation/`：指標（**lookback の指標一式を本ディレクトリに複製＝B2**）・d×p 行列（学習ビン使い回し・**per-day 集約**）・ドリフト検定・汎用 vs probe 比較。
+  - `io/`：行列/検定/本数集計/predictions の入出力。
+  - `visualization/`：**26×26 ヒートマップ**（色のみ・`HEATMAP_SHOW_CELL_VALUES` フラグ）。
+  - `main.py`：load（不足 seed 自動作成）→ ビン → per-bin probe → 評価 → 作図。
 
 旧 LightGBM/RF は git（`bcea00a`）に保全。将来ベースラインとして復元可能。
 

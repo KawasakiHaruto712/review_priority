@@ -55,6 +55,16 @@ def build_sets(records: list[Record], max_set_size: int | None = None) -> list[T
     return sets
 
 
+def sets_in_bins(bins: dict[int, list[Record]], bin_indices, max_set_size: int | None = None) -> list[TSet]:
+    """指定ビン（複数可）に属するレコードから TSet のリストを作る（下流の d×p 行列で使用）。"""
+    if isinstance(bin_indices, int):
+        bin_indices = [bin_indices]
+    recs: list[Record] = []
+    for i in bin_indices:
+        recs.extend(bins.get(i, []))
+    return build_sets(recs, max_set_size)
+
+
 def count_records(sets: list[TSet]) -> int:
     """集合群に含まれる (Change, T) レコードの総数。"""
     return sum(len(s) for s in sets)
