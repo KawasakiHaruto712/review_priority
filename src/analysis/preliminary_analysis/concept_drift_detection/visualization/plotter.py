@@ -15,6 +15,7 @@ from matplotlib import font_manager
 import numpy as np
 
 from src.analysis.preliminary_analysis.concept_drift_detection.evaluation.drift_matrix import MatrixResult
+from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +57,18 @@ def _is_signed(metric: str) -> bool:
     return metric in _SIGNED_METRICS or metric.endswith("_diff")
 
 
+def _higher_is_better(metric: str) -> bool:
+    """大きいほど良い指標か。norm_rank（正規化順位）は小さいほど良い。それ以外（auc/map/mrr/
+    precision@k/recall@k/f1@k/precision/recall/f1）は大きいほど良い。"""
+    m = metric[:-5] if metric.endswith("_diff") else metric
+    return not m.startswith("norm_rank")
+
+
 def _cmap_for(metric: str) -> str:
     """colormap を返す。符号付きは発散、良い=緑/悪い=赤（小さいほど良いは反転）。"""
     if _is_signed(metric):
         return _SIGNED_CMAP
-    return _GOOD_BAD_CMAP if metric in _HIGHER_IS_BETTER else _GOOD_BAD_CMAP + "_r"
+    return _GOOD_BAD_CMAP if _higher_is_better(metric) else _GOOD_BAD_CMAP + "_r"
 
 
 # 各指標の表示値域（ヒートマップのカラーバー範囲＝縦軸の範囲にも使う）。3 指標とも 0〜1（理論域いっぱい）。
@@ -105,20 +113,23 @@ def plot_heatmap(result: MatrixResult, path: Path, dpi: int = 150) -> None:
     vmin, vmax = _range_for(result.metric)
     im = ax.imshow(result.value, origin="lower", aspect="auto",
                    cmap=_cmap_for(result.metric), vmin=vmin, vmax=vmax)
-    # 各セルに値を数字で表示（NaN は空欄）。実際のセル色の明るさ（輝度）で文字色を黒/白に切り替える。
-    for d in range(n):
-        for p in range(n):
-            v = result.value[d, p]
-            if np.isnan(v):
-                continue
-            r, g, b, _ = im.cmap(im.norm(v))  # 表示色に一致
-            lum = 0.299 * r + 0.587 * g + 0.114 * b
-            ax.text(p, d, f"{v:.3f}", ha="center", va="center", fontsize=8,
-                    color="black" if lum > 0.5 else "white")
+    # 各セルの数値表示は既定オフ（26×26 では詰まって読みにくい）。constants で切替可。
+    if constants.HEATMAP_SHOW_CELL_VALUES:
+        for d in range(n):
+            for p in range(n):
+                v = result.value[d, p]
+                if np.isnan(v):
+                    continue
+                r, g, b, _ = im.cmap(im.norm(v))  # 表示色に一致
+                lum = 0.299 * r + 0.587 * g + 0.114 * b
+                ax.text(p, d, constants.HEATMAP_VALUE_FMT.format(v), ha="center", va="center",
+                        fontsize=6, color="black" if lum > 0.5 else "white")
     ax.set_xlabel("位置 p（リリース内のどの時点を予測するか）")
     ax.set_ylabel("距離 d（滞留期間, ビン単位）")
-    ax.set_xticks(range(n)); ax.set_xticklabels([f"p{p}" for p in range(1, n + 1)])
-    ax.set_yticks(range(n)); ax.set_yticklabels([f"d{d}" for d in range(1, n + 1)])
+    _step = max(1, n // 13)  # ラベルが詰まらないよう間引く（26 なら 2 つおき）
+    _ticks = list(range(0, n, _step))
+    ax.set_xticks(_ticks); ax.set_xticklabels([f"p{t + 1}" for t in _ticks], fontsize=7)
+    ax.set_yticks(_ticks); ax.set_yticklabels([f"d{t + 1}" for t in _ticks], fontsize=7)
     ax.set_title(f"{result.metric}（学習×予測 行列）")
     fig.colorbar(im, ax=ax, label=result.metric)
     fig.tight_layout()
@@ -153,8 +164,8 @@ def plot_position_lines(result: MatrixResult, path: Path, dpi: int = 150) -> Non
 # 従来図（実データ・固定スケール）とは別に追加で出す。行列内コントラスト重視。
 # 注意: 各行列を自分の最良で正規化するためバージョン間比較は不可。差はノイズを含むので過度に解釈しない。
 def _goodness(metric: str, value: np.ndarray) -> np.ndarray:
-    """「高いほど良い」に揃えた値（MAE/RMSE は 1-値、NDCG はそのまま）。"""
-    return value if metric in _HIGHER_IS_BETTER else 1.0 - value
+    """「高いほど良い」に揃えた値（小さいほど良い指標＝norm_rank は 1-値）。"""
+    return value if _higher_is_better(metric) else 1.0 - value
 
 
 def _relative_matrix(result: MatrixResult) -> np.ndarray:
@@ -174,19 +185,22 @@ def plot_heatmap_relative(result: MatrixResult, path: Path, dpi: int = 150) -> N
     vmin, vmax = 0.0, 1.0
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(rel, origin="lower", aspect="auto", cmap=_GOOD_BAD_CMAP, vmin=vmin, vmax=vmax)
-    for d in range(n):
-        for p in range(n):
-            v = rel[d, p]
-            if np.isnan(v):
-                continue
-            r, g, b, _ = im.cmap(im.norm(v))
-            lum = 0.299 * r + 0.587 * g + 0.114 * b
-            ax.text(p, d, f"{v:.3f}", ha="center", va="center", fontsize=8,
-                    color="black" if lum > 0.5 else "white")
+    if constants.HEATMAP_SHOW_CELL_VALUES:
+        for d in range(n):
+            for p in range(n):
+                v = rel[d, p]
+                if np.isnan(v):
+                    continue
+                r, g, b, _ = im.cmap(im.norm(v))
+                lum = 0.299 * r + 0.587 * g + 0.114 * b
+                ax.text(p, d, constants.HEATMAP_VALUE_FMT.format(v), ha="center", va="center",
+                        fontsize=6, color="black" if lum > 0.5 else "white")
     ax.set_xlabel("位置 p（リリース内のどの時点を予測するか）")
     ax.set_ylabel("距離 d（滞留期間, ビン単位）")
-    ax.set_xticks(range(n)); ax.set_xticklabels([f"p{p}" for p in range(1, n + 1)])
-    ax.set_yticks(range(n)); ax.set_yticklabels([f"d{d}" for d in range(1, n + 1)])
+    _step = max(1, n // 13)  # ラベルが詰まらないよう間引く（26 なら 2 つおき）
+    _ticks = list(range(0, n, _step))
+    ax.set_xticks(_ticks); ax.set_xticklabels([f"p{t + 1}" for t in _ticks], fontsize=7)
+    ax.set_yticks(_ticks); ax.set_yticklabels([f"d{t + 1}" for t in _ticks], fontsize=7)
     ax.set_title(f"{result.metric}（相対: 最良セル=1）")
     fig.colorbar(im, ax=ax, label=f"{result.metric} 相対（最良=1, 高いほど良い）")
     fig.tight_layout()
@@ -219,11 +233,9 @@ def plot_position_lines_relative(result: MatrixResult, path: Path, dpi: int = 15
 
 
 def plot_all(result: MatrixResult, out_dir: Path, dpi: int = 150) -> None:
+    """26×26 ヒートマップを出力（色のみ既定）。距離26本の折れ線はスパゲッティになるため作らない。"""
     out_dir = Path(out_dir)
-    # 従来図（実データ・固定スケール）
     plot_heatmap(result, out_dir / "drift_matrix.png", dpi)
-    plot_position_lines(result, out_dir / "position_by_distance.png", dpi)
     # 相対評価版（行列内 最良セル=1）。符号付き・差分指標は「最良=1」正規化が無意味なので作らない。
     if not _is_signed(result.metric):
         plot_heatmap_relative(result, out_dir / "drift_matrix_relative.png", dpi)
-        plot_position_lines_relative(result, out_dir / "position_by_distance_relative.png", dpi)

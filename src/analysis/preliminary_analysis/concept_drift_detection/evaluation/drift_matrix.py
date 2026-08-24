@@ -18,10 +18,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from src.analysis.preliminary_analysis.concept_drift_detection.dataset import set_builder
 from src.analysis.preliminary_analysis.concept_drift_detection.evaluation import metrics
-from src.analysis.preliminary_analysis.concept_drift_detection.model import set_transformer as st
 from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants
+from src.analysis.preliminary_analysis.pretrained_encoders.dataset import set_builder
+from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ def build_matrices(bins: dict, *, encoders, scaler, metric_names=None,
     scaler: 事前学習データで fit した特徴標準化器（§7）
     probe_sink / general_sink: list を渡すと per-Change 予測を追記（保存用）。
     """
-    metric_names = metric_names or constants.ENABLED_METRICS
+    metric_names = metric_names or metrics.metric_columns(constants.K_LIST)
     base_seed = constants.RANDOM_SEED if base_seed is None else base_seed
     bin_count = constants.BIN_COUNT if bin_count is None else bin_count
     device = st.resolve_device() if device is None else device
@@ -97,7 +97,7 @@ def build_matrices(bins: dict, *, encoders, scaler, metric_names=None,
 
             # 汎用ヘッド（§8.3）：位置 p で評価（距離に非依存）
             grows = st.predict(general_head, eval_emb, eval_sets, device)
-            gm = metrics.compute([r[0] for r in grows], [r[1] for r in grows], metric_names, thr)
+            gm = metrics.cell_metrics(grows, constants.K_LIST, thr, constants.POOL_AUC)
             for m in metric_names:
                 gen_vals[m][p][k] = gm[m]
             if general_sink is not None:
@@ -110,7 +110,7 @@ def build_matrices(bins: dict, *, encoders, scaler, metric_names=None,
                 if head is None:
                     continue
                 rows = st.predict(head, eval_emb, eval_sets, device)
-                pm = metrics.compute([r[0] for r in rows], [r[1] for r in rows], metric_names, thr)
+                pm = metrics.cell_metrics(rows, constants.K_LIST, thr, constants.POOL_AUC)
                 for m in metric_names:
                     probe_vals[m][(d, p)][k] = pm[m]
                 if probe_sink is not None:
