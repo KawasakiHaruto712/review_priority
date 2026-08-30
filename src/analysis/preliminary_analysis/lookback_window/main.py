@@ -22,7 +22,8 @@ import pandas as pd
 
 from src.analysis.background_problem.common.data_loader import load_changes, load_release_dates
 from src.analysis.preliminary_analysis.lookback_window.evaluation import metrics as M
-from src.analysis.preliminary_analysis.lookback_window.io import result_io
+from src.analysis.preliminary_analysis.lookback_window.evaluation import ranking
+from src.analysis.preliminary_analysis.lookback_window.io import rank_io, result_io
 from src.analysis.preliminary_analysis.lookback_window.sweep import window_sweep
 from src.analysis.preliminary_analysis.lookback_window.utils import constants
 from src.analysis.preliminary_analysis.lookback_window.visualization import plotter, table
@@ -132,9 +133,17 @@ def draw(project: str, versions: list[str], metric: str, windows, draw_general: 
             logger.warning(f"metrics が無いためスキップ: {project} {version}")
 
 
+def rank(project: str, versions: list[str], metric: str) -> None:
+    """保存済み metrics から 順位集計表（1位/最下位カウント）を出す（§11.3）。"""
+    df, ndays = ranking.build_ranking(project, versions, metric)
+    path = rank_io.save_ranking(df, ndays, project, metric)
+    logger.info(f"順位集計表: {path}")
+    logger.info(f"対象日数: " + ", ".join(f"{k}={v}" for k, v in ndays.items()))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="lookback_window：チューニング窓長の調査")
-    ap.add_argument("--mode", choices=["run", "plot", "recompute"], default="run")
+    ap.add_argument("--mode", choices=["run", "plot", "recompute", "rank"], default="run")
     ap.add_argument("--metric", default=constants.PLOT_METRIC_DEFAULT, help="描画する指標（既定 auc）")
     ap.add_argument("--n-seeds", type=int, default=None, help="使う事前学習 seed 数（既定 全部）")
     ap.add_argument("--windows", type=int, nargs="*", default=None, help="描く窓長（日）")
@@ -153,6 +162,8 @@ def main() -> None:
     elif args.mode == "recompute":
         recompute(project, versions)
         draw(project, versions, args.metric, windows, draw_general)
+    elif args.mode == "rank":
+        rank(project, versions, args.metric)
     else:  # plot
         draw(project, versions, args.metric, windows, draw_general)
 
