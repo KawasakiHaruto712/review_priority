@@ -13,9 +13,12 @@
 - label ロジックは `pretrained_encoders`（基点）から import。
 
 ## 2. 対象・データ
-- nova **26.0.0–30.0.0**（5 リリース）。
-- 評価は各リリースの**サイクル全日を 1 日ずつ**（p1〜p6, 約 180 日）。
-- 事前学習エンコーダ／汎用ヘッドは全リリース共通（`pretrained_encoders`、cutoff=25.0.0）。
+- **複数プロジェクト対応**：nova / neutron / cinder / glance / keystone / swift。**プロジェクトごとに「最新5メジャー版」**をチューニング対象とする（`PROJECTS`＝§12。データ末尾 2024-12-31 基準）。
+  - nova=26–30 / neutron=21–25 / cinder=21–25 / glance=25–29 / keystone=22–26（.0.0）／ **swift=2.30–2.34**（swift は `2.Y.0` で刻む）。
+  - nova 型5プロジェクトはリリース日がほぼ一致（2022-10〜2024-10）。swift のみ数週ズレ。
+- 評価は各リリースの**サイクル全日を 1 日ずつ**（5 サイクル、約 180 日/サイクル）。
+- 事前学習エンコーダ／汎用ヘッドは**その project 用の共有モデル**（`pretrained_encoders`、cutoff は project 別＝`PROJECTS`。例 nova=25.0.0 / swift=2.29.0）。
+- **デフォルトは `PROJECTS` の全プロジェクトを順に実行**（`--project` 未指定時）。`--project <name>` で単一に絞れる（`all` も全実行）。関数（`run`/`recompute`/`draw`/`rank`）は単一 project を引数で受ける。
 
 ## 3. 計測点・集合の単位
 - 計測点 T ＝ **毎日 0 時**（1 日 1 スナップショット）。各 T のアクティブな Change 群を 1 集合とする（定義・構築コードは `pretrained_encoders` から import）。
@@ -69,9 +72,14 @@
 - **`--mode recompute`**：生予測から**指標テーブルだけ作り直す**（新しい指標を足したいとき。モデル再実行なし）。
 - **`--mode rank`**：保存済み `metrics.csv` から**順位集計表（1位/最下位カウント）**だけ出す（§11.3。モデル再実行なし）。
 
+**対象プロジェクトの選択（全モード共通）**：
+- **`--project <name>`**：対象プロジェクトを指定。**未指定なら `PROJECTS` の全プロジェクトを順に実行**（`all` も同義）。`PROJECTS`（§12）から**その project の cutoff・5版**を引く。関数（`run`/`recompute`/`draw`/`rank`）は **単一 project を引数でも受ける**（CLI だけでなくコードから直接呼べる）。
+- `--mode run` で対象 project の事前学習エンコーダが不足していれば、`pretrained_encoders.build_and_save(project=...)` で**その project 用に自動作成**する（対象 project を正しく伝播）。
+
 **描画指標の選択（run / plot 共通）**：
 - **`--metric <name>`**：**指定した評価指標をそのままプロットする**（既定 `auc`。例 `--metric recall@10` なら recall@10 の折れ線を描く）。全指標は保存済みなので、指標を変えても**再実行不要で描き替えられる**。
 - `--windows`：描く窓長を選択（既定は全部）。
+- `--versions`：対象版を手動上書き（既定は `PROJECTS` の5版）。
 - 汎用ヘッド（チューニングなし）の基準線は**デフォルトで重ねる**（`--no-general` で外す）。
 
 ## 11. 出力・図
@@ -89,7 +97,7 @@
 ### 11.2 折れ線グラフ（補助・バージョンごと）
 - バージョンごとに**ただの折れ線**：横軸＝日、縦軸＝指標（既定 AUC）。
 - **p1〜p6 の破線・約1ヶ月ごとの集計テキストは入れない**（変化は二の次のため）。
-- **窓長ごとに線**（色分け・**小さめマーカー**・欠測は飛ばして結ぶ）。
+- **窓長ごとに線**（色分け・**小さめマーカー**・欠測は飛ばして結ぶ）。**描く窓長は `PLOT_WINDOWS_DAYS`（constants）で選べる**（既定は全窓。例 1d/1w/2M なら `[1,7,60]`）。`--windows` で都度上書きも可。
 - **凡例は残す**（**欠測日数を凡例に控えめ併記**：例 `1day (欠測 34/180)`）。
 - **汎用ヘッド（チューニングなし）の基準線をデフォルトで重ねる**（`--no-general` で外せる）。
 
@@ -111,7 +119,10 @@
 - **保存先**：`data/analysis/preliminary_analysis/lookback_window/<project>/summary/rank_<metric>.csv`（§11.1 の `summary_<metric>.csv` と並ぶ）。
 
 ## 12. パラメータ（constants に集約）
-- 本ディレクトリ `constants.py` に：窓長 `WINDOWS_DAYS=[1,3,7,14,30,60]`、`REVIEW_HORIZON_DAYS=1`（＝Δ）、top-k の `K_LIST=[5,10,20]`（＋正例数）、欠測ガード、`PLOT_METRIC_DEFAULT="auc"`、seed・集約、`PRETRAINED_CUTOFF="25.0.0"` 等。`pretrained_encoders` の保存先・load API を参照。
+- 本ディレクトリ `constants.py` に：窓長 `WINDOWS_DAYS=[1,3,7,14,30,60]`、`REVIEW_HORIZON_DAYS=1`（＝Δ）、top-k の `K_LIST=[5,10,20]`（＋正例数）、欠測ガード、`PLOT_METRIC_DEFAULT="auc"`、seed・集約、既定 `PROJECT="nova"` 等。`pretrained_encoders` の保存先・load API を参照。
+- **`PROJECTS`（プロジェクト別設定）**：`project -> {"cutoff": <版ラベル>, "versions": [<5版>]}` の対応表を本ディレクトリにも保持する（`pretrained_encoders/constants.py` と**同じ内容を各ディレクトリが自己完結で持つ**。重複は許容）。
+  - 6プロジェクト分：nova(25.0.0; 26–30) / neutron(20.0.0; 21–25) / cinder(20.0.0; 21–25) / glance(24.0.0; 25–29) / keystone(21.0.0; 22–26) / swift(2.29.0; 2.30–2.34)。
+  - `--project` 指定でこの表から cutoff・versions を引く。旧 `PRETRAINED_CUTOFF="25.0.0"`（nova 固定）は廃止し、`PROJECTS[project]["cutoff"]` に置き換える。
 
 ## 13. スコープ外（今回）＋ 将来
 - **変化点検出は step2**（`concept_drift_detection` 側）。本分析では実施しない。設計メモ：順位の精度は「モデル×実情」の合わさった信号で実情変化を担うが、(a)基準変化/(b)判別ギリギリは精度だけでは切れず **retrain-recovery で確定**、モデルフリー信号（ベースレート・P(x|y=1) vs y=0）は裏取り。アルゴリズム（PELT / ADWIN 等）は step1 の結果を見て決める。

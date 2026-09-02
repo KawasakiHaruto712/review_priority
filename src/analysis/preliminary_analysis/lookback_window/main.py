@@ -42,14 +42,14 @@ logger = logging.getLogger(__name__)
 def _resolve_seeds(project: str, n_seeds: int | None) -> list[int]:
     """使う事前学習 seed を返す。保存済みが要求数に満たなければ、不足分だけ build する
     （lookback_window さえ実行すれば必要数まで揃えて probe 結果まで出せるように）。"""
-    cutoff = constants.PRETRAINED_CUTOFF
+    cutoff = constants.cutoff_for(project)
     saved = store.list_seeds(project, cutoff)
     target = n_seeds if n_seeds else pre_constants.N_REPEATS
     missing = [k for k in range(target) if k not in saved]
     if missing:
         logger.info(f"事前学習モデルが不足（保存 {len(saved)} / 要求 {target}、{project} cutoff={cutoff}）。"
                     f"不足分 seed{missing} を作成します…")
-        build_encoders.build_and_save(seed_indices=missing)
+        build_encoders.build_and_save(project=project, seed_indices=missing)
         saved = store.list_seeds(project, cutoff)
         if not saved:
             raise RuntimeError("事前学習モデルの作成に失敗しました。")
@@ -68,7 +68,8 @@ def run(project: str, versions: list[str], n_seeds: int | None) -> None:
     seeds = _resolve_seeds(project, n_seeds)
     logger.info(f"使用する事前学習 seed: {seeds}")
     # seed ごとに (encoder, general_head, scaler) を load
-    loaded = [store.load_pretrained(project, constants.PRETRAINED_CUTOFF, s, device) for s in seeds]
+    cutoff = constants.cutoff_for(project)
+    loaded = [store.load_pretrained(project, cutoff, s, device) for s in seeds]
 
     for version in versions:
         try:
@@ -136,6 +137,9 @@ def draw(project: str, versions: list[str], metric: str, windows, draw_general: 
 def rank(project: str, versions: list[str], metric: str) -> None:
     """保存済み metrics から 順位集計表（1位/最下位カウント）を出す（§11.3）。"""
     df, ndays = ranking.build_ranking(project, versions, metric)
+    if not ndays.get("全体"):
+        logger.warning(f"metrics が無い/空のためスキップ（先に --mode run が必要）: {project}")
+        return
     path = rank_io.save_ranking(df, ndays, project, metric)
     logger.info(f"順位集計表: {path}")
     logger.info(f"対象日数: " + ", ".join(f"{k}={v}" for k, v in ndays.items()))
@@ -148,24 +152,35 @@ def main() -> None:
     ap.add_argument("--n-seeds", type=int, default=None, help="使う事前学習 seed 数（既定 全部）")
     ap.add_argument("--windows", type=int, nargs="*", default=None, help="描く窓長（日）")
     ap.add_argument("--no-general", action="store_true", help="汎用ヘッド基準線を描かない")
-    ap.add_argument("--versions", nargs="*", default=None, help="対象バージョン（既定 全部。例 30.0.0）")
+    ap.add_argument("--project", default=None,
+                    help="対象プロジェクト（未指定なら constants.PROJECTS の全プロジェクト。'all' も同義）")
+    ap.add_argument("--versions", nargs="*", default=None,
+                    help="対象バージョン（既定は PROJECTS の5版を使用。例 30.0.0）")
     args = ap.parse_args()
 
-    project = constants.PROJECT
-    versions = args.versions if args.versions else constants.VERSIONS
+    # --project 未指定（または 'all'）なら constants.PROJECTS の全プロジェクトを順に回す
+    if args.project in (None, "all"):
+        projects = list(constants.PROJECTS.keys())
+    else:
+        projects = [args.project]
     windows = args.windows if args.windows else None
-    draw_general = not args.no_general
+    # 既定は constants.DRAW_GENERAL_DEFAULT に従う（None を渡すと plotter/table が定数を見る）。
+    # --no-general が指定されたときだけ強制オフ。
+    draw_general = False if args.no_general else None
 
-    if args.mode == "run":
-        run(project, versions, args.n_seeds)
-        draw(project, versions, args.metric, windows, draw_general)
-    elif args.mode == "recompute":
-        recompute(project, versions)
-        draw(project, versions, args.metric, windows, draw_general)
-    elif args.mode == "rank":
-        rank(project, versions, args.metric)
-    else:  # plot
-        draw(project, versions, args.metric, windows, draw_general)
+    for project in projects:
+        versions = args.versions if args.versions else constants.versions_for(project)
+        logger.info(f"===== プロジェクト: {project}（{len(versions)}版）=====")
+        if args.mode == "run":
+            run(project, versions, args.n_seeds)
+            draw(project, versions, args.metric, windows, draw_general)
+        elif args.mode == "recompute":
+            recompute(project, versions)
+            draw(project, versions, args.metric, windows, draw_general)
+        elif args.mode == "rank":
+            rank(project, versions, args.metric)
+        else:  # plot
+            draw(project, versions, args.metric, windows, draw_general)
 
 
 if __name__ == "__main__":

@@ -83,9 +83,12 @@ def build_ranking(project: str, versions: list[str], metric: str) -> tuple[pd.Da
     df = pd.DataFrame(index=windows)
     ndays: dict[str, int] = {}
 
-    groups = [(v, daily.xs(v, level="version") if v in daily.index.get_level_values("version") else
-               pd.DataFrame(columns=windows)) for v in versions]
-    groups.append(("全体", daily))  # 全版プール
+    # daily が空（metrics 未作成の project 等）でも落ちないよう、version レベルの有無で分岐
+    has_data = isinstance(daily.index, pd.MultiIndex) and "version" in (daily.index.names or [])
+    present = set(daily.index.get_level_values("version")) if has_data else set()
+    empty = pd.DataFrame(columns=windows)
+    groups = [(v, daily.xs(v, level="version") if v in present else empty) for v in versions]
+    groups.append(("全体", daily if has_data else empty))  # 全版プール
 
     for label, piv in groups:
         first, last, n = _count_first_last(piv, windows)
