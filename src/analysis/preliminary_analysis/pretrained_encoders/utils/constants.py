@@ -13,12 +13,22 @@ EXTRA_BOTS_FILE = DEFAULT_CONFIG / "extra_bots.txt"
 # ── 出力（保存先） ────────────────────────────────────
 OUTPUT_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "pretrained_encoders"
 
-# ── 事前学習の対象・締め切り（design.md §1） ──────────────────
-# 事前学習データ = プロジェクト開始 〜 FIRST_TARGET_VERSION のサイクル開始（＝その直前リリース）まで。
-# 全リリースで共有する単一モデル（per-release では作らない）。
-TARGET_PROJECT = "nova"
-FIRST_TARGET_VERSION = "26.0.0"     # このバージョンのサイクル開始を締め切りに使う
-PRETRAIN_CUTOFF = None              # ISO 日付を書けば固定も可（None なら上記から自動）
+# ── 事前学習の対象・締め切り（design.md §1, §7） ─────────────
+# 事前学習データ = プロジェクト開始 〜 そのプロジェクトの cutoff リリース日まで。
+# プロジェクトごとに独立の共有モデルを作る（per-release では作らない）。
+TARGET_PROJECT = "nova"            # デフォルトの対象プロジェクト
+# プロジェクト別設定：project -> {"cutoff": 版ラベル, "versions": チューニング5版}。
+# cutoff は事前学習の締め（サイクル開始）。cutoff の「日付」は major_releases_summary.csv から実行時に引く
+# （日付は二重管理しない）。versions は下流のチューニング対象（本ディレクトリでは cutoff のみ使用）。
+# 同じ表を lookback_window/constants.py にも別途保持する（各ディレクトリ自己完結。重複は許容）。
+PROJECTS = {
+    "nova":     {"cutoff": "25.0.0", "versions": ["26.0.0", "27.0.0", "28.0.0", "29.0.0", "30.0.0"]},
+    "neutron":  {"cutoff": "20.0.0", "versions": ["21.0.0", "22.0.0", "23.0.0", "24.0.0", "25.0.0"]},
+    "cinder":   {"cutoff": "20.0.0", "versions": ["21.0.0", "22.0.0", "23.0.0", "24.0.0", "25.0.0"]},
+    "glance":   {"cutoff": "24.0.0", "versions": ["25.0.0", "26.0.0", "27.0.0", "28.0.0", "29.0.0"]},
+    "keystone": {"cutoff": "21.0.0", "versions": ["22.0.0", "23.0.0", "24.0.0", "25.0.0", "26.0.0"]},
+    "swift":    {"cutoff": "2.29.0", "versions": ["2.30.0", "2.31.0", "2.32.0", "2.33.0", "2.34.0"]},
+}
 
 # ── 計測点・アクティブ集合（design.md §2） ───────────────────
 MEASUREMENT_STEP_DAYS = 1   # 計測点 T = 毎日 0 時（刻み日数。1=毎日）

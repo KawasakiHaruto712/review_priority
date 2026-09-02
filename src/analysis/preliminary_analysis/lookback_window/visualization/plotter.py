@@ -36,7 +36,8 @@ def _series(mdf: pd.DataFrame, metric: str, window_label: str):
 def plot_version(project: str, version: str, metric: str, out_path: Path,
                  windows=None, draw_general: bool | None = None) -> None:
     """1 バージョンの折れ線を描いて保存。"""
-    windows = constants.WINDOWS_DAYS if windows is None else windows
+    # 既定は constants.PLOT_WINDOWS_DAYS（描く窓長を後から調整可）。--windows で上書き。
+    windows = constants.PLOT_WINDOWS_DAYS if windows is None else windows
     draw_general = constants.DRAW_GENERAL_DEFAULT if draw_general is None else draw_general
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

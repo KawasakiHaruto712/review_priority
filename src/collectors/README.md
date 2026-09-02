@@ -7,7 +7,8 @@
 | ファイル | 説明 |
 |---------|------|
 | `openstack.py` | OpenStack Gerritからのデータ収集クラス |
-| `release_collector.py` | リリース情報の収集機能 |
+| `release_collector.py` | リリース情報の収集機能（`releases_summary.csv` を出力） |
+| `major_release_storage.py` | `releases_summary.csv` からメジャーリリースだけを抽出し `major_releases_summary.csv` を生成 |
 
 ## 🔧 主要機能
 
@@ -21,6 +22,13 @@
 ### ReleaseCollector (`release_collector.py`)
 - **リリース情報取得**: OpenStackの各プロジェクトのリリース情報を収集
 - **バージョン管理**: メジャーリリースの日程情報を管理
+- **出力**: 全リリースを `releases_summary.csv`（列：`component, version, release_date, yaml_url`）に保存
+
+### メジャーリリース抽出 (`major_release_storage.py`)
+- **目的**: `releases_summary.csv` から**メジャーリリースだけを抽出**して `major_releases_summary.csv`（列：`project, version, release_date, yaml_url`）を生成する（分析側 `load_release_dates` が使う）。
+- **背景**: この CSV は生成コードが残っていなかったため、`releases_summary.csv` から再生成できるようにする。
+- **注記**: swift は版付け方式が異なる（`X.0.0` でなく `2.Y.0` で刻む）ため、swift だけ別ルールで抽出する。
+- **入出力**: 入力 `data/openstack_collected/releases_summary.csv` → 出力 `data/openstack_collected/major_releases_summary.csv`。
 
 ## 📊 収集データ形式
 

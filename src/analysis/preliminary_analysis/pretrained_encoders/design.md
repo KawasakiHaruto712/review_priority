@@ -1,16 +1,18 @@
 # pretrained_encoders 設計書（共有基盤：事前学習エンコーダ＋汎用ヘッドの作成・保存）
 
 ## 0. 位置づけ・要旨
-- 集合 Transformer の**事前学習エンコーダ（表現）＋汎用ヘッド（仮予測ヘッド）を一度だけ作って保存**し、下流の分析（まず `lookback_window`、将来は他分析も）が **load して使い回す**ための**共有基盤**。
+- 集合 Transformer の**事前学習エンコーダ（表現）＋汎用ヘッド（仮予測ヘッド）を（プロジェクトごとに）一度だけ作って保存**し、下流の分析（まず `lookback_window`、将来は他分析も）が **load して使い回す**ための**共有基盤**。
+- **対象は複数プロジェクト**（nova / neutron / cinder / glance / keystone / swift）。project を引数に取り、**プロジェクトごとに独立のエンコーダ群**を作る（§1, §7 の `PROJECTS`）。
 - 前回（`concept_drift_detection`）は実行時にエンコーダを保存しておらず作り直しになった。その反省で**作成と利用を分離**する。
 - **本ディレクトリを"基点（基盤）"とする**：モデル・データ構築・特徴・label・Scaler など必要な部品を**本ディレクトリ内に持つ**（他分析からの流用ではなく、ここを起点にして、下流はここを import／オーバーライドして使う）。`concept_drift_detection` の該当コードは**参考にしてよいが依存しない**（本ディレクトリを正とする）。
 - 学習するのは**エンコーダ**と**汎用ヘッド**。下流は凍結エンコーダの上で線形ヘッドを貼り直す（＝チューニング。`lookback_window` §5）。汎用ヘッドは「チューニングしない汎用予測」の基準として下流でも使える。
 - 用語：レビュー対象の単位は **Change**（Gerrit）で統一。
 
-## 1. 事前学習データ（共有・単一モデル）
-- **プロジェクト開始 〜 25.0.0 リリース日（＝26.0.0 のサイクル開始）の直前まで**の全計測点を使う。
-- 26.0.0〜30.0.0 の**どのリリースの下流分析でも、この同一エンコーダ／汎用ヘッドを使う**（per-release では作らない。shared 方式）。
-- リーク防止：分析対象期間（26.0.0 以降）は事前学習に**含めない**。締め切りは `PRETRAIN_CUTOFF`（None なら 26.0.0 サイクル開始を自動採用）。
+## 1. 事前学習データ（プロジェクトごとに 1 モデル）
+- **対象プロジェクト**：nova / neutron / cinder / glance / keystone / swift（`PROJECTS`＝§7）。各プロジェクトで**独立に**エンコーダ＋汎用ヘッドを作る。
+- **プロジェクト開始 〜 そのプロジェクトの cutoff リリース日まで**の全計測点を使う。cutoff は `PROJECTS` で project ごとに定義（例：nova=25.0.0 / neutron=20.0.0 / cinder=20.0.0 / glance=24.0.0 / keystone=21.0.0 / swift=2.29.0）。cutoff の**日付は `major_releases_summary.csv` から引く**（日付は二重管理しない）。
+- その project の**チューニング5版のどの下流分析でも、その project の同一エンコーダ／汎用ヘッドを使う**（per-release では作らない。shared 方式）。
+- リーク防止：チューニング対象期間（cutoff より後）は事前学習に**含めない**。
 
 ## 2. 計測点・集合の単位・特徴・標準化（本ディレクトリに実装）
 - 計測点 T ＝ 毎日 0 時（`MEASUREMENT_STEP_DAYS=1`）。各 T で **アクティブな Change 群**（`T-LOOKBACK <= created <= T < decision_time`）を 1 つの「集合」とする。
@@ -71,7 +73,11 @@ list_seeds(project, cutoff) -> [seed, ...]      # 保存済み seed の列挙
 - 下流は `config` で `SetEncoder`／`Head` を同一構成に再構築 → `encoder.pt`／`general_head.pt` を load → `eval()`／凍結、`scaler.json` から `Scaler` を復元。
 
 ## 7. パラメータ（constants に集約）
-- 本ディレクトリに `constants.py` を持つ（基点）。事前学習・モデルの設定（`PRETRAIN_*`, `D_MODEL` 等, `PRETRAIN_CUTOFF`, `N_REPEATS`, `RANDOM_SEED`, `MEASUREMENT_STEP_DAYS`, `LOOKBACK_DAYS`, `REVIEW_HORIZON_DAYS`）を集約。値は `concept_drift_detection` と同一で開始。
+- 本ディレクトリに `constants.py` を持つ（基点）。事前学習・モデルの設定（`PRETRAIN_*`, `D_MODEL` 等, `N_REPEATS`, `RANDOM_SEED`, `MEASUREMENT_STEP_DAYS`, `LOOKBACK_DAYS`, `REVIEW_HORIZON_DAYS`）を集約。
+- **`PROJECTS`（プロジェクト別設定）**：`project -> {"cutoff": <版ラベル>, "versions": [<5版>]}` の対応表を持つ。cutoff は事前学習の締め、versions は下流のチューニング対象（本ディレクトリでは cutoff のみ使用）。cutoff の**日付は `major_releases_summary.csv` から実行時に引く**。
+  - 例：`{"nova": {"cutoff": "25.0.0", "versions": ["26.0.0",...,"30.0.0"]}, "swift": {"cutoff": "2.29.0", "versions": ["2.30.0",...,"2.34.0"]}, ...}`（6プロジェクト）。
+  - **同じ `PROJECTS` は `lookback_window/constants.py` にも別途保持**する（各ディレクトリが自己完結するため。重複は許容）。
+- 旧 `FIRST_TARGET_VERSION` / `PRETRAIN_CUTOFF`（cutoff を版から自動導出する仕組み）は**廃止**し、`PROJECTS` の cutoff ラベルに一本化する。
 
 ## 8. ディレクトリ・コード構成（自己完結・基点／機能別フォルダ）
 `concept_drift_detection` と同じく機能ごとにフォルダ分けする（一貫性・流用元を 1:1 コピーしやすい）。
@@ -87,6 +93,7 @@ pretrained_encoders/
   io/           store.py                             # 保存/読込（save_pretrained / load_pretrained / list_seeds）
   build_encoders.py                                  # エントリ：データ構築 → 学習 → seed分（encoder＋汎用ヘッド）保存
 ```
+- **`build_encoders.build_and_save(project="nova", n=None, seed_indices=None)`**：**project を引数で受け取り**、`PROJECTS` から cutoff を引いて「プロジェクト開始 〜 cutoff リリース日」で事前学習し、`<project>/cutoff_<cutoff>/seed*` に保存する。デフォルト project は **nova**。プロジェクトごとに seed 群を作成する。
 - 下流（`lookback_window` 等）は **`pretrained_encoders` を基点に import**（例：`from ...pretrained_encoders.model.set_transformer import SetEncoder, Head, Scaler, train_probe, embed_sets`）。
 
 ## 9. スコープ外・拡張
