@@ -7,10 +7,10 @@
   1. データ読み込み（changes / release_dates / bot 名 / 特徴用 DataFrame）
   2. 事前学習エンコーダ＋汎用ヘッドを pretrained_encoders から load（不足 seed は自動作成。§6.1）
   3. 各対象リリースで:
-       レコード生成 → per-release 26 分割ビン割当（§4）
-       → 距離×位置行列（probe / 汎用ヘッド / 差分）を構築（§6.2, §8.3）
-       → ドリフト検定（§8.2）→ 保存・作図（26×26 ヒートマップ。§10）
-出力: <project>/<model>/<version>/{probe,general,diff}/<metric>/ ＋ predictions ＋ summary。
+       レコード生成（範囲は §4.4 で逆算）→ 日ごとの集合 → 位置（列）の割当（§4.3）
+       → 距離×位置行列（probe / 汎用ヘッド / 差分）を**日次スライド学習**で構築（§4.1, §6.2, §8.3）
+       → ドリフト検定（§8.2）→ 保存・作図（N×N ヒートマップ。§10）
+出力: <project>/<model>/<version>/{probe,general,diff}/<metric>/ ＋ daily_metrics ＋ summary。
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from src.analysis.preliminary_analysis.concept_drift_detection.io import result_
 from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants
 from src.analysis.preliminary_analysis.concept_drift_detection.visualization import plotter
 from src.analysis.preliminary_analysis.pretrained_encoders import build_encoders
-from src.analysis.preliminary_analysis.pretrained_encoders.dataset import record_builder
+from src.analysis.preliminary_analysis.pretrained_encoders.dataset import record_builder, set_builder
 from src.analysis.preliminary_analysis.pretrained_encoders.features import feature_builder
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
@@ -42,14 +42,15 @@ def _resolve_encoders(project: str, device):
     """pretrained_encoders から N_REPEATS 個の (encoder, general_head) を load（不足は自動作成）。
 
     scaler は全 seed で同一（同じ事前学習データで fit）なので先頭のものを共有で使う。
+    cutoff は project ごとに異なる（constants.PROJECTS）。
     """
-    cutoff = constants.PRETRAINED_CUTOFF
+    cutoff = constants.cutoff_for(project)
     saved = store.list_seeds(project, cutoff)
     target = constants.N_REPEATS
     missing = [k for k in range(target) if k not in saved]
     if missing:
         logger.info(f"事前学習モデルが不足（保存 {len(saved)} / 要求 {target}）。不足 seed{missing} を作成します…")
-        build_encoders.build_and_save(seed_indices=missing)
+        build_encoders.build_and_save(project=project, seed_indices=missing)
         saved = store.list_seeds(project, cutoff)
     seeds = saved[:target]
     encoders, scaler = [], None
@@ -91,24 +92,34 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
 
     metric_names = metrics.metric_columns(constants.K_LIST)
     summary = {m: [] for m in constants.PLOT_METRICS}
+    # 窓長・刻み・格子サイズは project ごと（§4.2。step1 で選んだ最良窓に基づく）
+    window = constants.window_for(project)
+    step = constants.step_for(project)
+    grid = constants.grid_for(project)
+    logger.info(f"格子: {grid}×{grid}（窓長 {window} 日・刻み {step} 日・スパン {step * (grid - 1)} 日）")
     for version in versions:
         try:
             cs_R, ce_R, _cs_prev = binning.target_cycles(rel_df, project, version)
         except ValueError as e:
             logger.warning(f"スキップ [{project} {version}]: {e}")
             continue
-        logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()}）---")
-        # 3. レコード生成 → per-release ビン割当
-        p_start = binning.pool_start(rel_df, project, version)
-        records = record_builder.build_records(changes, project, p_start, ce_R, bot_names, all_prs, rel_df)
-        bins = binning.make_local_bins(records, rel_df, project, version,
-                                       constants.BIN_COUNT, constants.BIN_DAY_ALIGNED)
+        # 3. レコード生成（範囲は §4.4 で逆算）→ 日ごとの集合 → 位置（列）の割当
+        rec_start = binning.record_start(cs_R, window, step, grid, constants.RECORD_MARGIN_DAYS)
+        logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()} / "
+                    f"レコード生成 {rec_start.date()} から）---")
+        records = record_builder.build_records(changes, project, rec_start, ce_R,
+                                               bot_names, all_prs, rel_df)
+        day_sets = {s.t.date(): s for s in set_builder.build_sets(records, constants.MAX_SET_SIZE)}
+        positions = binning.position_of_days(cs_R, ce_R, grid, constants.BIN_DAY_ALIGNED)
+        eval_dates = [d for d in sorted(day_sets) if d in positions]
+        logger.info(f"評価日数: {len(eval_dates)} / 全日集合: {len(day_sets)}")
 
-        # 距離×位置行列（probe / 汎用 / 差分）
-        probe_sink = [] if constants.SAVE_PREDICTIONS else None
-        general_sink = [] if constants.SAVE_PREDICTIONS else None
-        res = drift_matrix.build_matrices(bins, encoders=encoders, scaler=scaler,
-                                          probe_sink=probe_sink, general_sink=general_sink)
+        # 距離×位置行列（probe / 汎用 / 差分）を日次スライド学習で構築
+        daily_sink = [] if constants.SAVE_DAILY_METRICS else None
+        res = drift_matrix.build_matrices(day_sets, eval_dates, positions,
+                                          encoders=encoders, scaler=scaler, grid=grid,
+                                          window_days=window, step_days=step,
+                                          daily_sink=daily_sink)
 
         base = out_root / project / model_name / version
         meta = {"project": project, "version": version, "model": model_name,
@@ -127,10 +138,12 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
             summary[m].append({"version": version, "drift_exists": dr["drift_exists"],
                                "min_p_value": dr["min_p_value"]})
 
-        if probe_sink is not None:
-            result_writer.write_predictions(probe_sink, meta, base)
-        if general_sink is not None:
-            result_writer.write_general_predictions(general_sink, meta, base)
+        # (評価日, 距離, seed) ごとの指標を保存（位置のまとめ直し用。§10）
+        if daily_sink is not None:
+            path = result_writer.write_daily_metrics(daily_sink, {**meta, "grid": grid,
+                                                                  "window_days": window,
+                                                                  "step_days": step}, base)
+            logger.info(f"日次指標を保存: {path}（{len(daily_sink)} 行）")
 
     # リリース横断の本数集計（§8.2）
     for m, per_version in summary.items():
@@ -140,11 +153,12 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
 
 
 def run() -> None:
+    """constants.PROJECTS の全プロジェクト×5版を実行する（§2）。"""
     rel_df = load_release_dates()
-    for project, versions in constants.TARGET_PROJECTS.items():
+    for project in constants.PROJECTS:
         logger.info(f"===== プロジェクト: {project} =====")
         changes = load_changes(project)
-        analyze(changes, rel_df, project, versions, constants.OUTPUT_ROOT)
+        analyze(changes, rel_df, project, constants.versions_for(project), constants.OUTPUT_ROOT)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,14 @@
-"""距離×時期行列の構築（転移学習フロー。design.md §6, §8）。
+"""距離×位置行列の構築（日次スライド学習。design.md §4, §6, §8）。
 
 各 seed k（＝別の事前学習エンコーダ）について：
-  1. 教師あり事前学習でエンコーダ（＋汎用ヘッド）を作る（§6.1）
-  2. 各ビンの集合を埋め込みキャッシュ（§6.4）
-  3. 学習ビンごとに linear probe を学習（使い回し）→ 評価ビンで予測（§6.2）
-  4. 汎用ヘッドも各位置で評価（§8.3）
-seed 横断で中央値＋IQR に集約し、以下 3 種の行列（MatrixResult）を返す：
-  - probe   : per-bin probe の d×p 行列
+  1. 凍結エンコーダで**全日の集合を 1 回だけ埋め込みキャッシュ**（§6.4）
+  2. **評価日ごと・距離ごとに** linear probe を貼り直す（§6.2）
+       学習期間 = [x − 窓長 − 刻み×d, x − 1 − 刻み×d]（末尾は前日側。評価日自身は入れない）
+       同じ「学習期間の末尾日」の probe は共有（キャッシュ）
+  3. その評価日を Δ=1 で予測 → **日次の指標**を算出
+  4. 汎用ヘッドも各評価日で評価（距離に非依存。§8.3）
+日次の指標を**位置（列）の日数で平均** → seed 横断で中央値＋IQR に集約し、3 種の行列を返す：
+  - probe   : 日次 probe の d×p 行列（**d=0 が step1 の fresh 窓と一致**）
   - general : 汎用ヘッドの d×p 行列（距離 d に非依存＝列 p ごとに一定）
   - diff    : probe − 汎用ヘッド（正＝特化が効く／負＝特化が悪化。§8.3）
 """
@@ -15,6 +17,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 import numpy as np
 
@@ -28,7 +31,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MatrixResult:
-    """1 指標の d×p 行列。value/iqr は [距離 d(0始まり), 位置 p(0始まり)] の 2 次元。"""
+    """1 指標の d×p 行列。value/iqr は [距離 d(0始まり), 位置 p(0始まり)] の 2 次元。
+
+    bin_count は格子サイズ N（距離の行数 ＝ 位置の列数。design.md §4.2）。
+    距離 d は 0 始まりで、**d=0 が step1 の fresh 窓**に対応する。
+    """
     metric: str
     bin_count: int
     value: np.ndarray
@@ -50,102 +57,151 @@ def _empty_matrix(bin_count: int) -> np.ndarray:
     return np.full((bin_count, bin_count), np.nan)
 
 
-def build_matrices(bins: dict, *, encoders, scaler, metric_names=None,
-                   base_seed=None, bin_count=None, device=None,
-                   probe_sink=None, general_sink=None) -> dict:
-    """転移学習フローで probe / general / diff の行列（指標ごと）を構築する。
+def _counts(sets) -> tuple[int, int]:
+    """集合群の (正例数, 負例数)。"""
+    total = sum(len(s) for s in sets)
+    pos = int(sum(sum(s.labels) for s in sets))
+    return pos, total - pos
 
-    bins: {ローカルビン index -> レコード列}（binning.make_local_bins の出力）
-    encoders: [(凍結エンコーダ, 汎用ヘッド), ...]（seed ごと。全リリース共有。§6.1）
-    scaler: 事前学習データで fit した特徴標準化器（§7）
-    probe_sink / general_sink: list を渡すと per-Change 予測を追記（保存用）。
+
+def _daily_row(day, distance, seed_idx: int, position: int,
+               n_pos_e: int, n_neg_e: int, n_pos_t: int, n_neg_t: int,
+               missing: bool, reason: str, mvals: dict | None) -> dict:
+    """(評価日, 距離, seed) ごとの指標行（保存用。§10）。distance='general' は汎用ヘッド。"""
+    row = {"day": day.isoformat(), "distance": distance, "seed": seed_idx, "position": position + 1,
+           "n_pos_eval": n_pos_e, "n_neg_eval": n_neg_e,
+           "n_pos_train": n_pos_t, "n_neg_train": n_neg_t,
+           "missing": int(missing), "missing_reason": reason}
+    for col in metrics.metric_columns(constants.K_LIST):
+        row[col] = (mvals or {}).get(col, metrics.NAN)
+    return row
+
+
+def build_matrices(day_sets: dict, eval_dates: list, positions: dict, *,
+                   encoders, scaler, grid: int, window_days: int, step_days: int,
+                   metric_names=None, base_seed=None, device=None,
+                   daily_sink=None) -> dict:
+    """日次スライド学習で probe / general / diff の行列（指標ごと）を構築する（§4, §6.2）。
+
+    day_sets   : {日付 -> TSet}（学習に遡る範囲＋評価期間を含む。1 日 1 集合）
+    eval_dates : 評価日の列（対象サイクルの全日）
+    positions  : {日付 -> 位置 p（0..grid-1）}（binning.position_of_days の出力）
+    grid       : 格子サイズ N（距離の行数 ＝ 位置の列数）
+    window_days: 学習に使う期間の長さ（日）
+    step_days  : 距離 1 段ぶんの日数
+    encoders   : [(凍結エンコーダ, 汎用ヘッド), ...]（seed ごと。§6.1）
+    scaler     : 事前学習データで fit した特徴標準化器
+    daily_sink : list を渡すと (評価日, 距離, seed) ごとの指標行を追記（保存用。§10）
     """
     metric_names = metric_names or metrics.metric_columns(constants.K_LIST)
     base_seed = constants.RANDOM_SEED if base_seed is None else base_seed
-    bin_count = constants.BIN_COUNT if bin_count is None else bin_count
     device = st.resolve_device() if device is None else device
-    max_set = constants.MAX_SET_SIZE
     thr = constants.CLASSIFY_THRESHOLD
-    n_repeats = len(encoders)
 
-    # 各ビンの集合（TSet）を用意（0..bin_count-1 が対象リリース、-bin_count..-1 が直前リリース）
-    sets_by_bin = {i: set_builder.sets_in_bins(bins, i, max_set) for i in bins}
-
-    # per-k の指標値を貯める（k でペアを取れるよう dict{k: value}）
-    probe_vals = {m: defaultdict(dict) for m in metric_names}   # m -> (d,p) -> {k: val}
-    gen_vals = {m: defaultdict(dict) for m in metric_names}      # m -> p -> {k: val}
+    all_dates = sorted(day_sets)
+    # m -> (d,p) -> seed -> [日次値]／m -> p -> seed -> [日次値]（汎用は距離に非依存）
+    probe_vals = {m: defaultdict(lambda: defaultdict(list)) for m in metric_names}
+    gen_vals = {m: defaultdict(lambda: defaultdict(list)) for m in metric_names}
 
     for k, (encoder, general_head) in enumerate(encoders):
         seed = base_seed + k
-        embeds = {i: st.embed_sets(encoder, scaler, sets_by_bin[i], device) for i in sets_by_bin}
+        # 全日の集合を 1 回だけ埋め込み（凍結エンコーダ。使い回す。§6.4）
+        embeds = st.embed_sets(encoder, scaler, [day_sets[d] for d in all_dates], device)
+        emb_by_date = dict(zip(all_dates, embeds))
 
-        # 学習ビンごとに probe を 1 回学習して使い回す（同一 i を共有するセルで再学習しない）
-        probe_cache: dict[int, object] = {}
+        # 学習期間の「末尾日」で probe をキャッシュ（同じ末尾日のセルは再学習しない。§6.2）
+        probe_cache: dict = {}
 
-        def get_probe(i):
-            if i not in probe_cache:
-                s, e = sets_by_bin.get(i, []), embeds.get(i, [])
-                probe_cache[i] = (st.train_probe(e, s, seed, device)
-                                  if set_builder.count_records(s) >= constants.MIN_TRAIN else None)
-            return probe_cache[i]
+        def get_probe(train_end):
+            if train_end not in probe_cache:
+                train_start = train_end - timedelta(days=window_days - 1)
+                tdates = [d for d in all_dates if train_start <= d <= train_end]
+                tsets = [day_sets[d] for d in tdates]
+                n_pos_t, n_neg_t = _counts(tsets) if tsets else (0, 0)
+                head = None
+                if (tsets and n_pos_t >= 1 and n_neg_t >= 1
+                        and set_builder.count_records(tsets) >= constants.MIN_TRAIN):
+                    head = st.train_probe([emb_by_date[d] for d in tdates], tsets, seed, device)
+                probe_cache[train_end] = (head, n_pos_t, n_neg_t)
+            return probe_cache[train_end]
 
-        for p in range(bin_count):
-            eval_sets = sets_by_bin.get(p, [])
-            if set_builder.count_records(eval_sets) < constants.MIN_EVAL:
+        for X in eval_dates:
+            eval_set = day_sets.get(X)
+            p = positions.get(X)
+            if eval_set is None or p is None:
                 continue
-            eval_emb = embeds.get(p, [])
+            yt = np.array(eval_set.labels, dtype=float)
+            n_pos_e, n_neg_e = int(yt.sum()), int(len(yt) - yt.sum())
+            eval_ok = (n_pos_e >= 1 and n_neg_e >= 1 and len(eval_set) >= constants.MIN_EVAL)
+            eval_emb = emb_by_date[X]
 
-            # 汎用ヘッド（§8.3）：位置 p で評価（距離に非依存）
-            grows = st.predict(general_head, eval_emb, eval_sets, device)
-            gm = metrics.cell_metrics(grows, constants.K_LIST, thr, constants.POOL_AUC)
-            for m in metric_names:
-                gen_vals[m][p][k] = gm[m]
-            if general_sink is not None:
-                for yt, yp, cid, t in grows:
-                    general_sink.append((p + 1, k, t.date().isoformat(), cid, yt, yp))
-
-            # per-bin probe（§6.2）：距離 d ごとに学習ビン i=p-d の probe で予測
-            for d in range(1, bin_count + 1):
-                head = get_probe(p - d)
-                if head is None:
-                    continue
-                rows = st.predict(head, eval_emb, eval_sets, device)
-                pm = metrics.cell_metrics(rows, constants.K_LIST, thr, constants.POOL_AUC)
+            # 汎用ヘッド（§8.3）：その評価日で評価（距離に非依存）
+            if eval_ok:
+                grows = st.predict(general_head, [eval_emb], [eval_set], device)
+                gm = metrics.compute_day_metrics([r[0] for r in grows], [r[1] for r in grows],
+                                                 constants.K_LIST, thr)
                 for m in metric_names:
-                    probe_vals[m][(d, p)][k] = pm[m]
-                if probe_sink is not None:
-                    for yt, yp, cid, t in rows:
-                        probe_sink.append((d, p + 1, k, t.date().isoformat(), cid, yt, yp))
+                    if not np.isnan(gm[m]):
+                        gen_vals[m][p][k].append(gm[m])
+                if daily_sink is not None:
+                    daily_sink.append(_daily_row(X, "general", k, p, n_pos_e, n_neg_e,
+                                                 -1, -1, False, "", gm))
+            elif daily_sink is not None:
+                daily_sink.append(_daily_row(X, "general", k, p, n_pos_e, n_neg_e,
+                                             -1, -1, True, "eval_guard", None))
 
-    # ── seed 横断で集約して MatrixResult に ──
+            # 距離 d ごとに学習期間をずらして probe を貼り直す（§4.1）
+            for d in range(grid):
+                train_end = X - timedelta(days=1 + step_days * d)
+                head, n_pos_t, n_neg_t = get_probe(train_end)
+                reason = "" if eval_ok else "eval_guard"
+                if not reason and head is None:
+                    reason = "train_guard"
+                if reason:
+                    if daily_sink is not None:
+                        daily_sink.append(_daily_row(X, d, k, p, n_pos_e, n_neg_e,
+                                                     n_pos_t, n_neg_t, True, reason, None))
+                    continue
+                rows = st.predict(head, [eval_emb], [eval_set], device)
+                mv = metrics.compute_day_metrics([r[0] for r in rows], [r[1] for r in rows],
+                                                 constants.K_LIST, thr)
+                for m in metric_names:
+                    if not np.isnan(mv[m]):
+                        probe_vals[m][(d, p)][k].append(mv[m])
+                if daily_sink is not None:
+                    daily_sink.append(_daily_row(X, d, k, p, n_pos_e, n_neg_e,
+                                                 n_pos_t, n_neg_t, False, "", mv))
+
+    # ── 日次値 → 位置（列）で平均 → seed 横断で中央値＋IQR に集約 ──
     probe_res, gen_res, diff_res = {}, {}, {}
     for m in metric_names:
-        pv = _empty_matrix(bin_count); pi = _empty_matrix(bin_count)
-        gv = _empty_matrix(bin_count); gi = _empty_matrix(bin_count)
-        dv = _empty_matrix(bin_count); di = _empty_matrix(bin_count)
+        pv = _empty_matrix(grid); pi = _empty_matrix(grid)
+        gv = _empty_matrix(grid); gi = _empty_matrix(grid)
+        dv = _empty_matrix(grid); di = _empty_matrix(grid)
         per_repeat_p = {}
-        # 汎用ヘッド（位置ごと、d に一定でブロードキャスト）
-        gen_center_by_p = {}
-        for p in range(bin_count):
-            gc, gq = _agg(list(gen_vals[m][p].values()))
-            gen_center_by_p[p] = (gc, gen_vals[m][p])
-            for d in range(bin_count):
+        # 汎用ヘッド（位置ごとに seed 内平均 → seed 横断集約。距離方向へブロードキャスト）
+        gen_seed_mean: dict = {}
+        for p in range(grid):
+            per_seed = {kk: float(np.mean(v)) for kk, v in gen_vals[m].get(p, {}).items() if v}
+            gen_seed_mean[p] = per_seed
+            gc, gq = _agg(list(per_seed.values()))
+            for d in range(grid):
                 gv[d, p] = gc; gi[d, p] = gq
-        # probe と diff
-        for d in range(1, bin_count + 1):
-            for p in range(bin_count):
-                pk = probe_vals[m].get((d, p), {})
-                c, q = _agg(list(pk.values()))
-                pv[d - 1, p] = c; pi[d - 1, p] = q
-                per_repeat_p[(d, p - 1)] = list(pk.values())  # plotter/writer 互換の列は 0 始まり
-                # diff は k でペアを取って (probe - 汎用) を計算してから集約
-                gp = gen_center_by_p[p][1]
-                paired = [pk[kk] - gp[kk] for kk in pk.keys() & gp.keys()
-                          if not (np.isnan(pk[kk]) or np.isnan(gp[kk]))]
+        # probe と diff（d は 0 始まりでそのまま行 index）
+        for d in range(grid):
+            for p in range(grid):
+                per_seed = {kk: float(np.mean(v))
+                            for kk, v in probe_vals[m].get((d, p), {}).items() if v}
+                c, q = _agg(list(per_seed.values()))
+                pv[d, p] = c; pi[d, p] = q
+                per_repeat_p[(d, p)] = list(per_seed.values())
+                # diff は seed でペアを取って (probe − 汎用) を計算してから集約
+                gp = gen_seed_mean.get(p, {})
+                paired = [per_seed[kk] - gp[kk] for kk in per_seed.keys() & gp.keys()]
                 dc, dq = _agg(paired)
-                dv[d - 1, p] = dc; di[d - 1, p] = dq
-        probe_res[m] = MatrixResult(m, bin_count, pv, pi, per_repeat_p)
-        gen_res[m] = MatrixResult(m, bin_count, gv, gi, {})
-        diff_res[m] = MatrixResult(f"{m}_diff", bin_count, dv, di, {})
+                dv[d, p] = dc; di[d, p] = dq
+        probe_res[m] = MatrixResult(m, grid, pv, pi, per_repeat_p)
+        gen_res[m] = MatrixResult(m, grid, gv, gi, {})
+        diff_res[m] = MatrixResult(f"{m}_diff", grid, dv, di, {})
 
     return {"probe": probe_res, "general": gen_res, "diff": diff_res}
