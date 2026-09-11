@@ -14,9 +14,12 @@ from src.analysis.preliminary_analysis.concept_drift_detection.evaluation.drift_
 
 
 def _value_df(value: np.ndarray) -> pd.DataFrame:
-    """四角行列を DataFrame に（行=距離 d、列=位置 p）。ラベルは 1 始まり（d1.., p1..）で図と一致。"""
+    """四角行列を DataFrame に（行=距離 d、列=位置 p）。
+
+    距離は **0 始まり（d0..）**＝ d0 が step1 の fresh 窓。位置は 1 始まり（p1..）で図と一致。
+    """
     n = value.shape[0]
-    return pd.DataFrame(value, index=[f"d{d}" for d in range(1, n + 1)],
+    return pd.DataFrame(value, index=[f"d{d}" for d in range(n)],
                         columns=[f"p{p}" for p in range(1, value.shape[1] + 1)])
 
 
@@ -40,11 +43,11 @@ def write_matrix(result: MatrixResult, meta: dict, out_dir: Path) -> None:
     with open(out_dir / "drift_matrix.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    # 距離固定の位置別スコア（long 形式）。distance/position とも 1 始まり（図と一致）。
+    # 距離固定の位置別スコア（long 形式）。distance は 0 始まり、position は 1 始まり（図と一致）。
     rows = []
-    for d in range(1, result.bin_count + 1):
+    for d in range(result.bin_count):
         for p in range(result.bin_count):
-            v = result.value[d - 1, p]
+            v = result.value[d, p]
             rows.append({"distance": d, "position": p + 1,
                          "value": None if np.isnan(v) else float(v)})
     pd.DataFrame(rows).to_csv(out_dir / "position_by_distance.csv", index=False)
@@ -73,56 +76,35 @@ def write_drift_test(drift_result: dict, out_dir: Path) -> None:
         json.dump(drift_result, f, ensure_ascii=False, indent=2)
 
 
-_PRED_COLUMNS = ["d", "p", "repeat", "t", "change_id", "y_true", "y_pred"]
+def write_daily_metrics(rows: list[dict], meta: dict, out_dir: Path) -> Path | None:
+    """(評価日, 距離, seed) ごとの指標を daily_metrics.csv.gz に保存する（§10）。
 
+    rows: drift_matrix の daily_sink（`_daily_row` の dict 列）。1 版で約 4.7 万行。
+    これがあれば **位置（列）のまとめ方を後から変えて再集計できる**（モデル再実行不要）。
+    `distance="general"` の行は汎用ヘッド（距離に非依存）。
 
-def write_predictions(rows: list[tuple], meta: dict, out_dir: Path) -> Path | None:
-    """評価レコードの生予測を predictions.csv.gz に保存する（hours 単位）。
-
-    rows: (d, p, repeat, t, change_id, y_true, y_pred) のタプル列（build_matrices の pred_sink）。
-    後から再学習なしで別の評価指標（回帰精度・分類など）を計算し直すための生データ。
-    併せて predictions_meta.json に列の意味・前提を残す。
+    注：**Change 1 件ごとの予測は保存しない**（26 距離 × 約 180 日 × 10 seed × 1 日約 260 件
+    ≒ 1,200 万行/版となり非現実的。§10）。
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if not rows:
         return None
-    df = pd.DataFrame(rows, columns=_PRED_COLUMNS)
-    path = out_dir / "predictions.csv.gz"
+    df = pd.DataFrame(rows)
+    path = out_dir / "daily_metrics.csv.gz"
     df.to_csv(path, index=False, compression="gzip")
-    with open(out_dir / "predictions_meta.json", "w", encoding="utf-8") as f:
-        json.dump({**meta, "columns": _PRED_COLUMNS, "n_rows": len(df),
-                   "note": "y_true は Δ以内レビューの2値(0/1)、y_pred は正例(=1)の確率。"
-                           "再学習なしで precision/recall/f1 等を計算し直せる。"},
+    with open(out_dir / "daily_metrics_meta.json", "w", encoding="utf-8") as f:
+        json.dump({**meta, "columns": list(df.columns), "n_rows": len(df),
+                   "note": "評価日ごと（Δ=1）の指標。distance は 0 始まり（d0=step1 の fresh 窓）、"
+                           "distance='general' は汎用ヘッド。position は 1 始まり。"
+                           "位置のまとめ方を変えて再集計できる。"},
                   f, ensure_ascii=False, indent=2)
     return path
 
 
-def load_predictions(path: Path) -> "pd.DataFrame":
-    """保存済み predictions.csv.gz を DataFrame で読み込む（指標の再計算用）。"""
+def load_daily_metrics(path: Path) -> "pd.DataFrame":
+    """保存済み daily_metrics.csv.gz を DataFrame で読み込む（位置の再集計用）。"""
     return pd.read_csv(path, compression="gzip")
-
-
-_GENERAL_PRED_COLUMNS = ["p", "repeat", "t", "change_id", "y_true", "y_pred"]
-
-
-def write_general_predictions(rows: list[tuple], meta: dict, out_dir: Path) -> Path | None:
-    """汎用ヘッド（事前学習の仮ヘッド）の生予測を general_predictions.csv.gz に保存（§8.3）。
-
-    rows: (p, repeat, t, change_id, y_true, y_pred)。汎用ヘッドは距離 d に依存しないので d 列は無い。
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        return None
-    df = pd.DataFrame(rows, columns=_GENERAL_PRED_COLUMNS)
-    path = out_dir / "general_predictions.csv.gz"
-    df.to_csv(path, index=False, compression="gzip")
-    with open(out_dir / "general_predictions_meta.json", "w", encoding="utf-8") as f:
-        json.dump({**meta, "columns": _GENERAL_PRED_COLUMNS, "n_rows": len(df),
-                   "note": "汎用ヘッド（事前学習の仮ヘッド）の予測。距離 d に非依存（位置 p のみ）。"},
-                  f, ensure_ascii=False, indent=2)
-    return path
 
 
 def write_summary(per_version: list[dict], meta: dict, out_dir: Path) -> None:

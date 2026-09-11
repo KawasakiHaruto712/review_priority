@@ -17,8 +17,8 @@ from src.analysis.preliminary_analysis.concept_drift_detection.evaluation.drift_
 
 
 def positions_at_distance(value: np.ndarray, d: int) -> list[tuple[int, float]]:
-    """距離 d を固定し、位置 p ごとの (p, score) を取り出す（NaN は除外）。§7.1。"""
-    row = value[d - 1]
+    """距離 d（**0 始まり**。d0 ＝ 直近）を固定し、位置 p ごとの (p, score) を取り出す（NaN は除外）。§7.1。"""
+    row = value[d]
     return [(p, float(row[p])) for p in range(len(row)) if not np.isnan(row[p])]
 
 
@@ -44,7 +44,7 @@ def detect_drift(result: MatrixResult, n_perm: int, alpha: float, seed: int = 0)
     min_p = 1.0
     drift = False
 
-    for d in range(1, result.bin_count + 1):
+    for d in range(result.bin_count):          # 距離は 0 始まり（d0 ＝ 直近）
         pts = positions_at_distance(value, d)
         if len(pts) < 3:
             continue  # 位置が少なすぎて横断比較できない

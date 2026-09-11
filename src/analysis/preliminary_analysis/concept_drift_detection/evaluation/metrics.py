@@ -2,14 +2,13 @@
 
 - compute_day_metrics : 1 評価日（1 スナップショット）の全指標
 - metric_columns      : 指標カラム名の一覧
-- cell_metrics        : セル（ビン）の全指標を「日ごと算出→日数平均」で返す（AUC も日次平均）
-                        POOL_AUC=True のときだけ AUC はビンプールで算出。
+
+セル値は「評価日ごとに compute_day_metrics → 位置（列）の日数で平均」で作る（design.md §8.1）。
+その集約は drift_matrix 側で行うため、本モジュールは日次指標の算出までを担う。
 
 指標：AUC / precision・recall・f1(0.5) / precision@k・recall@k・f1@k / MAP / 正規化順位 / MRR。
 """
 from __future__ import annotations
-
-from collections import defaultdict
 
 import numpy as np
 from sklearn.metrics import (average_precision_score, f1_score, precision_score,
@@ -75,34 +74,3 @@ def metric_columns(k_list) -> list[str]:
         cols += [f"precision@{label}", f"recall@{label}", f"f1@{label}"]
     cols += ["norm_rank", "mrr"]
     return cols
-
-
-def cell_metrics(rows, k_list, threshold: float = 0.5, pool_auc: bool = False) -> dict:
-    """セル（ビン）の全指標を返す。rows=(y_true, y_pred, id, t)。
-
-    全指標を「日ごと（t.date()）に算出 → 日数平均」で統一（AUC も日次平均）。
-    pool_auc=True のときだけ AUC はビン全体をプールして算出（安定寄り）。
-    """
-    cols = metric_columns(k_list)
-    if not rows:
-        return {c: NAN for c in cols}
-
-    by_day: dict = defaultdict(lambda: ([], []))
-    for yt, yp, _cid, t in rows:
-        d = t.date() if hasattr(t, "date") else t
-        by_day[d][0].append(yt)
-        by_day[d][1].append(yp)
-
-    # 日ごとに全指標 → 日数平均（NaN は除外）
-    daily = [compute_day_metrics(ys, ps, k_list, threshold) for ys, ps in by_day.values()]
-    out: dict[str, float] = {}
-    for c in cols:
-        vals = np.array([d[c] for d in daily if not np.isnan(d[c])], dtype=float)
-        out[c] = float(vals.mean()) if vals.size else NAN
-
-    if pool_auc:
-        yt_all = np.array([r[0] for r in rows], dtype=float)
-        yp_all = np.array([r[1] for r in rows], dtype=float)
-        both = yt_all.sum() > 0 and yt_all.sum() < len(yt_all)
-        out["auc"] = float(roc_auc_score(yt_all, yp_all)) if both else NAN
-    return out

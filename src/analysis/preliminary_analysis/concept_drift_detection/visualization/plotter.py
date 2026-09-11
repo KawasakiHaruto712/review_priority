@@ -125,11 +125,11 @@ def plot_heatmap(result: MatrixResult, path: Path, dpi: int = 150) -> None:
                 ax.text(p, d, constants.HEATMAP_VALUE_FMT.format(v), ha="center", va="center",
                         fontsize=6, color="black" if lum > 0.5 else "white")
     ax.set_xlabel("位置 p（リリース内のどの時点を予測するか）")
-    ax.set_ylabel("距離 d（滞留期間, ビン単位）")
+    ax.set_ylabel("距離 d（学習期間を何段ずらすか。d0 ＝ 直近）")
     _step = max(1, n // 13)  # ラベルが詰まらないよう間引く（26 なら 2 つおき）
     _ticks = list(range(0, n, _step))
     ax.set_xticks(_ticks); ax.set_xticklabels([f"p{t + 1}" for t in _ticks], fontsize=7)
-    ax.set_yticks(_ticks); ax.set_yticklabels([f"d{t + 1}" for t in _ticks], fontsize=7)
+    ax.set_yticks(_ticks); ax.set_yticklabels([f"d{t}" for t in _ticks], fontsize=7)
     ax.set_title(f"{result.metric}（学習×予測 行列）")
     fig.colorbar(im, ax=ax, label=result.metric)
     fig.tight_layout()
@@ -144,8 +144,8 @@ def plot_position_lines(result: MatrixResult, path: Path, dpi: int = 150) -> Non
     n = result.bin_count
     fig, ax = plt.subplots(figsize=(6, 5))
     positions = np.arange(n)
-    for d in range(1, n + 1):
-        row = result.value[d - 1]
+    for d in range(n):
+        row = result.value[d]
         if np.isnan(row).all():
             continue
         ax.plot(positions, row, marker="o", label=f"d={d}")
@@ -196,11 +196,11 @@ def plot_heatmap_relative(result: MatrixResult, path: Path, dpi: int = 150) -> N
                 ax.text(p, d, constants.HEATMAP_VALUE_FMT.format(v), ha="center", va="center",
                         fontsize=6, color="black" if lum > 0.5 else "white")
     ax.set_xlabel("位置 p（リリース内のどの時点を予測するか）")
-    ax.set_ylabel("距離 d（滞留期間, ビン単位）")
+    ax.set_ylabel("距離 d（学習期間を何段ずらすか。d0 ＝ 直近）")
     _step = max(1, n // 13)  # ラベルが詰まらないよう間引く（26 なら 2 つおき）
     _ticks = list(range(0, n, _step))
     ax.set_xticks(_ticks); ax.set_xticklabels([f"p{t + 1}" for t in _ticks], fontsize=7)
-    ax.set_yticks(_ticks); ax.set_yticklabels([f"d{t + 1}" for t in _ticks], fontsize=7)
+    ax.set_yticks(_ticks); ax.set_yticklabels([f"d{t}" for t in _ticks], fontsize=7)
     ax.set_title(f"{result.metric}（相対: 最良セル=1）")
     fig.colorbar(im, ax=ax, label=f"{result.metric} 相対（最良=1, 高いほど良い）")
     fig.tight_layout()
@@ -216,8 +216,8 @@ def plot_position_lines_relative(result: MatrixResult, path: Path, dpi: int = 15
     rel = _relative_matrix(result)
     fig, ax = plt.subplots(figsize=(6, 5))
     positions = np.arange(n)
-    for d in range(1, n + 1):
-        row = rel[d - 1]
+    for d in range(n):
+        row = rel[d]
         if np.isnan(row).all():
             continue
         ax.plot(positions, row, marker="o", label=f"d={d}")
@@ -233,7 +233,7 @@ def plot_position_lines_relative(result: MatrixResult, path: Path, dpi: int = 15
 
 
 def plot_all(result: MatrixResult, out_dir: Path, dpi: int = 150) -> None:
-    """26×26 ヒートマップを出力（色のみ既定）。距離26本の折れ線はスパゲッティになるため作らない。"""
+    """N×N ヒートマップを出力（既定 26×26・色のみ）。距離26本の折れ線はスパゲッティになるため作らない。"""
     out_dir = Path(out_dir)
     plot_heatmap(result, out_dir / "drift_matrix.png", dpi)
     # 相対評価版（行列内 最良セル=1）。符号付き・差分指標は「最良=1」正規化が無意味なので作らない。
