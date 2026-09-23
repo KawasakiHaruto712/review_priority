@@ -1,7 +1,7 @@
 import re
 import logging
 from typing import Dict, Any, Union
-from src.features.change_metrics import get_change_text_data
+from src.features.change_metrics import get_change_text_data, strip_gerrit_footers
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,13 @@ def calculate_bug_fix_confidence(pr_title_or_data: Union[str, Dict[str, Any]], p
     else:
         pr_title = pr_title_or_data
 
+    # 概要からGerritのトレーラ行を除く（"Closes-Bug: #1413341" のような機械的な行が
+    # バグ番号パターンとキーワードの両方に当たり、開発者の記述と区別できなくなるため）
+    # タイトルには適用しない（strip_gerrit_footersのdocstring参照）
+    pr_description = strip_gerrit_footers(pr_description)
+
     score = 0
-    
+
     # 分析対象となるテキストを準備
     texts_to_analyze = []
     if pr_title and pr_title.strip():  # 空文字列でない場合のみ追加

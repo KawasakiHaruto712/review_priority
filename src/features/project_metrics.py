@@ -81,87 +81,109 @@ def add_lines_info_to_dataframe(df: pd.DataFrame, project_name: str) -> pd.DataF
     
     return df_with_lines
 
-def _get_major_version(version_string: str) -> int | None:
+# リリース境界とみなすバージョン形式。呼び出し側が release_level で選ぶ
+#   "major" -> X.0.0    OpenStackの協調リリース（nova, neutron, cinder, glance, keystone）
+#   "minor" -> X.Y.0    協調リリースに乗らず独自にリリースするもの（swift は 2.0.0 以降 2.Y.0）
+_RELEASE_LEVEL_REGEX = {
+    "major": re.compile(r"^\d+\.0\.0$"),
+    "minor": re.compile(r"^\d+\.\d+\.0$"),
+}
+
+
+def _release_ordinal(version_string: str, release_level: str = "major") -> tuple | None:
     """
-    バージョン文字列からメジャーバージョン番号を抽出します。
-    例: "13.0.0" -> 13
-    
-    注意: この関数は単にメジャー番号を抽出するだけです。
-    メジャーリリースかどうかの判定には _is_major_release を使用してください。
+    バージョン文字列から「リリースの世代」を表すタプルを抽出します。
+    例: release_level="major" なら "13.0.0" -> (13, 0)
+        release_level="minor" なら "2.31.0" -> (2, 31)
+
+    タプルなのは、"minor" のときにメジャー番号の繰り上がり（2.36.0 -> 3.0.0）も
+    正しく「次の世代」と判定できるようにするためです。
+
+    注意: この関数は世代番号を抽出するだけです。
+    リリース境界かどうかの判定には _is_boundary_release を使用してください。
     """
     if not isinstance(version_string, str):
         return None
     try:
-        # バージョン文字列の最初の数値部分をメジャーバージョンとして抽出
-        return int(version_string.split('.')[0])
+        parts = version_string.split('.')
+        major = int(parts[0])
+        minor = int(parts[1]) if release_level == "minor" else 0
+        return (major, minor)
     except (ValueError, IndexError):
         return None
 
 
-def _is_major_release(version_string: str) -> bool:
+def _is_boundary_release(version_string: str, release_level: str = "major") -> bool:
     """
-    バージョン文字列が厳密なメジャーリリース（X.0.0）かどうかを判定します。
+    バージョン文字列がリリース境界の形式かどうかを判定します。
 
-    許可する形式の例:
-      - "20.0.0"
-      - "7.0.0"
+    release_level="major" のとき
+      許可: "20.0.0", "7.0.0"
+      除外: "20.0.0.0rc1", "20.0.0.0b1", "20.0.1", "20.1.0"
 
-    除外する例:
-      - "20.0.0.0rc1"
-      - "20.0.0.0b1"
-      - "20.0.1"
-      - "20.1.0"
+    release_level="minor" のとき（swift のように協調リリースに乗らないプロジェクト用）
+      許可: "2.31.0", "2.0.0"
+      除外: "2.31.1", "2.31.0rc1"
 
     Args:
         version_string: バージョン文字列
+        release_level: "major"（X.0.0）または "minor"（X.Y.0）
 
     Returns:
-        True  -> 正確に "<major>.0.0" の形式
+        True  -> 指定した形式に正確に一致
         False -> それ以外
     """
     if not isinstance(version_string, str):
         return False
 
-    s = version_string.strip()
-    # 正確に3パートで、minor==0 and patch==0、かつ追加のサフィックスがないもののみ許可
-    # 正規表現で厳密にマッチ: ^\d+\.0\.0$
-    return bool(re.match(r"^\d+\.0\.0$", s))
+    regex = _RELEASE_LEVEL_REGEX.get(release_level)
+    if regex is None:
+        raise ValueError(f"release_level は {sorted(_RELEASE_LEVEL_REGEX)} のいずれかです: {release_level!r}")
+
+    # 正確に3パートで、指定形式に一致し、かつ追加のサフィックス（rc/b等）がないもののみ許可
+    return bool(regex.match(version_string.strip()))
 
 
 def calculate_days_to_major_release(
-    analysis_time: datetime, 
-    component_name: str, 
-    all_releases_df: pd.DataFrame
+    analysis_time: datetime,
+    component_name: str,
+    all_releases_df: pd.DataFrame,
+    release_level: str = "major"
 ) -> float:
     """
-    指定された分析時点から、対象コンポーネントの次のメジャーバージョンアップリリース日までの
-    残り日数を計算
+    指定された分析時点から、対象コンポーネントの次のリリース日までの残り日数を計算
 
-    メジャーリリースは厳密に "X.0.0" 形式のみを対象とします（rc/beta等サフィックスは除外）。
+    どのバージョン形式をリリース境界とみなすかは release_level で指定します
+    （rc/beta等のサフィックス付きはどちらの場合も除外）。
 
     Args:
         analysis_time (datetime): メトリクスを計算する基準となる分析時点の時刻
         component_name (str): 対象のOpenStackコンポーネント名
         all_releases_df (pd.DataFrame): 全てのリリース履歴を含むDataFrame
                                         'component', 'version', 'release_date' (datetime型) カラムが必要
+        release_level (str): "major" なら X.0.0 を境界とする（OpenStackの協調リリース）
+                             "minor" なら X.Y.0 を境界とする（swift のように独自にリリースするもの）
 
     Returns:
-        float: 次のメジャーリリース日までの残り日数 見つからない場合は-1.0
+        float: 次のリリース日までの残り日数 見つからない場合は-1.0
                分析時点がリリース日より後の場合は0.0
     """
     # 対象コンポーネントのリリースをフィルタリング
     component_releases = all_releases_df[all_releases_df['component'] == component_name].copy()
-    
-    # メジャーリリース（X.0.0形式）のみをフィルタリング
-    component_releases['is_major'] = component_releases['version'].apply(_is_major_release)
+
+    # リリース境界の形式のものだけをフィルタリング
+    component_releases['is_major'] = component_releases['version'].apply(
+        lambda v: _is_boundary_release(v, release_level))
     major_releases_only = component_releases[component_releases['is_major']].copy()
-    
+
     if major_releases_only.empty:
-        logger.warning(f"No major releases found for component '{component_name}'.")
+        logger.warning(f"No major releases found for component '{component_name}' "
+                       f"(release_level={release_level}).")
         return -1.0
-    
-    # メジャーバージョン番号を抽出
-    major_releases_only['major_version_num'] = major_releases_only['version'].apply(_get_major_version)
+
+    # リリースの世代番号を抽出
+    major_releases_only['major_version_num'] = major_releases_only['version'].apply(
+        lambda v: _release_ordinal(v, release_level))
     major_releases_only = major_releases_only.dropna(subset=['major_version_num'])
     
     # リリース日とメジャーバージョン番号でソート (昇順)
@@ -169,8 +191,11 @@ def calculate_days_to_major_release(
 
     next_major_release_date = None
     
-    # 分析時点以前の最新のメジャーバージョン番号を特定
-    current_base_major_version = -1 # 初期値としてありえない低い数値を設定
+    # 分析時点以前の最新のリリース世代を特定
+    # 初期値はありえない低い値。_release_ordinal と同じ (major, minor) のタプルにしておかないと、
+    # 分析時点が最初のリリースより前のとき（＝この初期値のまま比較に入るとき）に
+    # tuple と int の比較になって落ちる
+    current_base_major_version = (-1, -1)
     
     # analysis_time 以前の最も新しいメジャーリリースを取得し、そのメジャーバージョンを基準とする
     past_releases_at_analysis_time = major_releases_only[major_releases_only['release_date'] <= analysis_time]
