@@ -1,7 +1,7 @@
 import re
 import logging
 from typing import Dict, Any, Union
-from src.features.change_metrics import get_change_text_data
+from src.features.change_metrics import get_change_text_data, strip_gerrit_footers
 
 logger = logging.getLogger(__name__)
 
@@ -126,8 +126,14 @@ def calculate_refactoring_confidence(pr_title_or_data: Union[str, Dict[str, Any]
     else:
         pr_title = pr_title_or_data
 
+    # 概要からGerritのトレーラ行を除く
+    # 除かないと "Change-Id: I103a..." の "Change" がSARパターン chang(e|ed|ing) に必ず当たり、
+    # この特徴量が全Changeで定数1になる（Change-Idは全Changeに付く）
+    # タイトルには適用しない（strip_gerrit_footersのdocstring参照）
+    pr_description = strip_gerrit_footers(pr_description)
+
     # 分析対象となるすべてのテキストを結合
-    combined_text = pr_title + " " + (pr_description if pr_description is not None else "")
+    combined_text = pr_title + " " + pr_description
     
     # 結合されたテキストがSARパターンにマッチするかをチェック
     if SAR_REGEX.search(combined_text):

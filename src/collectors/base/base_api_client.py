@@ -19,21 +19,25 @@ logger = logging.getLogger(__name__)
 class BaseAPIClient(ABC):
     """Gerrit APIクライアントの基底クラス"""
     
+    # 既定の接続先（OpenStack）。プロジェクトごとに base_url で上書きする
     BASE_URL = "https://review.opendev.org/a"
-    
-    def __init__(self, username: str, password: str, session: requests.Session, 
-                 timeout: tuple = (30, 120)):
+
+    def __init__(self, username: str, password: str, session: requests.Session,
+                 timeout: tuple = (30, 120), base_url: str = None):
         """
         Args:
-            username: Gerritユーザー名
-            password: Gerritパスワード
+            username: Gerritユーザー名（認証なしのホストでは None）
+            password: Gerritパスワード（認証なしのホストでは None）
             session: リクエストセッション
             timeout: タイムアウト設定 (接続, 読み取り)
+            base_url: Gerrit の API ベース URL。省略時は BASE_URL（OpenStack）
         """
         self.username = username
         self.password = password
         self.session = session
         self.timeout = timeout
+        # クラス変数ではなくインスタンス変数で保持する（ホストがプロジェクトごとに変わるため）
+        self.base_url = (base_url or self.BASE_URL).rstrip("/")
     
     @abstractmethod
     def get_endpoint_path(self, **kwargs) -> str:
@@ -57,7 +61,7 @@ class BaseAPIClient(ABC):
         Returns:
             レスポンスデータ
         """
-        url = f"{self.BASE_URL}/{endpoint}"
+        url = f"{self.base_url}/{endpoint}"
         response = self.session.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         

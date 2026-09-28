@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 from typing import Dict, Any
 from typing import Dict, Any
@@ -235,29 +236,31 @@ def calculate_revision_count(change_data: Dict[str, Any], analysis_time: datetim
             
     return count
 
-def check_test_code_presence(change_data: Dict[str, Any]) -> int:
+def check_test_code_presence(change_data: Dict[str, Any], analysis_time: datetime = None) -> int:
     """
     変更（PR）にテストコードが含まれているかを判定
-    ファイルパスに 'test' や 'tests' が含まれるファイルをテストコードと見なす
+
+    van der Veen ら [5] の定義に従い、**変更ファイルのパス**で判定する。
+    パスに 'test' または 'spec' を含むファイルが1つでもあれば1。
+    論文は区切り文字を要求しない単純な部分一致で判定しているため、ここでも部分一致とする。
 
     Args:
         change_data (Dict[str, Any]): OpenStack Gerritから収集されたChange（PR）のデータ
+        analysis_time (datetime, optional): 分析時点。指定された場合、その時点でのリビジョンを使用する。
 
     Returns:
         int: テストコードが含まれている場合は1、含まれていない場合は0。
     """
-    # 現在のデータにはfilesフィールドが含まれていないため、デフォルト値を返す
-    # 実際のプロジェクトでは、コミット情報から計算するか、別途収集が必要
-    # PRのタイトルや説明からテストの存在を推測する簡易的な方法を使用
-    subject = change_data.get("subject", "").lower()
-    message = change_data.get("message", "").lower()
-    
-    test_keywords = ["test", "unittest", "pytest", "testing"]
-    
-    for keyword in test_keywords:
-        if keyword in subject or keyword in message:
+    file_changes = _get_files_at_analysis_time(change_data, analysis_time)
+
+    # 辞書ならキーがファイルパス、リストならそのまま要素がファイルパス（古い形式）
+    paths = file_changes if isinstance(file_changes, list) else list(file_changes.keys())
+
+    for path in paths:
+        lower = str(path).lower()
+        if "test" in lower or "spec" in lower:
             return 1
-    
+
     return 0
 
 def get_change_text_data(change_data: Dict[str, Any]) -> tuple[str, str]:
@@ -285,5 +288,34 @@ def get_change_text_data(change_data: Dict[str, Any]) -> tuple[str, str]:
             else:
                 # current_revisionがない場合は最後のリビジョンを使用
                 message = list(revisions.values())[-1].get('commit', {}).get('message', '')
-                
+
     return subject, message
+
+
+# Gerritのトレーラ（フッタ）行を表す正規表現
+# 例: "Change-Id: I103a79...", "Closes-Bug: #1413341", "Signed-off-by: ..."
+# これらはcommit-msgフックやツールが機械的に付ける行であり、開発者が変更を説明するために
+# 書いた文ではない。従来研究[14][15]が対象としているのはCVSのlog message /
+# commitのmessage、すなわち開発者の記述なので、正規表現を当てる前に取り除く。
+GERRIT_FOOTER_REGEX = re.compile(r"^[A-Z][A-Za-z-]*(-[A-Za-z]+)*:\s.*$")
+
+
+def strip_gerrit_footers(message: str) -> str:
+    """
+    コミットメッセージからGerritのトレーラ行を取り除く
+
+    subjectには適用しないこと。subjectは1行のタイトルで、"Refactor: ..." や "WIP: ..." のような
+    「接頭辞: 説明」形式がトレーラと同じ形になり、行ごと消えてしまうため
+    （keystoneの3000件中66件が該当し、うち43件はリファクタリング/バグ修正の語を含む）。
+
+    Args:
+        message (str): コミットメッセージ（Changeの概要）
+
+    Returns:
+        str: トレーラ行を除いたメッセージ
+    """
+    if not message:
+        return ""
+
+    return "\n".join(line for line in message.split("\n")
+                     if not GERRIT_FOOTER_REGEX.match(line))

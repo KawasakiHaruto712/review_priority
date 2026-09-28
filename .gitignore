@@ -4,3 +4,5 @@ src/review_priority.egg-info
 .env
 
 *.pyc
+# 収集・解析の実行ログ（巨大になるため追跡しない）
+*.log

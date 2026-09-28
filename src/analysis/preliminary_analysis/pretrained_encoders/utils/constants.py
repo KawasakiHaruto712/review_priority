@@ -30,6 +30,19 @@ PROJECTS = {
     "swift":    {"cutoff": "2.29.0", "versions": ["2.30.0", "2.31.0", "2.32.0", "2.33.0", "2.34.0"]},
 }
 
+# 特徴量 days_to_major_release が「次のリリース」とみなすバージョン形式（project_metrics 参照）。
+# 既定は "major"（X.0.0）＝ OpenStack の協調リリース。
+# swift だけは協調リリースに乗らず独自に X.Y.0 を出しており、収集した 37 版のうち X.0.0 は
+# 2.0.0 の 1 つだけ。"major" のままだと 2015 年以降のほぼ全期間で「次のリリースなし」(-1.0) になる。
+# 上の PROJECTS も swift の対象版を 2.30.0〜2.34.0 と置いており、この表はそれと整合させたもの。
+RELEASE_LEVEL = {"swift": "minor"}
+DEFAULT_RELEASE_LEVEL = "major"
+
+
+def release_level_for(project: str) -> str:
+    """その project のリリース境界の粒度（"major" = X.0.0 / "minor" = X.Y.0）。"""
+    return RELEASE_LEVEL.get(project, DEFAULT_RELEASE_LEVEL)
+
 # ── 計測点・アクティブ集合（design.md §2） ───────────────────
 MEASUREMENT_STEP_DAYS = 1   # 計測点 T = 毎日 0 時（刻み日数。1=毎日）
 LOOKBACK_DAYS = 365         # T のアクティブ判定: T-LOOKBACK <= created <= T < decision_time
@@ -61,7 +74,11 @@ PROBE_EPOCHS = 100
 PROBE_LR = 1e-2
 
 # ── 反復（seed ＝ 別エンコーダ。design.md §5） ────────────────
-N_REPEATS = 10               # 作るエンコーダ数
+# 事前学習エンコーダを使う分析（lookback_window / concept_drift_detection /
+# concept_drift_cause）はすべてこの数で揃える。**奇数**であることに意味がある：
+# concept_drift_detection が日ごとに seed 中央値を取るとき、奇数なら中央値が
+# 実在する 1 個のモデルの値になり、concept_drift_cause がそのモデルを一意に特定できる。
+N_REPEATS = 5                # 作るエンコーダ数
 RANDOM_SEED = 42             # k 個目の torch seed = RANDOM_SEED + k
 
 # ── 計算環境 ─────────────────────────────────────

@@ -58,6 +58,33 @@ class RetryConfig:
         return max(0, delay)
 
 
+# サーバ側の実行時間制限は**ここでは投げ直さず、即座に呼び出し側へ返す**。
+# 原因が 2 通りあり、待つべき場面が限られるため。
+#   (a) 一時的な混雑   … 同じ要求が普段 2.5 秒で返るのに、混んだ瞬間だけ 5 秒超になる
+#   (b) 要求が重すぎる … 巨大な Change を含むページ。何度投げ直しても通らない
+# (a) は「要求件数 n を半分にして出し直す」ことでも回復するので、呼び出し側は
+# まず n を下げて即座に再試行し、n=1 まで下げてもなお駄目なときだけ待って投げ直す
+# （`change_collector._collect_range`）。ここで一律に待つと、(b) のときに
+# n を下げる段階ごとに待ち時間が積み上がる（実測で 1 ページあたり 3.5 分の空費）。
+
+
+class ServerDeadlineExceeded(requests.exceptions.HTTPError):
+    """サーバ側の実行時間制限に達した（例: Gerrit の RestApi.timeout=5000ms）。
+
+    DEADLINE_RETRY_DELAYS ぶん投げ直しても通らなかったときだけ送出される。
+    呼び出し側は「要求を軽くする」（件数を減らす・期間を割る）必要がある。
+    """
+
+
+def _is_server_deadline_error(e: Exception) -> bool:
+    """サーバ側の実行時間制限によるエラーか（本文で判定する）。"""
+    resp = getattr(e, "response", None)
+    if resp is None or resp.status_code < 500:
+        return False
+    body = (resp.text or "")[:200]
+    return "Deadline Exceeded" in body or "deadline exceeded" in body
+
+
 def retry_with_backoff(retry_config: Optional[RetryConfig] = None) -> Callable:
     """
     指数バックオフを用いたリトライデコレータ
@@ -75,17 +102,21 @@ def retry_with_backoff(retry_config: Optional[RetryConfig] = None) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs):
             last_exception = None
-            
+
             for retry_count in range(retry_config.max_retries + 1):
                 try:
                     return func(*args, **kwargs)
                 except requests.exceptions.RequestException as e:
                     last_exception = e
-                    
+
+                    # 実行時間制限は待ち方を呼び出し側に委ねる（上のコメント参照）
+                    if _is_server_deadline_error(e):
+                        raise ServerDeadlineExceeded(str(e), response=e.response) from e
+
                     if retry_count >= retry_config.max_retries:
                         logger.error(f"最大リトライ回数到達: {e}")
                         raise
-                    
+
                     delay = retry_config.get_delay(retry_count)
                     
                     # エラーの種類によってログレベルを調整

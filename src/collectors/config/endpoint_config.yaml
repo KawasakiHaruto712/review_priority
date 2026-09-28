@@ -47,17 +47,21 @@ endpoints:
     filter:
       language: Python  # Pythonファイルのみ
     
-  # ファイル差分取得（各 revision・各ファイルの実 diff。diff を学習に使うため有効化。
-  # 取得量は collection.revision_scope で調整: "first"=投稿時点のみ / "all"=全 revision）
+  # ファイル差分取得（各 revision・各ファイルの実 diff）
+  # 現在の解析（15 特徴量）は changes/*.json の revisions[x].files だけで足りており、
+  # ここで取る diff は一度も読まれない。nova では commits/ が 16GB と changes/ の 5 倍を占めていた。
+  # diff をモデルに使う設計にするときに有効化する。
   file_diff:
-    enabled: true
+    enabled: false
     class: FileDiffEndpoint
     priority: 4
     depends_on: [change_detail]
 
   # コミット情報取得（revision = patch set 単位の巡回。diff ループの起動に必要）
+  # file_diff を無効にしたので不要。リビジョン数は changes/*.json の revisions から数えている
+  # （calculate_revision_count の commits フォールバックは data/openstack/ を見ており、そこは存在しない）。
   commit:
-    enabled: true
+    enabled: false
     class: CommitEndpoint
     priority: 5
     depends_on: [change_detail]
