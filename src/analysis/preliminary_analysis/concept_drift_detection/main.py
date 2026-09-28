@@ -1,7 +1,12 @@
-"""レビュー優先順位ドリフト検出（Phase1 / step2）: オーケストレーション（design.md）。
+"""レビュー優先順位ドリフト検出（Phase1 / 距離×時期行列の分析）: オーケストレーション（design.md）。
 
 実行:
     python -m src.analysis.preliminary_analysis.concept_drift_detection.main
+    python -m ...main --project keystone                  # 1 プロジェクトだけ
+    python -m ...main --project nova --version 30.0.0     # 1 版だけ
+
+  Change の読み込みは nova で 3.2GB・約 5.5 分かかるので、**プロジェクトごとに回す**。
+  「各プロジェクトの最新版だけ先に確認する」なら `--version` で最新版を指定して 6 回回す。
 
 流れ（上から順に追える構成）:
   1. データ読み込み（changes / release_dates / bot 名 / 特徴用 DataFrame）
@@ -10,10 +15,13 @@
        レコード生成（範囲は §4.4 で逆算）→ 日ごとの集合 → 位置（列）の割当（§4.3）
        → 距離×位置行列（probe / 汎用ヘッド / 差分）を**日次スライド学習**で構築（§4.1, §6.2, §8.3）
        → ドリフト検定（§8.2）→ 保存・作図（N×N ヒートマップ。§10）
-出力: <project>/<model>/<version>/{probe,general,diff}/<metric>/ ＋ daily_metrics ＋ summary。
+  4. probe を保存（版に依存しないのでプロジェクト単位でまとめて 1 回。特徴量の寄与度分析用。§6.7）
+出力: <project>/<model>/<version>/{probe,general,diff}/<metric>/ ＋ daily_metrics ＋ summary
+      ＋ <project>/probes/w<窓長>/seed<k>.npz。
 """
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 from pathlib import Path
@@ -23,7 +31,7 @@ from src.analysis.preliminary_analysis.concept_drift_detection.dataset import bi
 from src.analysis.preliminary_analysis.concept_drift_detection.evaluation import (
     drift_detector, drift_matrix, metrics,
 )
-from src.analysis.preliminary_analysis.concept_drift_detection.io import result_writer
+from src.analysis.preliminary_analysis.concept_drift_detection.io import probe_store, result_writer
 from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants
 from src.analysis.preliminary_analysis.concept_drift_detection.visualization import plotter
 from src.analysis.preliminary_analysis.pretrained_encoders import build_encoders
@@ -92,10 +100,12 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
 
     metric_names = metrics.metric_columns(constants.K_LIST)
     summary = {m: [] for m in constants.PLOT_METRICS}
-    # 窓長・刻み・格子サイズは project ごと（§4.2。step1 で選んだ最良窓に基づく）
+    # 窓長・刻み・格子サイズは project ごと（§4.2。窓長の調査で選んだ最良窓に基づく）
     window = constants.window_for(project)
     step = constants.step_for(project)
     grid = constants.grid_for(project)
+    # probe は版に依存しないので、プロジェクト単位で集めて最後に 1 回書く（§6.7）
+    probes = probe_store.ProbeStore(out_root, project, window) if constants.SAVE_PROBES else None
     logger.info(f"格子: {grid}×{grid}（窓長 {window} 日・刻み {step} 日・スパン {step * (grid - 1)} 日）")
     for version in versions:
         try:
@@ -119,7 +129,8 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
         res = drift_matrix.build_matrices(day_sets, eval_dates, positions,
                                           encoders=encoders, scaler=scaler, grid=grid,
                                           window_days=window, step_days=step,
-                                          daily_sink=daily_sink)
+                                          daily_sink=daily_sink,
+                                          probe_sink=(probes.sink() if probes else None))
 
         base = out_root / project / model_name / version
         meta = {"project": project, "version": version, "model": model_name,
@@ -145,6 +156,10 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
                                                                   "step_days": step}, base)
             logger.info(f"日次指標を保存: {path}（{len(daily_sink)} 行）")
 
+    # probe を保存（特徴量の寄与度分析用。版をまたいで集めたものを 1 回で書く。§6.7）
+    if probes is not None:
+        probes.save()
+
     # リリース横断の本数集計（§8.2）
     for m, per_version in summary.items():
         if per_version:
@@ -152,14 +167,39 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
                                         out_root / project / model_name / "summary" / m)
 
 
-def run() -> None:
-    """constants.PROJECTS の全プロジェクト×5版を実行する（§2）。"""
+def run(projects=None, versions=None) -> None:
+    """constants.PROJECTS の全プロジェクト×5版を実行する（§2）。
+
+    projects : 対象プロジェクト名の列（None なら constants.PROJECTS 全部）
+    versions : 対象版ラベルの列（None ならその project の 5 版全部）。指定した版のうち
+               その project に存在するものだけを回す。
+    """
     rel_df = load_release_dates()
-    for project in constants.PROJECTS:
-        logger.info(f"===== プロジェクト: {project} =====")
+    targets = list(projects) if projects else list(constants.PROJECTS)
+    for project in targets:
+        if project not in constants.PROJECTS:
+            logger.warning(f"スキップ（未知のプロジェクト）: {project}")
+            continue
+        vs = constants.versions_for(project)
+        if versions:
+            vs = [v for v in vs if v in set(versions)]
+            if not vs:
+                logger.warning(f"スキップ（該当する版なし）: {project}")
+                continue
+        logger.info(f"===== プロジェクト: {project}（版 {', '.join(vs)}）=====")
         changes = load_changes(project)
-        analyze(changes, rel_df, project, constants.versions_for(project), constants.OUTPUT_ROOT)
+        analyze(changes, rel_df, project, vs, constants.OUTPUT_ROOT)
+
+
+def _parse_args():
+    ap = argparse.ArgumentParser(description="距離×時期行列の分析：距離×時期行列（日次スライド学習）")
+    ap.add_argument("--project", nargs="*", default=None,
+                    help="対象プロジェクト（既定 constants.PROJECTS 全部）")
+    ap.add_argument("--version", nargs="*", default=None,
+                    help="対象の版ラベル（既定 その project の 5 版全部）")
+    return ap.parse_args()
 
 
 if __name__ == "__main__":
-    run()
+    args = _parse_args()
+    run(projects=args.project, versions=args.version)

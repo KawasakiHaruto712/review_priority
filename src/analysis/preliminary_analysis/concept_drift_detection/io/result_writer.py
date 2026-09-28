@@ -16,7 +16,7 @@ from src.analysis.preliminary_analysis.concept_drift_detection.evaluation.drift_
 def _value_df(value: np.ndarray) -> pd.DataFrame:
     """四角行列を DataFrame に（行=距離 d、列=位置 p）。
 
-    距離は **0 始まり（d0..）**＝ d0 が step1 の fresh 窓。位置は 1 始まり（p1..）で図と一致。
+    距離は **0 始まり（d0..）**＝ d0 が窓長の調査の fresh 窓。位置は 1 始まり（p1..）で図と一致。
     """
     n = value.shape[0]
     return pd.DataFrame(value, index=[f"d{d}" for d in range(n)],
@@ -31,12 +31,14 @@ def write_matrix(result: MatrixResult, meta: dict, out_dir: Path) -> None:
     # 行列（セル値＝反復中央値）
     _value_df(result.value).to_csv(out_dir / "drift_matrix.csv")
 
-    # json: 行列＋ばらつき＋各反復の生スコア＋メタ（位置キーは 1 始まり p1..）
+    # json: 行列＋ばらつき（seed間IQR／日間std）＋有効日数＋各反復の生スコア＋メタ
     per_repeat = {f"d{d}_p{p + 1}": v for (d, p), v in result.per_repeat.items()}
     payload = {
         "meta": {**meta, "metric": result.metric, "bin_count": result.bin_count},
         "value": _value_df(result.value).where(pd.notna(result.value), None).values.tolist(),
         "iqr": _value_df(result.iqr).where(pd.notna(result.iqr), None).values.tolist(),
+        "day_std": _grid_or_none(result.day_std),
+        "n_days": _grid_or_none(result.n_days),
     }
     if meta.get("save_per_repeat", True):
         payload["per_repeat"] = per_repeat
@@ -44,13 +46,31 @@ def write_matrix(result: MatrixResult, meta: dict, out_dir: Path) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
     # 距離固定の位置別スコア（long 形式）。distance は 0 始まり、position は 1 始まり（図と一致）。
+    # ばらつきは 2 種類を並べる（§9）：iqr＝モデル間の不一致、day_std＝日によるブレ。
     rows = []
     for d in range(result.bin_count):
         for p in range(result.bin_count):
-            v = result.value[d, p]
             rows.append({"distance": d, "position": p + 1,
-                         "value": None if np.isnan(v) else float(v)})
+                         "value": _cell(result.value, d, p),
+                         "iqr": _cell(result.iqr, d, p),
+                         "day_std": _cell(result.day_std, d, p),
+                         "n_days": _cell(result.n_days, d, p)})
     pd.DataFrame(rows).to_csv(out_dir / "position_by_distance.csv", index=False)
+
+
+def _cell(grid, d: int, p: int):
+    """行列の 1 セルを float（NaN は None）で返す。行列が無ければ None。"""
+    if grid is None:
+        return None
+    v = grid[d, p]
+    return None if np.isnan(v) else float(v)
+
+
+def _grid_or_none(grid):
+    """行列を json 用のネストした list に（NaN は None）。行列が無ければ None。"""
+    if grid is None:
+        return None
+    return _value_df(grid).where(pd.notna(grid), None).values.tolist()
 
 
 def _to_array(grid) -> np.ndarray:
@@ -65,7 +85,10 @@ def load_matrix(json_path: Path) -> MatrixResult:
     meta = payload["meta"]
     value = _to_array(payload["value"])
     iqr = _to_array(payload["iqr"]) if payload.get("iqr") else np.full_like(value, np.nan)
-    return MatrixResult(meta["metric"], int(meta["bin_count"]), value, iqr)
+    day_std = _to_array(payload["day_std"]) if payload.get("day_std") else None
+    n_days = _to_array(payload["n_days"]) if payload.get("n_days") else None
+    return MatrixResult(meta["metric"], int(meta["bin_count"]), value, iqr,
+                        day_std=day_std, n_days=n_days)
 
 
 def write_drift_test(drift_result: dict, out_dir: Path) -> None:
@@ -79,12 +102,15 @@ def write_drift_test(drift_result: dict, out_dir: Path) -> None:
 def write_daily_metrics(rows: list[dict], meta: dict, out_dir: Path) -> Path | None:
     """(評価日, 距離, seed) ごとの指標を daily_metrics.csv.gz に保存する（§10）。
 
-    rows: drift_matrix の daily_sink（`_daily_row` の dict 列）。1 版で約 4.7 万行。
+    rows: drift_matrix の daily_sink（`_daily_row` の dict 列）。1 版で約 2.4 万行。
     これがあれば **位置（列）のまとめ方を後から変えて再集計できる**（モデル再実行不要）。
     `distance="general"` の行は汎用ヘッド（距離に非依存）。
 
-    注：**Change 1 件ごとの予測は保存しない**（26 距離 × 約 180 日 × 10 seed × 1 日約 260 件
-    ≒ 1,200 万行/版となり非現実的。§10）。
+    **特徴量の寄与度分析はこのファイルで「そのセル値を出したモデル」を特定する**：`(評価日, 距離)` ごとに
+    5 seed の AUC を並べ、中央（3 番目）の seed がそれ。同値なら seed 番号の小さい方（§8.1）。
+
+    注：**Change 1 件ごとの予測は保存しない**（26 距離 × 約 180 日 × 5 seed × 1 日約 260 件
+    ≒ 600 万行/版となり非現実的。§10）。
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -95,7 +121,7 @@ def write_daily_metrics(rows: list[dict], meta: dict, out_dir: Path) -> Path | N
     df.to_csv(path, index=False, compression="gzip")
     with open(out_dir / "daily_metrics_meta.json", "w", encoding="utf-8") as f:
         json.dump({**meta, "columns": list(df.columns), "n_rows": len(df),
-                   "note": "評価日ごと（Δ=1）の指標。distance は 0 始まり（d0=step1 の fresh 窓）、"
+                   "note": "評価日ごと（Δ=1）の指標。distance は 0 始まり（d0=窓長の調査の fresh 窓）、"
                            "distance='general' は汎用ヘッド。position は 1 始まり。"
                            "位置のまとめ方を変えて再集計できる。"},
                   f, ensure_ascii=False, indent=2)

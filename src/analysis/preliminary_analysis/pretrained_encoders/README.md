@@ -57,7 +57,7 @@ pretrained_encoders/
 - `TARGET_PROJECT="nova"` / `FIRST_TARGET_VERSION="26.0.0"`（この直前が cutoff）
 - モデル：`D_MODEL=128 / N_LAYERS=2 / N_HEADS=4 / FFN_DIM=256 / DROPOUT=0.1`
 - 事前学習：`PRETRAIN_EPOCHS=20 / PRETRAIN_LR=1e-3 / PRETRAIN_BATCH_SETS=16`
-- 反復：`N_REPEATS=10`（`--n` で個数指定可）、`RANDOM_SEED=42`
+- 反復：`N_REPEATS=5`（奇数。`--n` で個数指定可）、`RANDOM_SEED=42`
 - 目的変数：`reviewed_within_delta`（Δ=`REVIEW_HORIZON_DAYS=1` 日）
 
 ## 備考

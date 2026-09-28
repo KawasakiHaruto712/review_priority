@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.analysis.background_problem.common.time_utils import parse_dt
 from src.analysis.preliminary_analysis.pretrained_encoders.features.fast_index import FastFeatureIndex
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants
 from src.features import bug_metrics, change_metrics, developer_metrics, project_metrics, refactoring_metrics
 
 # 特徴量の並び順（固定）。uncompleted_requests は除外。
@@ -99,12 +100,13 @@ def build_features(change: dict, t: datetime, index: FastFeatureIndex,
         float(change_metrics.calculate_files_changed(change, t)),
         float(change_metrics.calculate_elapsed_time(change, t)),
         float(change_metrics.calculate_revision_count(change, t)),
-        float(change_metrics.check_test_code_presence(change)),
+        float(change_metrics.check_test_code_presence(change, t)),
         float(index.past_report_count(email, t)),
         float(index.recent_report_count(email, t)),
         float(index.merge_rate(email, t)),
         float(index.recent_merge_rate(email, t)),
-        float(project_metrics.calculate_days_to_major_release(t, project, comp_releases_df)),
+        float(project_metrics.calculate_days_to_major_release(
+            t, project, comp_releases_df, constants.release_level_for(project))),
         float(index.open_ticket_count(t)),
         float(index.reviewed_lines_in_period(t)),
         float(refactoring_metrics.calculate_refactoring_confidence(subject, message)),

@@ -1,4 +1,4 @@
-"""lookback_window の設定値（事前分析 step1：チューニング窓の長さの調査）。
+"""lookback_window の設定値（事前分析窓長の調査：チューニング窓の長さの調査）。
 
 design.md 参照。共有部品は pretrained_encoders から import（concept_drift_detection には依存しない）。
 """

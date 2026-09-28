@@ -207,3 +207,53 @@ def predict(head: Head, eval_embeds: list[np.ndarray], eval_sets: list[TSet], de
         for k in range(len(s)):
             rows.append((float(s.labels[k]), float(prob[k]), s.ids[k], s.t))
     return rows
+
+
+# ── 勾配を通す経路（特徴量の寄与度分析 / concept_drift_cause の Integrated Gradients 用） ──────────
+# 上の embed_sets / predict は @torch.no_grad() ＋ numpy キャッシュのため、入力まで勾配が
+# たどれない。IG は「入力を動かしたとき出力がどう動くか」を見るので、その経路を別に用意する。
+# **既存の関数は変更しない**（lookback_window / concept_drift_detection に影響させないため）。
+
+def standardize_feats(scaler: Scaler, feats) -> np.ndarray:
+    """集合の特徴を標準化した (L, 15) の float32 配列にする（パディングしない）。
+
+    `_pad_batch` と同じ変換だが、IG は補間したテンソルを自分で組み立てるので単体で使えるものが要る。
+    なお**標準化は IG の値に影響しない**（勾配側と差分側で打ち消し合う）ので、
+    標準化後の空間で補間してよい（concept_drift_cause/design.md §2.3）。
+    """
+    return scaler.transform(np.asarray(feats, dtype=np.float64)).astype(np.float32)
+
+
+def head_from_vector(vec: np.ndarray, device: torch.device = None) -> Head:
+    """保存済みの (d_model+1,) ＝ 重み d_model ＋ 切片 1 から線形ヘッドを復元する。
+
+    距離×時期行列の分析が保存した probe（concept_drift_detection/io/probe_store.py）を読み戻すために使う。
+    """
+    head = Head(constants.D_MODEL, "linear", constants.HEAD_HIDDEN)
+    with torch.no_grad():
+        head.net.weight.copy_(torch.as_tensor(vec[:-1], dtype=torch.float32).view(1, -1))
+        head.net.bias.copy_(torch.as_tensor(vec[-1:], dtype=torch.float32))
+    head.eval()
+    return head.to(device) if device is not None else head
+
+
+def freeze_for_gradients(*modules) -> None:
+    """パラメータ側の勾配を切る（入力側だけ勾配を流すため）。
+
+    IG で欲しいのは入力に対する勾配だけ。重みの `.grad` が溜まると無駄にメモリを食うので落とす。
+    """
+    for mod in modules:
+        if mod is None:
+            continue
+        for prm in mod.parameters():
+            prm.requires_grad_(False)
+
+
+def item_logits(encoder: SetEncoder, head: Head, feats: torch.Tensor,
+                valid: torch.Tensor) -> torch.Tensor:
+    """標準化済み特徴 (B, L, 15) から per-item の**ロジット** (B, L) を返す（勾配を通す）。
+
+    確率ではなくロジットを返すのは、シグモイドの飽和で IG が潰れるのを避けるためと、
+    線形ヘッドの分解（IG ＝ 翻訳表 × 重み）を保つため（concept_drift_cause/design.md §2.2, §2.5）。
+    """
+    return head(encoder(feats, valid))
