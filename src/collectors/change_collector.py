@@ -10,7 +10,7 @@ import base64
 import argparse
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from dotenv import load_dotenv
@@ -24,6 +24,34 @@ from src.utils.constants import GERRIT_PROJECTS
 # n=1 でも通らなかったときだけ待って投げ直す間隔（秒）。この先の復旧処理が重いので、
 # 一時的な混雑ならここで回復させる。n>1 のうちは待たずに n を下げる方が速い。
 DEADLINE_WAITS = (3.0, 8.0)
+
+# Gerrit が 1 クエリで返す件数の上限。**超えてもエラーにならず、静かに打ち切られる**
+# （`_more_changes` が落ちて「終端」として返る）。n を増やしても上がらない。
+# 制限があるのは Google の 2 ホスト（chromium-review / android-review）だけだが、
+# 判定は全ホスト共通にしておく（割り直して同数なら本当にその件数なので無害）。
+QUERY_LIMIT = 10000
+
+# 取れなかったものを、全リポジトリの後にもう一度取り直す前に待つ秒数（design.md §6.6）。
+# 一時的な混雑や通信断なら、少し待てば通ることが多い
+RETRY_PASS_WAIT = 300.0
+
+# 1 日に割っても応答が 120 秒を超えたときに、1 ページの件数をこの順に減らす（design.md §6.6）。
+# 時間切れ 1 回に 120 秒かかるので、半分ずつではなく大きく減らす（半分ずつだと最悪 8 回・16 分）。
+# 1 件でも時間切れなら、その Change だけを本体とファイル一覧に分けて取る（_recover_change）
+TIMEOUT_PAGE_SIZES = (50, 5, 1)
+
+# 1 日でも上限に達したときの割り直しの段階（project_selection/design.md §6.6。第 1 段階の
+# ranking.SUBDAY_STEPS と同じ）。1 時間 → 10 分 → 1 分 → 1 秒。1 秒でも達したら記録して先へ進む。
+# 第 1 段階で chromium-review の 5 日が 1 日でも 1 万件を超えた（ボットの一斉更新など）ため（2026-10-04）
+SUBDAY_STEPS = (timedelta(hours=1), timedelta(minutes=10), timedelta(minutes=1), timedelta(seconds=1))
+
+# **全ホスト共通の既定の間隔（秒）。** 相手のサーバに負荷をかけないため、
+# 1 リクエストごとに必ず空ける。GERRIT_PROJECTS の delay で上書きできる。
+DEFAULT_REQUEST_DELAY = 1.0
+
+# アクセス元を明示する User-Agent。連絡先は .env の CONTACT から読む。
+# 研究目的のアクセスであることを相手のログに残すため。
+USER_AGENT_TEMPLATE = "review-priority-research/1.0 ({contact})"
 from src.collectors.storage.change_storage import ChangeStorage
 from src.collectors.storage.commit_storage import CommitStorage
 from src.collectors.storage.collection_manifest import CollectionManifest
@@ -40,6 +68,13 @@ from src.collectors.endpoints.commit_endpoint import CommitEndpoint
 from src.collectors.endpoints.commit_parents_endpoint import CommitParentsEndpoint
 
 logger = logging.getLogger(__name__)
+
+
+# 終了日が未来でも、切り詰めずにそのまま問い合わせる（2026-10-03 に変更。選定の design.md §6.3）。
+# 以前は clamp_end_date で「明日（UTC）」に切り詰めていたが、収集が日をまたぐと
+# 終わりのほうで更新された Change が範囲の外に出る。未来の期間の空の問い合わせが増えるのは許容する。
+# 代わりに、今年を含む区間の完了マーカーの名前が固定になる（例 2026-01-01_2027-01-01）ので、
+# 後日もう一度実行しても、その区間は取り直されない。
 
 
 def date_chunks(start_date: str, end_date: str, years) -> List[Tuple[str, str]]:
@@ -59,6 +94,23 @@ def date_chunks(start_date: str, end_date: str, years) -> List[Tuple[str, str]]:
         ce = end_date if top > ye else f"{top}-01-01"
         chunks.append((cs, ce))
         y = top
+    return chunks
+
+
+def day_chunks(start_date: str, end_date: str, days: int) -> List[Tuple[str, str]]:
+    """[start_date, end_date) を days 日ごとの (start, end) 区間に分割する。
+
+    chunk_days を持つリポジトリ（件数の多いもの）は、この区間ごとに保存して完了マーカーを付ける
+    （project_selection/design.md §6.6）。1 年ごとだと、途中で止まったときにその年の取得済みぶんを
+    すべて失う（2026-10-04、chromium/src の 2022 年ぶん 1 時間 20 分を失った）。
+    """
+    s, e = date.fromisoformat(str(start_date)[:10]), date.fromisoformat(str(end_date)[:10])
+    chunks: List[Tuple[str, str]] = []
+    cur = s
+    while cur < e:
+        nxt = min(cur + timedelta(days=int(days)), e)
+        chunks.append((cur.isoformat(), nxt.isoformat()))
+        cur = nxt
     return chunks
 
 
@@ -105,6 +157,9 @@ class ChangeCollector:
         # 取れない原因は毎回違いうるので、1 件のために収集全体を止めない方針にしている。
         self._skipped_changes: List[Dict[str, Any]] = []
 
+        # 1 リクエスト後に空ける秒数。収集対象ごとに _switch_to が設定する
+        self._request_delay: float = 0.0
+
         # リトライ設定
         retry_config_dict = self.config.get_retry_config()
         self.retry_config = RetryConfig(**retry_config_dict)
@@ -134,7 +189,9 @@ class ChangeCollector:
     def _create_session(self, auth: bool = True, env_prefix: str = "GERRIT") -> requests.Session:
         """HTTPセッションを作成（auth=False なら Authorization ヘッダを付けない）。"""
         session = requests.Session()
-        headers = {"Accept": "application/json"}
+        contact = os.getenv("CONTACT") or "academic study of code review"
+        headers = {"Accept": "application/json",
+                   "User-Agent": USER_AGENT_TEMPLATE.format(contact=contact)}
 
         if auth:
             user, pwd = self._credentials(env_prefix)
@@ -190,8 +247,11 @@ class ChangeCollector:
         env_prefix = spec.get("env", "GERRIT")
         self.session = self._create_session(auth=auth, env_prefix=env_prefix)
         self.endpoints = self._initialize_endpoints(spec["host"], self.session, auth, env_prefix)
+        # アクセス頻度に制限のあるインスタンス用（GERRIT_PROJECTS の delay）
+        self._request_delay = float(spec.get("delay", DEFAULT_REQUEST_DELAY))
         logger.info(f"接続先: {spec['host']} / project:{spec['path']}"
-                    f"（認証{'あり（' + env_prefix + '_*）' if auth else 'なし'}）")
+                    f"（認証{'あり（' + env_prefix + '_*）' if auth else 'なし'}"
+                    + (f"・間隔 {self._request_delay} 秒" if self._request_delay else "") + "）")
         return spec
     
     def collect_all_components(self):
@@ -211,14 +271,49 @@ class ChangeCollector:
             },
         )
         try:
+            # **1 つのリポジトリで失敗しても、残りは必ず取る**（design.md §6.6）。
+            # 以前は例外が上に抜けて、残りのリポジトリを取らずに止まっていた（2026-10-04）
             for component in components:
-                self.collect_component(component, manifest=manifest)
-            manifest.finish("completed")
-            logger.info("全コンポーネントのデータ収集完了")
+                self._collect_component_safely(component, manifest)
+
+            # 取れなかったものがあるリポジトリは、最後にもう一度だけ取り直す。
+            # 完了マーカーの付いた区間は飛ばされるので、取り直すのは取れなかった区間だけ
+            failed = [c for c in components
+                      if any(d.get("component") == c for d in self._skipped_changes)]
+            if failed:
+                logger.warning(f"取れなかったものがある {len(failed)} 件を、{RETRY_PASS_WAIT:.0f} 秒待ってから"
+                               f"取り直します: {', '.join(failed)}")
+                time.sleep(RETRY_PASS_WAIT)
+                for component in failed:
+                    self._skipped_changes = [d for d in self._skipped_changes
+                                             if d.get("component") != component]
+                    self._collect_component_safely(component, manifest)
+
+            remaining = sorted({d.get("component") for d in self._skipped_changes})
+            if remaining:
+                # 黙って抜けたままにしない。どこが取れていないかと、取り直す方法を必ず出す
+                manifest.finish("incomplete")
+                logger.error(f"**取り直しても取れなかったものがあります: {', '.join(remaining)}**。"
+                             f"collection_manifest.jsonl の dropped_detail に位置があります。"
+                             f"同じコマンドをもう一度実行すると、完了マーカーの無い区間だけを取り直します")
+            else:
+                manifest.finish("completed")
+                logger.info("全コンポーネントのデータ収集完了（取れなかったものはありません）")
         except BaseException as e:
             # 途中で止まった/落ちた場合も「どこまで取れたか」を必ず残す
             manifest.finish("interrupted", error=f"{type(e).__name__}: {e}")
             raise
+
+    def _collect_component_safely(self, component: str, manifest: CollectionManifest) -> None:
+        """collect_component を呼び、例外が出ても記録して戻る（Ctrl+C などの中断だけは上に通す）。"""
+        try:
+            self.collect_component(component, manifest=manifest)
+        except Exception as e:
+            self._skipped_changes.append(
+                {"component": component, "range": "（リポジトリ全体）", "offset": -1,
+                 "reason": f"{type(e).__name__}: {e}"})
+            logger.error(f"[{component}] 収集に失敗しました（{type(e).__name__}: {e}）。"
+                         f"記録して次のリポジトリへ進みます")
 
     def collect_component(self, component: str, manifest: CollectionManifest = None):
         """特定コンポーネントのデータを収集（checkpoint_years ごとに途中保存＋レジューム）。"""
@@ -233,8 +328,14 @@ class ChangeCollector:
         batch_size = int(spec.get("batch_size") or cfg['batch_size'])
         if batch_size != cfg['batch_size']:
             logger.info(f"[{component}] 要求件数を {batch_size} に設定（既定 {cfg['batch_size']}）")
-        chunks = date_chunks(cfg['start_date'], cfg['end_date'], cfg.get('checkpoint_years'))
-        chunked = bool(cfg.get('checkpoint_years'))
+        end_date = str(cfg['end_date'])[:10]
+        if spec.get("chunk_days"):
+            # 件数の多いリポジトリは chunk_days ごとに保存・完了マーカー（design.md §6.6）
+            chunks = day_chunks(cfg['start_date'], end_date, int(spec["chunk_days"]))
+            chunked = True
+        else:
+            chunks = date_chunks(cfg['start_date'], end_date, cfg.get('checkpoint_years'))
+            chunked = bool(cfg.get('checkpoint_years'))
 
         change_rows: List[Dict[str, Any]] = []  # summary 用の軽量行（全チャンク分を蓄積）
         total_saved = 0
@@ -251,8 +352,21 @@ class ChangeCollector:
                     logger.info(f"[{component}] 区間 {cs}〜{ce} は保存済み → スキップ（レジューム）")
                     continue
 
-                changes, commits, skipped = self._collect_range_adaptive(
-                    component, cs, ce, batch_size, gerrit_path=gerrit_path)
+                drops_before = len(self._skipped_changes)
+                try:
+                    changes, commits, skipped = self._collect_chunk(
+                        component, cs, ce, batch_size, gerrit_path, spec.get("chunk_days"))
+                except Exception as e:
+                    # 区間ごと取れなかった（通信断が続いた等）。**収集全体は止めない**。
+                    # 記録して次の区間へ進み、完了マーカーは付けない（再実行でこの区間だけ取り直す）。
+                    # 以前はここで例外を上に投げ、残りの区間・リポジトリを取らずに止まっていた
+                    # （2026-10-04、chromium/src で発生。design.md §6.6）
+                    self._skipped_changes.append(
+                        {"component": component, "range": f"{cs}〜{ce}", "offset": -1,
+                         "reason": f"区間ごと失敗: {type(e).__name__}: {e}"})
+                    logger.error(f"[{component}] 区間 {cs}〜{ce} を取得できませんでした（{type(e).__name__}）。"
+                                 f"記録して次の区間へ進みます（完了マーカーは付けません）")
+                    continue
 
                 # 途中保存: この区間ぶんを即ディスクへ（クラッシュしてもここまでは残る）
                 change_rows.extend(self.change_storage.save_changes(component, changes))
@@ -263,8 +377,15 @@ class ChangeCollector:
                 total_commits += len(commits)
                 created_all.extend(c.get("created") for c in changes if c.get("created"))
                 if chunked:
-                    self._write_chunk_marker(marker, len(changes), len(commits))
-                    logger.info(f"[{component}] 区間 {cs}〜{ce} 保存: {len(changes)}変更 / {len(commits)}コミット")
+                    if len(self._skipped_changes) > drops_before:
+                        # 取れなかった Change や区間がある。**完了マーカーを付けない**ので、
+                        # 再実行するとこの区間を取り直す（以前は付けてしまい、抜けたまま飛ばされていた）
+                        logger.warning(f"[{component}] 区間 {cs}〜{ce} 保存: {len(changes)}変更。"
+                                       f"取れなかったものが {len(self._skipped_changes) - drops_before} 件あるので、"
+                                       f"完了マーカーは付けません（再実行で取り直します）")
+                    else:
+                        self._write_chunk_marker(marker, len(changes), len(commits))
+                        logger.info(f"[{component}] 区間 {cs}〜{ce} 保存: {len(changes)}変更 / {len(commits)}コミット")
         except BaseException as e:
             status = "partial"
             error = f"{type(e).__name__}: {e}"
@@ -276,6 +397,8 @@ class ChangeCollector:
             self.commit_storage.write_summary(component, total_commits)
             # 取得できずに飛ばした Change（この対象ぶん）をマニフェストに残す
             dropped = [d for d in self._skipped_changes if d.get("component") == component]
+            if status == "completed" and dropped:
+                status = "incomplete"  # 取れなかったものがある（完了マーカーの無い区間が残っている）
             if manifest is not None:
                 manifest.record_component(
                     component, status=status,
@@ -286,7 +409,8 @@ class ChangeCollector:
                     error=error,
                     extra={"commits_saved": total_commits,
                            "dropped_changes": len(dropped),
-                           "dropped_detail": dropped[:50]},
+                           # 全件残す（以前は先頭 50 件だけで、それ以降は記録から消えていた）
+                           "dropped_detail": dropped},
                 )
             logger.info(
                 f"{component} の収集{('完了' if status == 'completed' else '中断')}: "
@@ -296,6 +420,36 @@ class ChangeCollector:
                 # 黙って欠けたまま解析へ進むのを防ぐ
                 logger.warning(f"[{component}] **取得できずに飛ばした Change が {len(dropped)} 件あります**。"
                                f"collection_manifest.jsonl の dropped_detail で位置を確認できます")
+
+    def _collect_chunk(self, component: str, start_date: str, end_date: str,
+                       batch_size: int, gerrit_path: str, chunk_days: Optional[int]
+                       ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+        """完了マーカー 1 つぶんの区間を取得する。chunk_days があれば最初からその日数で割る。
+
+        **件数の多いリポジトリでは、最初から区間を小さくして問い合わせる。**
+        1 年ぶん（chromium/src で約 21 万件）を一度に問い合わせると、サーバの応答が
+        120 秒を超えてタイムアウトする。タイムアウトすれば区間を割って取り直す仕組みは
+        あるが（_collect_range_adaptive）、それに頼ると「1 年 → 半年 → 3 か月 …」と
+        **小さくなるまで重いクエリを何度も相手のサーバに投げる**ことになる。
+        件数は第 1 段階のランキングで分かっているので、最初から適切な大きさで始める。
+
+        完了マーカーは従来どおり checkpoint_years 単位のまま（意味を変えない）。
+        """
+        if not chunk_days:
+            return self._collect_range_adaptive(component, start_date, end_date,
+                                                batch_size, gerrit_path=gerrit_path)
+        s, e = date.fromisoformat(start_date), date.fromisoformat(end_date)
+        changes: List[Dict[str, Any]] = []
+        commits: List[Dict[str, Any]] = []
+        skipped = 0
+        cur = s
+        while cur < e:
+            nxt = min(cur + timedelta(days=int(chunk_days)), e)
+            ch, cm, sk = self._collect_range_adaptive(component, cur.isoformat(), nxt.isoformat(),
+                                                      batch_size, gerrit_path=gerrit_path)
+            changes += ch; commits += cm; skipped += sk
+            cur = nxt
+        return changes, commits, skipped
 
     def _collect_range_adaptive(self, component: str, start_date: str, end_date: str,
                                 batch_size: int, gerrit_path: str = None,
@@ -311,14 +465,48 @@ class ChangeCollector:
         （境界で重複しても change_number キーで上書き保存されるため無害）。
         """
         try:
-            return self._collect_range(component, start_date, end_date, batch_size,
-                                       gerrit_path=gerrit_path)
-        except (ServerDeadlineExceeded, requests.exceptions.HTTPError, ValueError) as e:
+            got = self._collect_range(component, start_date, end_date, batch_size,
+                                      gerrit_path=gerrit_path)
+            # **Gerrit は 1 クエリ QUERY_LIMIT 件で打ち切る。しかもエラーにならず
+            # `_more_changes` が落ちて「終端」として返るため、取得側からは
+            # 「ちょうど取り終わった」のか「打ち切られた」のかが区別できない。**
+            # 疑わしきは区間を割って取り直す（割り直して同数なら本当にその件数）。
+            # 見逃すと欠損したまま完了マーカーが書かれる（2026-10-01 に chromium/src で発生）。
+            if len(got[0]) + got[2] >= QUERY_LIMIT:
+                s, t = date.fromisoformat(start_date), date.fromisoformat(end_date)
+                if (t - s).days > min_days:
+                    mid = (s + timedelta(days=(t - s).days // 2)).isoformat()
+                    logger.warning(f"[{component}] 区間 {start_date}〜{end_date} が上限"
+                                   f"（{QUERY_LIMIT:,}）に達しました。打ち切られた可能性があるため "
+                                   f"{start_date}〜{mid} と {mid}〜{end_date} に割って取り直します")
+                    a = self._collect_range_adaptive(component, start_date, mid,
+                                                     batch_size, gerrit_path, min_days)
+                    b = self._collect_range_adaptive(component, mid, end_date,
+                                                     batch_size, gerrit_path, min_days)
+                    return a[0] + b[0], a[1] + b[1], a[2] + b[2]
+                # 1 日でも上限に達した。時刻で割り直す（project_selection/design.md §6.6。2026-10-04 追加）。
+                # 以前はここで「これ以上割れない」として記録し、1 万件だけを残して先へ進んでいた
+                logger.warning(f"[{component}] 区間 {start_date}〜{end_date} が 1 日でも上限"
+                               f"（{QUERY_LIMIT:,}）に達しました。時刻で割って取り直します")
+                return self._collect_subday(component, datetime.combine(s, datetime.min.time()),
+                                            datetime.combine(t, datetime.min.time()),
+                                            batch_size, gerrit_path, SUBDAY_STEPS)
+            return got
+        except (ServerDeadlineExceeded, requests.exceptions.HTTPError,
+                requests.exceptions.ReadTimeout, ValueError) as e:
+            # ReadTimeout も割る対象にする。該当件数の多い区間はサーバの応答が遅くなるため、
+            # 区間を割って件数を減らせば応答が速くなる（retry_handler は投げ直さずに返してくる）
             s, t = date.fromisoformat(start_date), date.fromisoformat(end_date)
             span = (t - s).days
             if span <= min_days:
-                logger.error(f"[{component}] 区間 {start_date}〜{end_date} はこれ以上割れません: {e}")
-                raise
+                # 1 日でも失敗した。期間ではなく **1 ページの件数を減らして** 取り直す（design.md §6.6）。
+                # 以前はここで例外を上に投げ、収集全体が止まっていた（2026-10-04、chromium/src の
+                # 2022-04-22。その日は 619 件で件数は多くない。1 ページ 500 件の中に組み立ての重い
+                # Change があったか、一時的な混雑と考えられる）
+                logger.warning(f"[{component}] 区間 {start_date}〜{end_date} は 1 日でも失敗しました"
+                               f"（{type(e).__name__}）。1 ページの件数を減らして取り直します")
+                return self._collect_range(component, start_date, end_date, batch_size,
+                                           gerrit_path=gerrit_path, reduce_on_failure=True)
             mid = (s + timedelta(days=span // 2)).isoformat()
             logger.warning(f"[{component}] 区間 {start_date}〜{end_date}（{span}日）で失敗 → "
                            f"{start_date}〜{mid} と {mid}〜{end_date} に割って取り直します: "
@@ -328,6 +516,41 @@ class ChangeCollector:
             ch_b, cm_b, sk_b = self._collect_range_adaptive(component, mid, end_date,
                                                            batch_size, gerrit_path, min_days)
             return ch_a + ch_b, cm_a + cm_b, sk_a + sk_b
+
+    def _collect_subday(self, component: str, start: datetime, end: datetime,
+                        batch_size: int, gerrit_path: str, steps: Tuple[timedelta, ...]
+                        ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+        """[start, end) を steps[0] ごとに時刻で区切って取得する（1 日でも上限に達したとき）。
+
+        時刻は UTC で、問い合わせでは after:"2026-01-05 06:00:00" のように引用符で囲む
+        （ChangesEndpoint が行う）。1 区間が上限に達したら、その区間だけ steps の次の段階で割り直す。
+        最後の段階（1 秒）でも達したら、欠損の可能性として記録して先へ進む。
+        境目は両方の区間に含まれうるが、change_number をキーに上書き保存されるので重複しない。
+        """
+        changes: List[Dict[str, Any]] = []
+        commits: List[Dict[str, Any]] = []
+        skipped = 0
+        cursor = start
+        while cursor < end:
+            nxt = min(cursor + steps[0], end)
+            a, b = f"{cursor:%Y-%m-%d %H:%M:%S}", f"{nxt:%Y-%m-%d %H:%M:%S}"
+            # 時刻の区間はこれ以上期間で割らないので、失敗したら 1 ページの件数を減らす（design.md §6.6）
+            got = self._collect_range(component, a, b, batch_size, gerrit_path=gerrit_path,
+                                      reduce_on_failure=True)
+            if len(got[0]) + got[2] >= QUERY_LIMIT:
+                if len(steps) > 1:
+                    logger.warning(f"[{component}] 区間 {a}〜{b} が上限に達しました。"
+                                   f"{steps[1]} ごとに割って取り直します")
+                    got = self._collect_subday(component, cursor, nxt, batch_size, gerrit_path, steps[1:])
+                else:
+                    logger.error(f"[{component}] 区間 {a}〜{b} が上限に達しましたが、1 秒より細かく割れません。"
+                                 f"**この区間は欠損している可能性があります**")
+                    self._skipped_changes.append(
+                        {"component": component, "range": f"{a}〜{b}",
+                         "offset": -1, "reason": f"query_limit_{QUERY_LIMIT}"})
+            changes += got[0]; commits += got[1]; skipped += got[2]
+            cursor = nxt
+        return changes, commits, skipped
 
     def _recover_change(self, component: str, start_date: str, end_date: str, offset: int,
                         gerrit_path: str = None) -> Optional[Dict[str, Any]]:
@@ -366,25 +589,33 @@ class ChangeCollector:
             return None
 
         revisions = change.get("revisions") or {}
-        filled = 0
         for sha, meta in revisions.items():
             rev_no = meta.get("_number", sha)
             try:
                 meta["files"] = ep.fetch_revision_files(number, rev_no)
-                filled += 1
             except Exception as e:
-                # このリビジョンだけ諦める（空にして続行）。件数はログに残す
-                meta["files"] = {}
-                logger.warning(f"[{component}] #{number} rev{rev_no} のファイル一覧を取得できません: "
-                               f"{type(e).__name__}")
-        logger.info(f"[{component}] #{number} を復旧しました（リビジョン {filled}/{len(revisions)} 個の"
+                # 1 つの版でもファイル一覧が取れなければ、この Change は取れなかったものとして扱う。
+                # 以前はその版のファイル一覧を空にして保存しており、行数・ファイル数などの特徴量が
+                # 黙って誤った値になっていた（2026-10-04 に修正。呼び出し元が記録して完了マーカーを付けない）
+                logger.error(f"[{component}] #{number} rev{rev_no} のファイル一覧を取得できません"
+                             f"（{type(e).__name__}）。この Change は取れなかったものとして記録します")
+                return None
+        logger.info(f"[{component}] #{number} を復旧しました（リビジョン {len(revisions)} 個すべての"
                     f"ファイル一覧を取得）")
         return change
 
     def _collect_range(self, component: str, start_date: str, end_date: str,
-                       batch_size: int,
-                       gerrit_path: str = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
-        """1 つの日付区間の変更・コミットを取得して返す（(changes, commits, skipped)）。"""
+                       batch_size: int, gerrit_path: str = None,
+                       reduce_on_failure: bool = False
+                       ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+        """1 つの日付区間の変更・コミットを取得して返す（(changes, commits, skipped)）。
+
+        reduce_on_failure=True（1 日・時刻の区間など、期間ではもう割らないとき）は、
+        応答の時間切れ・HTTP エラー・壊れた応答で例外を投げず、1 ページの件数を
+        TIMEOUT_PAGE_SIZES の順に減らして取り直す。1 件でも失敗したら、その Change だけ
+        本体とファイル一覧に分けて取る（_recover_change）。それでも駄目なら記録して次へ進む
+        （design.md §6.6）。
+        """
         skip = 0
         changes_out: List[Dict[str, Any]] = []
         commits_out: List[Dict[str, Any]] = []
@@ -408,6 +639,10 @@ class ChangeCollector:
                         component=component, start_date=start_date, end_date=end_date,
                         limit=n, skip=skip, gerrit_path=gerrit_path,
                     )
+                    # アクセス頻度に制限のあるインスタンスでは間隔を空ける。
+                    # 制限に掛かってから再試行の待ち時間に入るより、最初から空けるほうが速い。
+                    if self._request_delay:
+                        time.sleep(self._request_delay)
                     break
                 except ServerDeadlineExceeded:
                     if n > 1:
@@ -442,6 +677,29 @@ class ChangeCollector:
                         continue
                     changes = [one]
                     break
+                except (requests.exceptions.ReadTimeout, requests.exceptions.HTTPError, ValueError) as e:
+                    # 応答の時間切れ・HTTP エラー（再試行しても通らなかったもの）・壊れた応答。
+                    # 期間ではもう割らない区間のときだけ、ここで扱う（それ以外は呼び出し側が期間を割る）
+                    if not reduce_on_failure:
+                        raise
+                    smaller = [m for m in TIMEOUT_PAGE_SIZES if m < n]
+                    if smaller:
+                        n = smaller[0]
+                        logger.warning(f"[{component}] {start_date}〜{end_date} S={skip} で失敗"
+                                       f"（{type(e).__name__}）→ 要求件数を n={n} に落として取り直します")
+                        continue
+                    # 1 件でも失敗 ＝ その Change 単体が重い。本体とファイル一覧に分けて取る
+                    one = self._recover_change(component, start_date, end_date, skip, gerrit_path)
+                    if one is None:
+                        # それでも取れない。記録して次の 1 件へ進む（収集は止めない。完了マーカーも付かない）
+                        self._skipped_changes.append(
+                            {"component": component, "range": f"{start_date}〜{end_date}",
+                             "offset": skip, "reason": f"{type(e).__name__}（n=1・分割取得とも失敗）"})
+                        skip += 1
+                        n = batch_size
+                        continue
+                    changes = [one]
+                    break
             if not changes:
                 break
             for change in changes:
@@ -451,6 +709,11 @@ class ChangeCollector:
                     commits_out.extend(change_data['commits'])
                 else:
                     skipped += 1
+                    # 以前は件数を数えるだけで、どの Change かを記録していなかった
+                    self._skipped_changes.append(
+                        {"component": component, "range": f"{start_date}〜{end_date}",
+                         "offset": -1, "change_number": change.get("_number"),
+                         "reason": "Change の中身の処理に失敗"})
             skip += len(changes)
             if n < batch_size:
                 # このページは通ったので次は既定値に戻す（混雑は一時的なので引きずらない）

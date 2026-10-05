@@ -1,83 +1,149 @@
-"""メジャーリリース抽出（major_releases_summary.csv の生成）。
+"""メジャーリリースの表（major_releases_summary.csv）の生成。
 
-`releases_summary.csv`（全リリース：patch・EOL マーカー等も含む）から、各プロジェクトの
-「サイクルごとの主要リリース」だけを抽出し、`major_releases_summary.csv` を生成する。
-分析側 `load_release_dates` はこの CSV をサイクル境界として使う。
+OpenStack の公式のサイクル一覧（releases リポジトリの `data/series_status.yaml`）から、
+**サイクル単位**の表を作る。分析側 `load_release_dates` はこの CSV を、特徴量 days_to_major_release と
+分析期間の区切り（事前学習の締め・評価する版の期間）に使う。
+設計：src/collectors/README.md の「メジャーリリースの表」、pretrained_encoders/design.md §11.4。
 
-プロジェクト別ルール（版付け方式がプロジェクトで異なるため）:
-  - nova 型（nova / neutron / cinder / glance / keystone）: `X.0.0`（サイクルごとに major を上げる）
-  - swift                                                 : `2.Y.0`（major は 2 のまま minor を上げる）
-    ※ swift は independent release model で `X.0.0` に該当するのが `2.0.0` の1つだけなので別ルール。
+列（1 行 = 1 project × 1 サイクル）:
+  project       nova など
+  series        サイクル名（yoga など）。series_status.yaml の name
+  version       その project がそのサイクルで最初に出した正式版（rc・b・-eom・-eol などは除く）。
+                deliverables/<series>/<project>.yaml から取る。まだ出ていないサイクルは空
+  release_date  series_status.yaml の initial-release（公式のサイクルのリリース日。6 件共通。swift もこの日付）
+  status        released（正式版が出ている）/ planned（まだ出ていない。日付は予定日）
+  yaml_url      そのサイクルの deliverables ファイルの URL
 
-変換: `component` → `project` に読み替え、`version / release_date / yaml_url` はそのまま引き継ぐ。
+旧版（2026-09）は `releases_summary.csv` から版番号の形（nova 型は X.0.0、swift は 2.Y.0）で区切りを拾っていた。
+版の付け方が途中で変わる（2011.2 → 2015.1.0 → 12.0.0）ため 2015 年秋より前が抜け、swift は 1 サイクルに
+区切りが複数あった。サイクル単位にすると版番号を解釈しなくてよい。
+
+OpenStack 以外の行（release_tags_collector が追記する qtbase・qtcreator・libreoffice）は、作り直すときも残す。
 """
 
 import logging
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 try:
     from ..config import path as app_path
+    from ..utils import constants
 except ImportError:
     ROOT_DIR = Path(__file__).resolve().parents[2]
     if str(ROOT_DIR) not in sys.path:
         sys.path.append(str(ROOT_DIR))
     from src.config import path as app_path
+    from src.utils import constants
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
-# 主要リリース判定の正規表現（プロジェクト別）
-_NOVA_STYLE = re.compile(r"^\d+\.0\.0$")   # 例: 26.0.0（サイクルごとに major を上げる）
-_SWIFT_STYLE = re.compile(r"^2\.\d+\.0$")  # 例: 2.34.0（major は 2 のまま minor を上げる）
-_SWIFT = "swift"
+# 正式版：数字とドットだけの版（2011.2 / 2015.1.0 / 25.0.0 / 2.29.0）。
+# rc・b（試験版。例 20.0.0.0rc1）や -eom・-eol・-em（保守終了の印。例 yoga-eom）は除く
+_FINAL_VERSION = re.compile(r"^\d+(\.\d+)+$")
+_YAML_URL = "https://opendev.org/openstack/releases/src/branch/master/deliverables/{series}/{project}.yaml"
+COLUMNS = ["project", "series", "version", "release_date", "status", "yaml_url"]
 
 
-def _is_major(component: str, version: str) -> bool:
-    """その (component, version) がサイクルの主要リリースか。"""
-    v = str(version).strip()
-    if component == _SWIFT:
-        return bool(_SWIFT_STYLE.match(v))
-    return bool(_NOVA_STYLE.match(v))
+def _first_final_version(yaml_path: Path, project: str) -> str | None:
+    """deliverables ファイルから、その project の最初の正式版を返す。無ければ None。"""
+    if not yaml_path.exists():
+        return None
+    data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    for release in data.get("releases") or []:
+        version = str(release.get("version", "")).strip()
+        repos = {p.get("repo") for p in release.get("projects") or []}
+        if f"openstack/{project}" in repos and _FINAL_VERSION.match(version):
+            return version
+    return None
 
 
 class MajorReleaseStorage:
-    """`releases_summary.csv` からメジャーリリースを抽出して `major_releases_summary.csv` を書き出す。"""
+    """公式のサイクル一覧から、サイクル単位の `major_releases_summary.csv` を書き出す。"""
 
     def __init__(self, data_dir: Path):
         """
         Args:
-            data_dir: `releases_summary.csv` があり、`major_releases_summary.csv` を出力するディレクトリ。
+            data_dir: `releases_repo/`（openstack/releases の clone）があり、`major_releases_summary.csv` を出力するディレクトリ。
         """
         self.data_dir = Path(data_dir)
-        self.input_path = self.data_dir / "releases_summary.csv"
+        self.repo_path = self.data_dir / "releases_repo"
+        self.series_path = self.repo_path / "data" / "series_status.yaml"
         self.output_path = self.data_dir / "major_releases_summary.csv"
+        self.projects = list(constants.OPENSTACK_CORE_COMPONENTS)
+
+    def _series(self) -> list[tuple[str, date]]:
+        """(サイクル名, 公式のリリース日) を日付の昇順で返す。"""
+        if not self.series_path.exists():
+            raise FileNotFoundError(f"サイクル一覧が見つかりません: {self.series_path}")
+        rows = []
+        for s in yaml.safe_load(self.series_path.read_text(encoding="utf-8")) or []:
+            d = s.get("initial-release")
+            if not d:
+                logger.warning(f"サイクル {s.get('name')} に initial-release がないので除外します")
+                continue
+            rows.append((s["name"], pd.Timestamp(str(d)).date()))
+        return sorted(rows, key=lambda r: r[1])
 
     def extract(self) -> pd.DataFrame:
-        """メジャーリリースだけを抽出した DataFrame を返す（`project, version, release_date, yaml_url`）。"""
-        if not self.input_path.exists():
-            raise FileNotFoundError(f"入力が見つかりません: {self.input_path}")
-        df = pd.read_csv(self.input_path)
-
-        mask = df.apply(lambda r: _is_major(r["component"], r["version"]), axis=1)
-        major = df[mask].copy()
-        major = major.rename(columns={"component": "project"})
-        major = major[["project", "version", "release_date", "yaml_url"]]
-        major = major.sort_values(by=["project", "release_date"], ascending=[True, False])
-        return major.reset_index(drop=True)
+        """OpenStack の対象 project ぶんの表を返す（列は COLUMNS）。"""
+        series = self._series()
+        deliverables = self.repo_path / "deliverables"
+        today = date.today()
+        rows = []
+        for project in self.projects:
+            # deliverables ファイルが最初に現れたサイクルから、一覧の最新のサイクル（予定を含む）まで
+            first = next((i for i, (name, _) in enumerate(series)
+                          if (deliverables / name / f"{project}.yaml").exists()), None)
+            if first is None:
+                logger.warning(f"[{project}] deliverables が 1 つも見つかりません")
+                continue
+            for name, release_date in series[first:]:
+                yaml_path = deliverables / name / f"{project}.yaml"
+                version = _first_final_version(yaml_path, project)
+                if version:
+                    status = "released"
+                elif release_date > today:
+                    status = "planned"
+                else:
+                    # 公式の日付は過ぎているのに正式版がない。区切りの日付は使うが、ログに残す
+                    status = "planned"
+                    logger.warning(f"[{project}] {name}（{release_date}）は日付を過ぎているが正式版がありません"
+                                   f"（releases リポジトリが古い可能性）")
+                rows.append({
+                    "project": project, "series": name, "version": version or "",
+                    "release_date": release_date.isoformat(), "status": status,
+                    "yaml_url": _YAML_URL.format(series=name, project=project) if yaml_path.exists() else "",
+                })
+        df = pd.DataFrame(rows, columns=COLUMNS)
+        return df.sort_values(by=["project", "release_date"], ascending=[True, False]).reset_index(drop=True)
 
     def save(self) -> Path:
-        """抽出して `major_releases_summary.csv` に保存し、パスを返す。"""
-        major = self.extract()
+        """作り直して保存し、パスを返す。OpenStack 以外の既存の行は残す。"""
+        new = self.extract()
+        if self.output_path.exists():
+            old = pd.read_csv(self.output_path, dtype=str, keep_default_na=False)
+            others = old[~old["project"].isin(self.projects)]
+            if len(others):
+                logger.info(f"OpenStack 以外の行を残します: "
+                            + ", ".join(f"{p} {n} 件" for p, n in others["project"].value_counts().items()))
+            new = pd.concat([new, others], ignore_index=True)
+        cols = COLUMNS + [c for c in new.columns if c not in COLUMNS]
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        major.to_csv(self.output_path, index=False, encoding="utf-8")
-        logger.info(f"メジャーリリース {len(major)} 件を抽出しました。")
-        for project, sub in major.groupby("project"):
-            logger.info(f"  {project}: {len(sub)} 件")
+        new[cols].to_csv(self.output_path, index=False, encoding="utf-8")
+
+        for project, sub in new[new["project"].isin(self.projects)].groupby("project"):
+            sub = sub.sort_values("release_date")
+            planned = sub[sub["status"] == "planned"]
+            logger.info(f"  {project}: {len(sub)} サイクル（{sub.iloc[0]['series']} {sub.iloc[0]['release_date']} 〜 "
+                        f"{sub.iloc[-1]['series']} {sub.iloc[-1]['release_date']}）"
+                        + (f"、planned: {', '.join(planned['series'])}" if len(planned) else ""))
         logger.info(f"出力先: {self.output_path}")
         return self.output_path
 

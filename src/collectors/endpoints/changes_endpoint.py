@@ -8,6 +8,16 @@ from typing import List, Dict, Any
 from src.collectors.base.base_api_client import BaseAPIClient
 
 
+def _time_value(value: str) -> str:
+    """after: / before: に書く値。時刻付き（"2026-01-05 06:00:00"）なら引用符で囲む。
+
+    1 日でも 1 万件の上限に達した区間を、時刻で割って取り直すときに使う
+    （project_selection/design.md §6.6）。日付だけならそのまま。時刻は UTC として扱われる。
+    """
+    value = str(value)
+    return f'"{value}"' if " " in value else value
+
+
 class ChangesEndpoint(BaseAPIClient):
     """変更リスト取得エンドポイント"""
 
@@ -41,7 +51,7 @@ class ChangesEndpoint(BaseAPIClient):
         """
         project = gerrit_path or f"openstack/{component}"
         return self.make_request(self.get_endpoint_path(), {
-            "q": f"project:{project} after:{start_date} before:{end_date}",
+            "q": f"project:{project} after:{_time_value(start_date)} before:{_time_value(end_date)}",
             "n": limit, "S": skip,
         })
 
@@ -80,7 +90,7 @@ class ChangesEndpoint(BaseAPIClient):
         """
         project = gerrit_path or f"openstack/{component}"
         # after/before は Gerrit では「最終更新日」で絞られる（作成日ではない）
-        query = f"project:{project} after:{start_date} before:{end_date}"
+        query = f"project:{project} after:{_time_value(start_date)} before:{_time_value(end_date)}"
         
         params = {"q": query, "n": limit, "S": skip, "o": self.FULL_OPTIONS}
         return self.make_request(self.get_endpoint_path(), params)

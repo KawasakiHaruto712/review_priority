@@ -2,6 +2,7 @@
 
 計測点 T = 毎日 0:00:00 の定点グリッド（MEASUREMENT_STEP_DAYS 刻み）。
 各 T で Open な Change を 1 レコード (change_id, T, features, label) にする。
+Open かどうかは review_utils.open_periods（作成・放棄・復活・マージの記録から作る Open の期間）で判定する（design.md §11.1）。
 同一 Change は複数の日次 T に現れる（複数レコード＝実運用忠実）。
 ラベル = Δ以内レビューの2値。未確定（窓が観測末尾超）のレコードは作らない。
 """
@@ -31,17 +32,19 @@ class Record:
     change_id: object
     t: datetime
     created: datetime
-    decision_time: datetime | None  # None なら未決（Open のまま）
+    decision_time: datetime | None  # 最後に閉じた時刻（submitted か最後の放棄）。None なら未決（Open のまま）
     features: list[float]
     labels: dict
     bin: int | None = field(default=None)
 
 
 def decision_time(change: dict) -> datetime | None:
-    """マージ/放棄の判断時刻（MERGED/ABANDONED は updated を採用、それ以外は None）。"""
-    if change.get("status") in ("MERGED", "ABANDONED"):
-        return parse_dt(change.get("updated"))
-    return None
+    """最後に閉じた時刻（MERGED は submitted、ABANDONED は最後の放棄の記録）。未決なら None。
+
+    旧版は updated（最後の更新）を使っていた。design.md §11.1。
+    """
+    periods = review_utils.open_periods(change)
+    return periods[-1][1] if periods else None
 
 
 def daily_grid(pool_start: datetime, cycle_end: datetime, step_days: int) -> list[datetime]:
@@ -78,9 +81,15 @@ def build_records(changes: list[dict], project: str, pool_start: datetime, cycle
     records: list[Record] = []
     for idx, change in enumerate(changes):
         created = parse_dt(change.get("created"))
-        if created is None:
+        if created is None or created > cycle_end:
             continue
-        dec = decision_time(change)
+        # 最後の更新が期間の始まりより前なら、期間中は一度も Open でない（updated は閉じた時刻以降なので安全）。
+        # 記録をたどる前に飛ばして速くする（結果は変わらない）
+        updated = parse_dt(change.get("updated"))
+        if updated is not None and updated < grid[0] and change.get("status") in ("MERGED", "ABANDONED"):
+            continue
+        periods = review_utils.open_periods(change)
+        dec = periods[-1][1] if periods else None
         review_times = review_utils.human_comment_times(change, bot_names)
         lo = bisect.bisect_left(grid, created)
         cid = change.get("change_number", idx)
@@ -88,12 +97,15 @@ def build_records(changes: list[dict], project: str, pool_start: datetime, cycle
             if t - created > lookback:
                 break  # LOOKBACK 超過（grid 昇順なので打ち切ってよい）
             if dec is not None and t >= dec:
-                break  # 決着以降は Open でない
+                break  # 最後に閉じた時刻以降は Open でない
+            if not review_utils.is_open_at(periods, t):
+                continue  # 放棄されてから復活するまでの間（design.md §11.1）
             label = label_builder.reviewed_within_delta(review_times, t, delta, data_end)
             if label is None:
                 continue  # 窓が観測末尾を超え未確定 → このレコードは作らない
             feats = feature_builder.build_features(change, t, index, comp, project)
             records.append(Record(cid, t, created, dec, feats, {constants.TARGET: label}))
+    review_utils.log_fallbacks()
     pos = sum(1 for r in records if r.labels[constants.TARGET] == 1.0)
     logger.info(f"[{project}] レコード数: {len(records)}（計測点 {len(grid)}, 正例 {pos} = "
                 f"{(pos / len(records) * 100 if records else 0):.1f}%, Δ={constants.REVIEW_HORIZON_DAYS}日）")

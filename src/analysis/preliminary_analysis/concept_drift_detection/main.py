@@ -90,7 +90,7 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
     """1 プロジェクトの全リリースを実行して出力する（テスト可能なコア）。"""
     out_root = Path(out_root)
     bot_names = review_utils.load_bot_names() if bot_names is None else bot_names
-    all_prs = feature_builder.build_all_prs_df(changes)
+    all_prs = feature_builder.build_all_prs_df(changes, bot_names)
     device = st.resolve_device()
     logger.info(f"device = {device}")
     model_name = constants.MODEL_NAME[0]

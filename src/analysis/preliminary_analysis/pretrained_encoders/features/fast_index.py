@@ -3,6 +3,9 @@
 これらの特徴は「T までの件数」「直近◯日の合計」型の集計で、毎回全行を走査すると遅い。
 そこで全 Change から **ソート済み配列・累積和を 1 回だけ事前集計**し、各 T を **二分探索 O(log n)** で答える。
 定義は `src/features` の developer_metrics / project_metrics と同一（速くするだけ）。
+ただし 2026-10 の改訂（design.md §11）で、次の 3 つは T より後の情報を使わない定義に変えたので、
+`src/features` 側の旧定義とは一致しない：open_ticket_count（Open の期間）、merge_rate / recent_merge_rate
+（マージの時刻＝submitted）、reviewed_lines_in_period（人間のレビュー × T の時点の版の行数）。
 """
 from __future__ import annotations
 
@@ -28,24 +31,34 @@ def _to_ns_array(series: pd.Series) -> np.ndarray:
 class FastFeatureIndex:
     """all_prs_df から developer/project 特徴を高速に引くための事前集計。
 
-    必要列: owner_email, created, merged, decision_time, updated, lines_added, lines_deleted
+    必要列: owner_email, created, merged, open_periods, review_times, rev_times, rev_lines
+    （feature_builder.build_all_prs_df が作る。design.md §11）
     """
 
     def __init__(self, all_prs_df: pd.DataFrame):
         df = all_prs_df
 
         # ── グローバル（open_ticket_count 用） ──
-        # open = created<=T かつ「決着(マージ/放棄)していない」。決着時刻 decision_time で判定（放棄も閉じた扱い）。
-        self._created_all = _to_ns_array(df["created"])
-        self._closed_all = _to_ns_array(df["decision_time"])
+        # Open の期間（design.md §11.1）の開いた時刻・閉じた時刻をそれぞれ昇順に並べる。
+        # T に Open な数 = (T までに開いた回数) − (T までに閉じた回数)。復活で開き直した分も数える。
+        opens, closes = [], []
+        for periods in df["open_periods"]:
+            for s_, e_ in periods:
+                opens.append(s_)
+                if e_ is not None:
+                    closes.append(e_)
+        self._opens_all = np.sort(np.array([_ns(x) for x in opens], dtype=np.int64))
+        self._closes_all = np.sort(np.array([_ns(x) for x in closes], dtype=np.int64))
 
-        # ── reviewed_lines_in_period 用: updated 昇順＋行数の累積和 ──
-        u = df[["updated", "lines_added", "lines_deleted"]].dropna(subset=["updated"]).copy()
-        u = u.sort_values("updated")
-        self._updated_all = u["updated"].astype("int64").to_numpy()
-        lines = (u["lines_added"].fillna(0).astype("int64")
-                 + u["lines_deleted"].fillna(0).astype("int64")).to_numpy()
-        self._lines_prefix = np.concatenate([[0], np.cumsum(lines)])  # prefix[i] = 先頭 i 件の合計
+        # ── reviewed_lines_in_period 用（design.md §11.2） ──
+        # 人間のレビューの時刻を全 Change ぶん昇順に並べ、どの Change のものかを持つ。
+        pairs = sorted((_ns(rt), i) for i, times in enumerate(df["review_times"]) for rt in times)
+        self._review_ns = np.array([p[0] for p in pairs], dtype=np.int64)
+        self._review_idx = np.array([p[1] for p in pairs], dtype=np.int64)
+        # Change ごとの版の作成時刻（昇順）と行数。T の時点で最新の版の行数を引く
+        self._rev_ns = [np.array([_ns(x) for x in times], dtype=np.int64) for times in df["rev_times"]]
+        self._rev_lines = [list(lines) for lines in df["rev_lines"]]
+        self._reviewed_lines_cache: dict[int, int] = {}  # T は日単位なので同じ T を何度も計算しない
 
         # ── 開発者ごと: created 昇順、(created, merged) 昇順 ──
         self._created_by_dev: dict[str, np.ndarray] = {}
@@ -102,15 +115,29 @@ class FastFeatureIndex:
 
     # ── project 特徴 ──
     def open_ticket_count(self, t: datetime) -> int:
-        # open = (created<=T の数) - (T までに決着した数)。決着＝マージまたは放棄（decision_time）。
+        # T に Open な Change の数（design.md §11.1）。期間は [開いた時刻, 閉じた時刻) なので
+        # 開いた時刻 <= T と、閉じた時刻 <= T を数えて引く
         t_ns = _ns(t)
-        created_le = int(np.searchsorted(self._created_all, t_ns, side="right"))
-        closed_le = int(np.searchsorted(self._closed_all, t_ns, side="right"))
-        return created_le - closed_le
+        opened_le = int(np.searchsorted(self._opens_all, t_ns, side="right"))
+        closed_le = int(np.searchsorted(self._closes_all, t_ns, side="right"))
+        return opened_le - closed_le
 
     def reviewed_lines_in_period(self, t: datetime, lookback_days: int = 14) -> int:
+        """[T − 14 日, T] に人間のレビューが 1 件以上ある Change の、T の時点で最新の版の行数の合計（design.md §11.2）。
+
+        旧版は「updated が期間内にある Change」の「最終版の行数」で、どちらも T より後の情報を使っていた。
+        """
         t_ns = _ns(t)
+        cached = self._reviewed_lines_cache.get(t_ns)
+        if cached is not None:
+            return cached
         start = _ns(t - timedelta(days=lookback_days))
-        hi = int(np.searchsorted(self._updated_all, t_ns, side="right"))
-        lo = int(np.searchsorted(self._updated_all, start, side="left"))
-        return int(self._lines_prefix[hi] - self._lines_prefix[lo])
+        lo = int(np.searchsorted(self._review_ns, start, side="left"))
+        hi = int(np.searchsorted(self._review_ns, t_ns, side="right"))
+        total = 0
+        for i in np.unique(self._review_idx[lo:hi]):
+            k = int(np.searchsorted(self._rev_ns[i], t_ns, side="right"))  # T までに出た版の数
+            if k > 0:
+                total += int(self._rev_lines[i][k - 1])
+        self._reviewed_lines_cache[t_ns] = total
+        return total

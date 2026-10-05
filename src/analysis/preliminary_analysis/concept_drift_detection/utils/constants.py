@@ -13,18 +13,20 @@ OUTPUT_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "concept_
 # project -> {"cutoff": 事前学習の締め（版ラベル）, "versions": 対象5版, "window_days": 学習窓長}。
 # cutoff / versions は窓長の調査（lookback_window）と同一。window_days は **窓長の調査の結果で選んだ最良窓**
 # （判定：① Ave（要約表の右端）→ ② Ave が同一なら std（小さいほど良い））。
-#   nova 1w(0.787) / neutron 1w(0.799) / cinder 2w(0.815) /
-#   glance 1w(0.817) / keystone 2M(0.753) / swift 1M(0.897)
-# 1w〜2M の差はどのプロジェクトでも日次ばらつきの1割未満で、有意ではない
-# （keystone 2M vs 1M: t=0.24 / swift 1M vs 2M: t=0.98）。上の規則を機械的に適用した結果を使う。
-# 明確なのは 3d・1d が全プロジェクトで劣ること（1d は最良より 0.02〜0.08 低い）。
+# 2026-10-03 のやり直し（Open の期間・特徴量の修正、リリースの表のサイクル単位化、MAX_SET_SIZE なし）の結果：
+#   nova 1w(0.785) / neutron 1w(0.797) / cinder 1w(0.808) /
+#   glance 2w(0.828) / keystone 1M(0.746) / swift 2M(0.893)
+# 旧版（2026-09）は nova 1w / neutron 1w / cinder 2w / glance 1w / keystone 2M / swift 1M だった。
+# 変わった 4 件はいずれも 1 位と 2 位の差が 0.001〜0.003 で、日次ばらつき（std 0.11〜0.24）よりずっと小さい。
+# 1w〜2M の差は有意ではなく、上の規則を機械的に適用した結果を使う。
+# 明確なのは 3d・1d が全プロジェクトで劣ること（1d は最良より 0.02〜0.07 低い）。
 PROJECTS = {
     "nova":     {"cutoff": "25.0.0", "versions": ["26.0.0", "27.0.0", "28.0.0", "29.0.0", "30.0.0"], "window_days": 7},
     "neutron":  {"cutoff": "20.0.0", "versions": ["21.0.0", "22.0.0", "23.0.0", "24.0.0", "25.0.0"], "window_days": 7},
-    "cinder":   {"cutoff": "20.0.0", "versions": ["21.0.0", "22.0.0", "23.0.0", "24.0.0", "25.0.0"], "window_days": 14},
-    "glance":   {"cutoff": "24.0.0", "versions": ["25.0.0", "26.0.0", "27.0.0", "28.0.0", "29.0.0"], "window_days": 7},
-    "keystone": {"cutoff": "21.0.0", "versions": ["22.0.0", "23.0.0", "24.0.0", "25.0.0", "26.0.0"], "window_days": 60},
-    "swift":    {"cutoff": "2.29.0", "versions": ["2.30.0", "2.31.0", "2.32.0", "2.33.0", "2.34.0"], "window_days": 30},
+    "cinder":   {"cutoff": "20.0.0", "versions": ["21.0.0", "22.0.0", "23.0.0", "24.0.0", "25.0.0"], "window_days": 7},
+    "glance":   {"cutoff": "24.0.0", "versions": ["25.0.0", "26.0.0", "27.0.0", "28.0.0", "29.0.0"], "window_days": 14},
+    "keystone": {"cutoff": "21.0.0", "versions": ["22.0.0", "23.0.0", "24.0.0", "25.0.0", "26.0.0"], "window_days": 30},
+    "swift":    {"cutoff": "2.29.0", "versions": ["2.30.0", "2.31.0", "2.32.0", "2.33.0", "2.34.0"], "window_days": 60},
 }
 
 
@@ -46,7 +48,7 @@ DISTANCE_STEP_DAYS = None    # 距離1段ぶんの日数。None なら その pr
 NOMINAL_CYCLE_DAYS = 182     # 基準サイクル長（約半年）。格子サイズの自動決定に使う
 GRID_SIZE = None             # 距離の行数＝位置の列数。None なら 基準サイクル長 ÷ 刻み
 BIN_DAY_ALIGNED = True       # 位置の境界を 0 時に揃える
-MAX_SET_SIZE = 512           # 1 集合の最大 Change 数（pretrained_encoders と一致させる）
+MAX_SET_SIZE = None          # 1 集合の最大 Change 数（pretrained_encoders と一致させる。旧版は 512。None で無制限）
 RECORD_MARGIN_DAYS = 7       # レコード生成範囲の余裕（§4.4）
 
 

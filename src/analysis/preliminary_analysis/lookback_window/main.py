@@ -61,7 +61,7 @@ def run(project: str, versions: list[str], n_seeds: int | None) -> None:
     rel_df = load_release_dates()
     changes = load_changes(project)
     bot_names = review_utils.load_bot_names()
-    all_prs = feature_builder.build_all_prs_df(changes)
+    all_prs = feature_builder.build_all_prs_df(changes, bot_names)
     device = st.resolve_device()
     logger.info(f"device = {device}")
 

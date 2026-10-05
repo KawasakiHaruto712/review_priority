@@ -219,8 +219,9 @@ if __name__ == "__main__":
     logging.info("===== OpenStackリリース情報収集スクリプトを開始します =====")
     
     # `path.py`で定義されたデータディレクトリを基準とする
-    # 例: data/openstack/
-    output_base_dir = app_path.DEFAULT_DATA_DIR / "openstack"
+    # releases リポジトリ（releases_repo/）と表は data/openstack_collected/ にある。
+    # 以前は data/openstack/ を指していて、手元の releases_repo を更新できなかった（2026-10 修正）。
+    output_base_dir = app_path.DEFAULT_DATA_DIR / "openstack_collected"
 
     try:
         collector = ReleaseCollector(data_dir=output_base_dir)
