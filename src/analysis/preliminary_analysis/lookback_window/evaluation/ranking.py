@@ -5,7 +5,7 @@
 数える。1位だけでなく最下位も併記することで、「平均が良い窓が本当に安定して良いのか
 （それともまぐれ勝ちのノイズか）」を評価する。
 
-- `(版, 日, 窓)` で seed 平均 → 全窓が揃う日だけで順位づけ（汎用ヘッド general は除外）。
+- `(版, 日, 窓)` で seed 中央値 → 全窓が揃う日だけで順位づけ（汎用ヘッド general は除外）。
 - 各日の最高指標窓に「1位 +1」、最低指標窓に「最下位 +1」。**同着は両方加算**（率は100%超え可）。
 - ビン集約はしない（日次のまま）。集約は距離×時期行列の分析側に閉じ込める。
 """
@@ -24,9 +24,9 @@ def _window_labels_desc() -> list[str]:
 
 
 def _daily_table(project: str, versions: list[str], metric: str) -> pd.DataFrame:
-    """全版の `(版, 日) × 窓` 指標表を作る（seed 平均・全窓が揃う日だけ）。
+    """全版の `(版, 日) × 窓` 指標表を作る（seed 中央値・全窓が揃う日だけ）。
 
-    返り値: index=(version, day), columns=窓ラベル（値=seed平均した指標）。
+    返り値: index=(version, day), columns=窓ラベル（値=seed中央値をとった指標）。
     汎用ヘッド general は含めない。
     """
     windows = _window_labels_desc()
@@ -37,8 +37,9 @@ def _daily_table(project: str, versions: list[str], metric: str) -> pd.DataFrame
         except FileNotFoundError:
             continue
         mdf = mdf[mdf["window"].isin(windows)]
-        # (日, 窓) で seed 平均（NaN は除外して平均）
-        per = mdf.groupby(["day", "window"])[metric].mean().reset_index()
+        # (日, 窓) で seed 中央値（NaN は除外）。要約表（visualization/table.py）・距離×時期行列と同じまとめ方。
+        # 以前は seed 平均で、要約表（中央値）と食い違っていた（2026-10-05 に修正）
+        per = mdf.groupby(["day", "window"])[metric].median().reset_index()
         piv = per.pivot(index="day", columns="window", values=metric)
         piv = piv.reindex(columns=windows)
         piv.insert(0, "version", v)
