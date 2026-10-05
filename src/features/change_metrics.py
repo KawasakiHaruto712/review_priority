@@ -2,7 +2,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Dict, Any
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import json
 from src.config.path import DEFAULT_DATA_DIR
 
@@ -25,6 +25,25 @@ def _parse_datetime(dt_input: Any) -> datetime:
     except (ValueError, TypeError):
         return None
 
+def _revision_at(change_data: Dict[str, Any], analysis_time: datetime) -> Optional[Dict[str, Any]]:
+    """分析時点までに作成された版（リビジョン）のうち、最新のものを返す。無ければ None。
+
+    行数・ファイル・テストの有無（_get_files_at_analysis_time）と、件名・説明文
+    （get_change_text_data）で同じ版を使うための共通処理。
+    """
+    target_revision = None
+    latest_date = None
+    for rev_data in (change_data.get('revisions') or {}).values():
+        created_dt = _parse_datetime(rev_data.get('created'))
+        if not created_dt:
+            continue
+        if created_dt <= analysis_time:
+            if latest_date is None or created_dt > latest_date:
+                latest_date = created_dt
+                target_revision = rev_data
+    return target_revision
+
+
 def _get_files_at_analysis_time(change_data: Dict[str, Any], analysis_time: datetime = None) -> Dict[str, Any]:
     """
     分析時点での最新リビジョンからファイル情報を取得するヘルパー関数
@@ -37,19 +56,8 @@ def _get_files_at_analysis_time(change_data: Dict[str, Any], analysis_time: date
         return change_data.get('file_changes', {}) or change_data.get('files', {})
 
     if analysis_time:
-        target_revision = None
-        latest_date = None
-        
-        for rev_data in revisions.values():
-            created_dt = _parse_datetime(rev_data.get('created'))
-            if not created_dt:
-                continue
-                
-            if created_dt <= analysis_time:
-                if latest_date is None or created_dt > latest_date:
-                    latest_date = created_dt
-                    target_revision = rev_data
-        
+        target_revision = _revision_at(change_data, analysis_time)
+
         if target_revision:
             return target_revision.get('files', {})
         
@@ -263,16 +271,29 @@ def check_test_code_presence(change_data: Dict[str, Any], analysis_time: datetim
 
     return 0
 
-def get_change_text_data(change_data: Dict[str, Any]) -> tuple[str, str]:
+def get_change_text_data(change_data: Dict[str, Any], analysis_time: datetime = None) -> tuple[str, str]:
     """
     Changeデータからタイトル(subject)と説明(message)を抽出する
-    
+
+    analysis_time を指定すると、その時点までに作成された最新の版のコミットの件名・説明文を返す。
+    説明文は版を重ねると書き換わるため、分析時点より後の版を使わないようにする
+    （pretrained_encoders/design.md §11.3）。指定しなければ従来どおり最新の版のもの。
+
     Args:
         change_data (Dict[str, Any]): Changeデータ
+        analysis_time (datetime, optional): 分析時点
 
     Returns:
         tuple[str, str]: (subject, message)
     """
+    if analysis_time is not None:
+        rev = _revision_at(change_data, analysis_time)
+        commit = (rev or {}).get('commit') or {}
+        if commit.get('message'):
+            subject = commit.get('subject') or commit['message'].split('\n', 1)[0]
+            return subject, commit['message']
+        # 分析時点の版が無い・説明文が無い場合は従来の取り方に戻す（nova では説明文は全版に残っている）
+
     subject = change_data.get('subject', '')
     
     # 1. トップレベルのmessageを確認 (古い形式や一部のデータ)

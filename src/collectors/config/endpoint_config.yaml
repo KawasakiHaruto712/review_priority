@@ -76,7 +76,13 @@ endpoints:
 # 収集設定
 collection:
   # バッチサイズ
-  batch_size: 100
+  # 1 リクエストで要求する件数。
+  # 以前は 100 だったが、chromium/src で測ったところ 500 のほうが 5.5 倍速い
+  # （n=100 は 26 回 224 秒で 11 件/秒、n=500 は 6 回 41 秒で 61 件/秒）。
+  # リクエスト数が減り、1 回あたりの固定費が効かなくなるため。
+  # 大きすぎてサーバ側の実行時間制限に掛かる場合は、実行時に自動で半分に落とす。
+  # 恒常的に通らないインスタンスは GERRIT_PROJECTS の batch_size で個別に下げる（Qt は 50）。
+  batch_size: 500
   
   # 対象コンポーネント（constants.pyから読み込み可能）
   components: null  # nullの場合はconstants.OPENSTACK_CORE_COMPONENTSを使用
@@ -94,10 +100,18 @@ collection:
   checkpoint_years: 1
 
 # リトライ設定
+#
+# 以前は max_retries=10 / base_delay=30 / max_delay=3840 だった。これだと
+# 30→60→120→…→3840 秒と待ち続け、**1 つの失敗に最大 4 時間 15 分**を費やす
+# （実際に Qt の収集で 4 時間 17 分を溶かした）。
+# 取れない原因が毎回違いうる以上、長く待つより早く諦めて次へ進むほうがよい。
+# 飛ばした Change は collection_manifest.jsonl に記録され、後から回収できる。
+#
+# 現在の設定での待ち時間の合計は 5+10+20+40+60 = 135 秒（約 2 分）。
 retry:
-  max_retries: 10
-  base_delay: 30.0
-  max_delay: 3840.0
+  max_retries: 5
+  base_delay: 5.0
+  max_delay: 60.0
   backoff_factor: 2.0
   jitter: true
 

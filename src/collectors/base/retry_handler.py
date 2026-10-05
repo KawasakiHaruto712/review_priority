@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 class RetryConfig:
     """リトライ設定クラス"""
     
-    def __init__(self, max_retries: int = 10, base_delay: float = 30.0,
-                 max_delay: float = 3840.0, backoff_factor: float = 2.0,
+    def __init__(self, max_retries: int = 5, base_delay: float = 5.0,
+                 max_delay: float = 60.0, backoff_factor: float = 2.0,
                  jitter: bool = True):
         """
         Args:
@@ -27,6 +27,13 @@ class RetryConfig:
             max_delay: 最大待機時間（秒）
             backoff_factor: バックオフ係数（指数的増加の倍率）
             jitter: ジッターを有効にするか（ランダムな揺らぎを追加）
+
+        **この既定値は endpoint_config.yaml の retry と揃えること。**
+        BaseAPIClient / FileContentEndpoint は `@retry_with_backoff()` を
+        引数なしで付けており、設定ファイルではなく**この既定値**を使う
+        （ChangeCollector が作る self.retry_config は実際のリクエストに渡っていない）。
+        以前の既定（10 回・30〜3840 秒）では 1 つの失敗に最大 4 時間 15 分を費やし、
+        実際に Qt の収集で 4 時間 17 分を溶かした。現在は合計 135 秒（約 2 分）。
         """
         self.max_retries = max_retries
         self.base_delay = base_delay
@@ -112,6 +119,15 @@ def retry_with_backoff(retry_config: Optional[RetryConfig] = None) -> Callable:
                     # 実行時間制限は待ち方を呼び出し側に委ねる（上のコメント参照）
                     if _is_server_deadline_error(e):
                         raise ServerDeadlineExceeded(str(e), response=e.response) from e
+
+                    # 読み込みのタイムアウトも投げ直さず、呼び出し側に返す。
+                    # 該当件数の多いクエリはサーバ側の処理が重く、同じものを投げ直しても
+                    # 速くならない。投げ直すと 1 回 120 秒 × 6 回で約 14 分を無駄にし、
+                    # **相手のサーバにも重い処理を何度もさせる**。呼び出し側は区間を割って
+                    # 軽くしてから取り直す（ChangeCollector._collect_range_adaptive）。
+                    # 2026-10-02、chromium/src の 1 年ぶん（約 21 万件）で発生した。
+                    if isinstance(e, requests.exceptions.ReadTimeout):
+                        raise
 
                     if retry_count >= retry_config.max_retries:
                         logger.error(f"最大リトライ回数到達: {e}")

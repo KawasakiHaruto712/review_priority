@@ -238,7 +238,7 @@ def compute(projects=None, versions=None, all_versions: bool = False,
         encoders, scaler = _resolve_encoders(project, device)
         changes = load_changes(project)
         bot_names = review_utils.load_bot_names()
-        all_prs = feature_builder.build_all_prs_df(changes)
+        all_prs = feature_builder.build_all_prs_df(changes, bot_names)
         for version, spec in spec_by_version.items():
             compute_version(project, version, spec, changes=changes, rel_df=rel_df,
                             encoders=encoders, scaler=scaler, device=device,

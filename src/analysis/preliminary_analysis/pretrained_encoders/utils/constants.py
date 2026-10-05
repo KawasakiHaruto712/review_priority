@@ -30,22 +30,13 @@ PROJECTS = {
     "swift":    {"cutoff": "2.29.0", "versions": ["2.30.0", "2.31.0", "2.32.0", "2.33.0", "2.34.0"]},
 }
 
-# 特徴量 days_to_major_release が「次のリリース」とみなすバージョン形式（project_metrics 参照）。
-# 既定は "major"（X.0.0）＝ OpenStack の協調リリース。
-# swift だけは協調リリースに乗らず独自に X.Y.0 を出しており、収集した 37 版のうち X.0.0 は
-# 2.0.0 の 1 つだけ。"major" のままだと 2015 年以降のほぼ全期間で「次のリリースなし」(-1.0) になる。
-# 上の PROJECTS も swift の対象版を 2.30.0〜2.34.0 と置いており、この表はそれと整合させたもの。
-RELEASE_LEVEL = {"swift": "minor"}
-DEFAULT_RELEASE_LEVEL = "major"
-
-
-def release_level_for(project: str) -> str:
-    """その project のリリース境界の粒度（"major" = X.0.0 / "minor" = X.Y.0）。"""
-    return RELEASE_LEVEL.get(project, DEFAULT_RELEASE_LEVEL)
+# 特徴量 days_to_major_release の「次のリリース」は、サイクル単位のリリースの表
+# （major_releases_summary.csv）から日付の順に探す（design.md §11.4）。swift も公式の日付に揃えたので、
+# 旧版にあった RELEASE_LEVEL（swift だけ X.Y.0 を区切りとする設定）は廃止した。
 
 # ── 計測点・アクティブ集合（design.md §2） ───────────────────
 MEASUREMENT_STEP_DAYS = 1   # 計測点 T = 毎日 0 時（刻み日数。1=毎日）
-LOOKBACK_DAYS = 365         # T のアクティブ判定: T-LOOKBACK <= created <= T < decision_time
+LOOKBACK_DAYS = 365         # T のアクティブ判定: T-LOOKBACK <= created <= T かつ T に Open（design.md §11.1）
 
 # ── 目的変数（事前学習の教師。design.md §2） ─────────────────
 TARGET = "reviewed_within_delta"
@@ -57,7 +48,8 @@ N_LAYERS = 2                 # 自己注意ブロック数
 N_HEADS = 4                  # マルチヘッド数
 FFN_DIM = 256                # FFN 中間次元
 DROPOUT = 0.1
-MAX_SET_SIZE = 512           # 1 集合の最大 Change 数（超過は打ち切り。None で無制限）
+MAX_SET_SIZE = None          # 1 集合の最大 Change 数（超過は打ち切り。None で無制限）
+                             # 旧版は 512。OpenStack では一度も効いておらず、全件を見る方針で None にした（design.md §3）
 
 # ── ヘッド（汎用ヘッド／下流の probe 用） ───────────────────
 HEAD_TYPE = "linear"         # "linear"（線形1層）/ "mlp"（小MLP）

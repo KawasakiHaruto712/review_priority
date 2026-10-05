@@ -12,7 +12,7 @@ import pandas as pd
 
 from src.analysis.background_problem.common.time_utils import parse_dt
 from src.analysis.preliminary_analysis.pretrained_encoders.features.fast_index import FastFeatureIndex
-from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import review_utils
 from src.features import bug_metrics, change_metrics, developer_metrics, project_metrics, refactoring_metrics
 
 # 特徴量の並び順（固定）。uncompleted_requests は除外。
@@ -35,41 +35,51 @@ FEATURE_NAMES = [
 ]
 
 
-def _merged_time(change: dict) -> datetime | None:
-    """マージ時刻（status==MERGED のとき updated を採用、それ以外は None）。merge_rate 用。"""
-    if change.get("status") == "MERGED":
-        return parse_dt(change.get("updated"))
-    return None
+def _revision_timeline(change: dict) -> tuple[list[datetime], list[int]]:
+    """版（パッチセット）ごとの (作成時刻, 追加＋削除行数) を作成時刻の昇順で返す。reviewed_lines_in_period 用。"""
+    revs = []
+    for rev in (change.get("revisions") or {}).values():
+        created = parse_dt(rev.get("created"))
+        if created is None:
+            continue
+        files = rev.get("files") or {}
+        lines = sum(int(f.get("lines_inserted", 0) or 0) + int(f.get("lines_deleted", 0) or 0)
+                    for f in files.values() if isinstance(f, dict)) if isinstance(files, dict) else 0
+        revs.append((created, lines))
+    revs.sort(key=lambda r: r[0])
+    return [r[0] for r in revs], [r[1] for r in revs]
 
 
-def _decision_time(change: dict) -> datetime | None:
-    """決着時刻（status が MERGED または ABANDONED のとき updated。未決は None）。open_ticket_count 用。"""
-    if change.get("status") in ("MERGED", "ABANDONED"):
-        return parse_dt(change.get("updated"))
-    return None
-
-
-def build_all_prs_df(changes: list[dict]) -> pd.DataFrame:
+def build_all_prs_df(changes: list[dict], bot_names: set[str]) -> pd.DataFrame:
     """全 Change から developer/project 特徴に必要な DataFrame を一度だけ組み立てる。
 
-    列: owner_email, created, merged, decision_time, updated, lines_added, lines_deleted
+    列: owner_email, created, merged, decision_time, updated, open_periods, review_times, rev_times, rev_lines
+      merged / decision_time / open_periods  Open の期間から作る（design.md §11.1。旧版は updated）
+      review_times                           人間のレビューの時刻（正解ラベルと同じ判定。§11.2）
+      rev_times / rev_lines                  版ごとの作成時刻と行数（T の時点の版の行数を引くため。§11.2）
+      updated                                観測末尾（data_end）を決めるためだけに使う
     """
     rows = []
     for c in changes:
         created = parse_dt(c.get("created"))
         if created is None:
             continue
+        periods = review_utils.open_periods(c)
+        last_close = periods[-1][1] if periods else None
+        rev_times, rev_lines = _revision_timeline(c)
         rows.append({
             "owner_email": developer_metrics.get_owner_email(c),
             "created": created,
-            "merged": _merged_time(c),
-            "decision_time": _decision_time(c),
+            "merged": last_close if c.get("status") == "MERGED" else None,
+            "decision_time": last_close,
             "updated": parse_dt(c.get("updated")),
-            "lines_added": change_metrics.calculate_lines_added(c),
-            "lines_deleted": change_metrics.calculate_lines_deleted(c),
+            "open_periods": periods,
+            "review_times": review_utils.human_comment_times(c, bot_names),
+            "rev_times": rev_times,
+            "rev_lines": rev_lines,
         })
-    df = pd.DataFrame(rows, columns=["owner_email", "created", "merged", "decision_time",
-                                     "updated", "lines_added", "lines_deleted"])
+    df = pd.DataFrame(rows, columns=["owner_email", "created", "merged", "decision_time", "updated",
+                                     "open_periods", "review_times", "rev_times", "rev_lines"])
     for col in ("created", "merged", "decision_time", "updated"):
         df[col] = pd.to_datetime(df[col])
     return df
@@ -90,7 +100,8 @@ def build_index(all_prs_df: pd.DataFrame) -> FastFeatureIndex:
 def build_features(change: dict, t: datetime, index: FastFeatureIndex,
                    comp_releases_df: pd.DataFrame, project: str) -> list[float]:
     """1 レコード (change, T) の 15 次元特徴ベクトルを返す（T 時点で観測可能な情報のみ）。"""
-    subject, message = change_metrics.get_change_text_data(change)
+    # 件名・説明文は T の時点で最新の版のもの（design.md §11.3。旧版は最新の版）
+    subject, message = change_metrics.get_change_text_data(change, t)
     email = developer_metrics.get_owner_email(change)
 
     return [
@@ -105,8 +116,7 @@ def build_features(change: dict, t: datetime, index: FastFeatureIndex,
         float(index.recent_report_count(email, t)),
         float(index.merge_rate(email, t)),
         float(index.recent_merge_rate(email, t)),
-        float(project_metrics.calculate_days_to_major_release(
-            t, project, comp_releases_df, constants.release_level_for(project))),
+        float(project_metrics.calculate_days_to_major_release(t, project, comp_releases_df)),
         float(index.open_ticket_count(t)),
         float(index.reviewed_lines_in_period(t)),
         float(refactoring_metrics.calculate_refactoring_confidence(subject, message)),
