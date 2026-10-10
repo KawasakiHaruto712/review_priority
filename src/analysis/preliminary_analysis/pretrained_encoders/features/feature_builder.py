@@ -14,6 +14,7 @@ from src.analysis.background_problem.common.time_utils import parse_dt
 from src.analysis.preliminary_analysis.pretrained_encoders.features.fast_index import FastFeatureIndex
 from src.analysis.preliminary_analysis.pretrained_encoders.utils import review_utils
 from src.features import bug_metrics, change_metrics, developer_metrics, project_metrics, refactoring_metrics
+from src.utils.bot_detection import BotDetector
 
 # 特徴量の並び順（固定）。uncompleted_requests は除外。
 FEATURE_NAMES = [
@@ -50,7 +51,7 @@ def _revision_timeline(change: dict) -> tuple[list[datetime], list[int]]:
     return [r[0] for r in revs], [r[1] for r in revs]
 
 
-def build_all_prs_df(changes: list[dict], bot_names: set[str]) -> pd.DataFrame:
+def build_all_prs_df(changes: list[dict], detector: BotDetector) -> pd.DataFrame:
     """全 Change から developer/project 特徴に必要な DataFrame を一度だけ組み立てる。
 
     列: owner_email, created, merged, decision_time, updated, open_periods, review_times, rev_times, rev_lines
@@ -74,7 +75,7 @@ def build_all_prs_df(changes: list[dict], bot_names: set[str]) -> pd.DataFrame:
             "decision_time": last_close,
             "updated": parse_dt(c.get("updated")),
             "open_periods": periods,
-            "review_times": review_utils.human_comment_times(c, bot_names),
+            "review_times": review_utils.human_comment_times(c, detector),
             "rev_times": rev_times,
             "rev_lines": rev_lines,
         })

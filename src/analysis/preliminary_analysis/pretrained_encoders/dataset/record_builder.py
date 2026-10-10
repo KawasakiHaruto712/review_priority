@@ -19,6 +19,7 @@ from src.analysis.background_problem.common.time_utils import parse_dt
 from src.analysis.preliminary_analysis.pretrained_encoders.features import feature_builder
 from src.analysis.preliminary_analysis.pretrained_encoders.labeling import label_builder
 from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants, review_utils
+from src.utils.bot_detection import BotDetector
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ def daily_grid(pool_start: datetime, cycle_end: datetime, step_days: int) -> lis
 
 
 def build_records(changes: list[dict], project: str, pool_start: datetime, cycle_end: datetime,
-                  bot_names: set[str], all_prs_df: pd.DataFrame,
+                  detector: BotDetector, all_prs_df: pd.DataFrame,
                   releases_df: pd.DataFrame) -> list[Record]:
     """毎日 0 時グリッド × アクティブ集合から (Change, T) レコードを作る。
 
@@ -90,7 +91,7 @@ def build_records(changes: list[dict], project: str, pool_start: datetime, cycle
             continue
         periods = review_utils.open_periods(change)
         dec = periods[-1][1] if periods else None
-        review_times = review_utils.human_comment_times(change, bot_names)
+        review_times = review_utils.human_comment_times(change, detector)
         lo = bisect.bisect_left(grid, created)
         cid = change.get("change_number", idx)
         for t in grid[lo:]:

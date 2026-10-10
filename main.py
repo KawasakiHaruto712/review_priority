@@ -24,7 +24,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.collectors.openstack import OpenStackGerritCollector
 from src.preprocessing.review_comment_processor import extract_and_save_review_keywords
 from src.learning.irl_models import run_temporal_irl_analysis
-from src.config.path import DEFAULT_DATA_DIR, DEFAULT_CONFIG
+from src.config.path import DEFAULT_DATA_DIR
+from src.utils.bot_detection import BotDetector, host_of
 
 # ロギング設定
 logging.basicConfig(
@@ -53,7 +54,7 @@ def preprocess_data():
     try:
         checklist_path = DEFAULT_DATA_DIR / "processed" / "checklist.csv"
         output_path = DEFAULT_DATA_DIR / "processed" / "review_keywords.json"
-        config_path = DEFAULT_CONFIG / "gerrymanderconfig.ini"
+        bot_detector = BotDetector(host_of("nova"))  # checklist.csv は nova の Change
         label_path = DEFAULT_DATA_DIR / "processed" / "review_label.json"
         
         if not checklist_path.exists():
@@ -63,7 +64,7 @@ def preprocess_data():
         extract_and_save_review_keywords(
             checklist_path=checklist_path,
             output_keywords_path=output_path,
-            gerrymander_config_path=config_path,
+            bot_detector=bot_detector,
             review_label_path=label_path
         )
         logger.info("データ前処理が完了しました")

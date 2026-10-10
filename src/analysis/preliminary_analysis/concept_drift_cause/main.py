@@ -41,7 +41,7 @@ from src.analysis.preliminary_analysis.pretrained_encoders.features import featu
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
 from src.analysis.preliminary_analysis.pretrained_encoders.model.set_transformer import FEATURE_NAMES
-from src.analysis.preliminary_analysis.pretrained_encoders.utils import review_utils
+from src.utils.bot_detection import BotDetector, host_of
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     stream=sys.stdout)
@@ -124,7 +124,7 @@ def _resolve_encoders(project: str, device):
 
 
 def compute_version(project: str, version: str, spec: dict, *, changes, rel_df, encoders,
-                    scaler, device, bot_names, all_prs, run_id: str) -> int:
+                    scaler, device, detector, all_prs, run_id: str) -> int:
     """1 版ぶんの IG を計算して保存する。返り値は書いた行数。"""
     window, step, grid = detection.window_for(project), detection.step_for(project), detection.grid_for(project)
     base2 = constants.DETECTION_ROOT / project / constants.MODEL_NAME / version
@@ -146,7 +146,7 @@ def compute_version(project: str, version: str, spec: dict, *, changes, rel_df, 
     rec_start = binning.record_start(cs_R, window, step, grid, detection.RECORD_MARGIN_DAYS)
     logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()} / "
                 f"レコード生成 {rec_start.date()} から / 距離 {len(distances)} × 位置 {len(target_pos)}）---")
-    records = record_builder.build_records(changes, project, rec_start, ce_R, bot_names, all_prs, rel_df)
+    records = record_builder.build_records(changes, project, rec_start, ce_R, detector, all_prs, rel_df)
     day_sets = {s.t.date(): s for s in set_builder.build_sets(records, detection.MAX_SET_SIZE)}
     pos_of = binning.position_of_days(cs_R, ce_R, grid, detection.BIN_DAY_ALIGNED)
 
@@ -237,12 +237,12 @@ def compute(projects=None, versions=None, all_versions: bool = False,
         device = st.resolve_device()
         encoders, scaler = _resolve_encoders(project, device)
         changes = load_changes(project)
-        bot_names = review_utils.load_bot_names()
-        all_prs = feature_builder.build_all_prs_df(changes, bot_names)
+        detector = BotDetector(host_of(project))
+        all_prs = feature_builder.build_all_prs_df(changes, detector)
         for version, spec in spec_by_version.items():
             compute_version(project, version, spec, changes=changes, rel_df=rel_df,
                             encoders=encoders, scaler=scaler, device=device,
-                            bot_names=bot_names, all_prs=all_prs, run_id=run_id)
+                            detector=detector, all_prs=all_prs, run_id=run_id)
 
 
 def extract(projects=None, versions=None, name: str = "default",

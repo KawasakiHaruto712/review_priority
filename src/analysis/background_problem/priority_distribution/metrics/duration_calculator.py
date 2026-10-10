@@ -18,6 +18,7 @@ from src.analysis.background_problem.priority_distribution.utils.data_loader imp
     human_comment_times,
 )
 from src.analysis.background_problem.priority_distribution.utils.time_utils import parse_dt
+from src.utils.bot_detection import BotDetector
 
 # Change が「判断済み」とみなすステータス（§2.3）
 DECISION_STATUSES = {"MERGED", "ABANDONED"}
@@ -31,9 +32,9 @@ class MetricDefinition:
     # アクティブ判定に使う decision_time（未決なら None）。
     decision_fn: Callable[[dict], Optional[datetime]]
     # 外れ値・放置除外用の per-Change 代表所要時間（未定義なら None → 除外）。
-    screening_fn: Callable[[dict, set], Optional[timedelta]]
+    screening_fn: Callable[[dict, BotDetector], Optional[timedelta]]
     # 計測点 T における縦軸値（寄与しないなら None）。
-    value_fn: Callable[[dict, datetime, set], Optional[timedelta]]
+    value_fn: Callable[[dict, datetime, BotDetector], Optional[timedelta]]
 
 
 @dataclass
@@ -64,41 +65,41 @@ def decision_time(change: dict) -> Optional[datetime]:
     return parse_dt(change.get("updated"))
 
 
-def first_human_review(change: dict, bot_names: set) -> Optional[datetime]:
+def first_human_review(change: dict, detector: BotDetector) -> Optional[datetime]:
     """最初の人間レビューコメントの時刻（無ければ None）。"""
-    times = human_comment_times(change, bot_names)
+    times = human_comment_times(change, detector)
     return times[0] if times else None
 
 
 def next_human_review_after(
-    change: dict, t: datetime, bot_names: set
+    change: dict, t: datetime, detector: BotDetector
 ) -> Optional[datetime]:
     """計測点 t より後（date > t）の、最初の人間レビューコメントの時刻（無ければ None）。"""
-    for dt in human_comment_times(change, bot_names):
+    for dt in human_comment_times(change, detector):
         if dt > t:
             return dt
     return None
 
 
 # ── 各メトリクスの screening / value ───────────────────────
-def _next_review_screening(change: dict, bot_names: set) -> Optional[timedelta]:
+def _next_review_screening(change: dict, detector: BotDetector) -> Optional[timedelta]:
     """time_to_next_review の放置判定用: 最初の人間レビューまでの待ち時間。"""
-    first = first_human_review(change, bot_names)
+    first = first_human_review(change, detector)
     start = created(change)
     if first is None or start is None:
         return None
     return first - start
 
 
-def _next_review_value(change: dict, t: datetime, bot_names: set) -> Optional[timedelta]:
+def _next_review_value(change: dict, t: datetime, detector: BotDetector) -> Optional[timedelta]:
     """time_to_next_review の縦軸値: t 以降の最初の人間レビュー - t。"""
-    nxt = next_human_review_after(change, t, bot_names)
+    nxt = next_human_review_after(change, t, detector)
     if nxt is None:
         return None
     return nxt - t
 
 
-def _decision_screening(change: dict, bot_names: set) -> Optional[timedelta]:
+def _decision_screening(change: dict, detector: BotDetector) -> Optional[timedelta]:
     """time_to_decision の放置判定用: 投稿起点の全所要時間（T 非依存）。"""
     dt = decision_time(change)
     start = created(change)
@@ -107,7 +108,7 @@ def _decision_screening(change: dict, bot_names: set) -> Optional[timedelta]:
     return dt - start
 
 
-def _decision_value(change: dict, t: datetime, bot_names: set) -> Optional[timedelta]:
+def _decision_value(change: dict, t: datetime, detector: BotDetector) -> Optional[timedelta]:
     """time_to_decision の縦軸値: 計測点 t から判断までの残り時間。"""
     dt = decision_time(change)
     if dt is None:
@@ -142,7 +143,7 @@ def get_metric(name: str) -> MetricDefinition:
 
 
 def compute_change_records(
-    changes: list[dict], metric: MetricDefinition, bot_names: set
+    changes: list[dict], metric: MetricDefinition, detector: BotDetector
 ) -> list[ChangeRecord]:
     """各 Change について created / decision_time / screening_duration を確定させる。
 
@@ -157,7 +158,7 @@ def compute_change_records(
                 change_number=change.get("change_number", change.get("_number")),
                 created=created(change),
                 decision_time=metric.decision_fn(change),
-                screening_duration=metric.screening_fn(change, bot_names),
+                screening_duration=metric.screening_fn(change, detector),
             )
         )
     return records

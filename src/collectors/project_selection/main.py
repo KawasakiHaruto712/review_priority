@@ -27,6 +27,7 @@ from src.collectors.project_selection import hosts as hosts_module
 from src.collectors.project_selection import local_counts, metrics as metrics_module
 from src.collectors.project_selection import ranking as ranking_module
 from src.config.path import DEFAULT_DATA_DIR
+from src.utils.bot_detection import BotDetector, host_of
 from src.utils.constants import END_DATE
 
 logger = logging.getLogger(__name__)
@@ -417,17 +418,21 @@ def stage_verify(keys: List[str]) -> None:
 
 
 def stage_bots(directories: List[str]) -> None:
-    """第 3 段階：アカウントの活動量を多い順に出し、ボット一覧の作成を支援する。"""
-    judge = metrics_module.BotJudge()
+    """第 3 段階：アカウントの活動量を多い順に出し、ボット一覧の作成を支援する。
+
+    ボットの判定はディレクトリ名（GERRIT_PROJECTS のキー）からホストを決めて行う。
+    """
     rows = []
     for directory in directories:
-        for row in metrics_module.account_ranking(directory, judge):
+        detector = BotDetector(host_of(directory))
+        for row in metrics_module.account_ranking(directory, detector):
             rows.append({"directory": directory, **row})
     _write_csv(OUTPUT_DIR / "account_ranking.csv", rows,
                ["directory", "identifier", "name", "created_changes",
                 "posted_messages", "judged_bot"])
     logger.info("judged_bot が False の上位アカウントを公式資料と照合し、"
-                "ボットであれば src/config/extra_bots.txt に追記してください")
+                "出どころの資料が見つかったものだけを src/config/bot_accounts.csv に追記してください"
+                "（src/utils/bot_detection.md §2.3・§2.5。README の表も同時に直す）")
 
 
 def stage_metrics(pairs: List[str]) -> None:
@@ -435,12 +440,12 @@ def stage_metrics(pairs: List[str]) -> None:
 
     pairs は "ディレクトリ名=リポジトリ名" の並び。
     """
-    judge = metrics_module.BotJudge()
     rows = []
     for pair in pairs:
         directory, _, repository = pair.partition("=")
         repository = repository or directory
-        result = metrics_module.compute(directory, repository, judge,
+        detector = BotDetector(host_of(directory))
+        result = metrics_module.compute(directory, repository, detector,
                                         PERIOD_START, PERIOD_END)
         rows.append(result.as_row())
     rows.sort(key=lambda r: r["changes"], reverse=True)

@@ -5,7 +5,8 @@ from typing import Dict, Any, List
 import re
 import logging
 import pandas as pd
-import configparser
+
+from src.utils.bot_detection import BotDetector
 
 # 必要に応じて，NLTKのインポートとデータダウンロード
 # import nltk
@@ -19,32 +20,6 @@ logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def _load_bot_names(config_path: Path) -> List[str]:
-    """
-    gerrymanderconfig.ini からボットのユーザー名を読み込む
-    (review_comment_processor.py と同じ関数を再利用)
-
-    Args:
-        config_path (Path): gerrymanderconfig.ini のパス
-
-    Returns:
-        List[str]: ボットのユーザー名リスト
-    """
-    bot_names = []
-    config = configparser.ConfigParser()
-    try:
-        config.read(config_path)
-        if 'organization' in config and 'bots' in config['organization']:
-            bot_names = [name.strip() for name in config['organization']['bots'].split(',')]
-            logger.info(f"ボット数: {len(bot_names)}")
-        else:
-            logger.warning(f"'{config_path}' に 'organization' セクションまたは 'bots' エントリが見つかりません。")
-    except configparser.Error as e:
-        logger.error(f"'{config_path}' のパース中にエラーが発生しました: {e}")
-    except FileNotFoundError:
-        logger.error(f"エラー: gerrymanderconfig.ini が {config_path} に見つかりません。")
-    return bot_names
-
 class ReviewStatusAnalyzer:
     """
     レビューコメントの対応状況を分析し, メトリクスを算出するクラス
@@ -54,11 +29,11 @@ class ReviewStatusAnalyzer:
     def __init__(
         self, 
         extraction_keywords_path: Path, # review_keywords.json のパス
-        gerrymander_config_path: Path, # gerrymanderconfig.ini のパス
+        bot_detector: BotDetector, # ボットの判定（src/utils/bot_detection.py）
         review_label_path: Path # review_label.json のパス
     ):
         self.extraction_keywords_path = extraction_keywords_path
-        self.gerrymander_config_path = gerrymander_config_path
+        self.bot_detector = bot_detector
         self.review_label_path = review_label_path
         
         # 1. review_keywords.json からキーワードの読み込み
@@ -117,9 +92,6 @@ class ReviewStatusAnalyzer:
             logger.info(f"Code-Review (plus) ラベル数: {len(self.code_review_plus_labels)}")
         except Exception as e:
             logger.error(f"エラー: review_label.json ファイルの読み込み中にエラーが発生しました: {e}")
-
-        # ボット名のロード
-        self.bot_names = _load_bot_names(self.gerrymander_config_path)
 
         # NLTK関連のインスタンス化を削除
         # self.lemmatizer = WordNetLemmatizer()
@@ -262,6 +234,7 @@ class ReviewStatusAnalyzer:
                 'type': 'message',
                 'timestamp': datetime.fromisoformat(msg['date'].replace('Z', '+00:00')),
                 'author': author_name,
+                'is_bot': self.bot_detector.is_bot(author_data),
                 'message_id': msg.get('id'),
                 'comment_text': msg.get('message', ''),
                 'revision_number': msg.get('revision_number')
@@ -301,7 +274,7 @@ class ReviewStatusAnalyzer:
             elif event['type'] == 'message':
                 comment_author = event.get('author')
                 # ボットのコメントをスキップ
-                if comment_author and comment_author in self.bot_names:
+                if event.get('is_bot'):
                     logger.debug(f"PR {pr_data.get('change_number')}: ボット '{comment_author}' のコメントをスキップします。")
                     continue
 
