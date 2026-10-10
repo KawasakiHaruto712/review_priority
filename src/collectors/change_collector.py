@@ -35,10 +35,21 @@ QUERY_LIMIT = 10000
 # 一時的な混雑や通信断なら、少し待てば通ることが多い
 RETRY_PASS_WAIT = 300.0
 
-# 1 日に割っても応答が 120 秒を超えたときに、1 ページの件数をこの順に減らす（design.md §6.6）。
+# 1 秒の区間まで時刻で割っても失敗したときに、1 ページの件数をこの順に減らす（design.md §6.6）。
+# 2026-10-06 までは 1 日の区間で失敗した時点で減らしていたが、深いページを読みに行くことは変わらず、
+# 1 クエリ 100 ページの上限で HTTP 400 になって取れなかった（2022-10-11）。今は先に時刻で割る。
 # 時間切れ 1 回に 120 秒かかるので、半分ずつではなく大きく減らす（半分ずつだと最悪 8 回・16 分）。
 # 1 件でも時間切れなら、その Change だけを本体とファイル一覧に分けて取る（_recover_change）
 TIMEOUT_PAGE_SIZES = (50, 5, 1)
+
+# 通信できないこと（名前解決の失敗・接続できない・接続を切られた）で区間が失敗したときは、
+# 先へ進まずに通信が戻るまで待つ（design.md §6.6「通信できない間は待つ」）。
+# 以前は切断中に 2.3 分に 1 区間ずつ「取れなかった」にして先へ進み、2026-10-05〜06 の
+# 約 5.5 時間の切断で 164 区間（取り直しに 10 時間以上）を読み飛ばした。
+CONNECTION_PROBE_INTERVAL = 60.0        # 接続先に軽い問い合わせを送る間隔（秒）。待っている間も相手に問い合わせるので空ける
+CONNECTION_WAIT_MAX = 12 * 3600.0       # これだけ待っても戻らなければ、記録して次の区間へ進む（一晩の切断まで含める）
+CONNECTION_RECOVERY_RETRIES = 3         # 通信が戻っても同じ区間が通信のことで失敗し続けるときの打ち切り回数
+CONNECTION_WAIT_NOTE_INTERVAL = 600.0   # 待っている間、この間隔ごとに「待っている」とログに出す（毎回は出さない）
 
 # 1 日でも上限に達したときの割り直しの段階（project_selection/design.md §6.6。第 1 段階の
 # ranking.SUBDAY_STEPS と同じ）。1 時間 → 10 分 → 1 分 → 1 秒。1 秒でも達したら記録して先へ進む。
@@ -75,6 +86,23 @@ logger = logging.getLogger(__name__)
 # 終わりのほうで更新された Change が範囲の外に出る。未来の期間の空の問い合わせが増えるのは許容する。
 # 代わりに、今年を含む区間の完了マーカーの名前が固定になる（例 2026-01-01_2027-01-01）ので、
 # 後日もう一度実行しても、その区間は取り直されない。
+
+
+def _is_connection_error(e: BaseException) -> bool:
+    """通信できないことによる失敗か（名前解決の失敗・接続できない・接続を切られた）。
+
+    requests の ConnectionError（接続の時間切れ ConnectTimeout を含む）で判定する。
+    読み込みの時間切れ（ReadTimeout）は含めない。これはサーバの処理が重いことによるもので、
+    待っても速くならないので、従来どおり区間を割って取り直す（design.md §6.6）。
+    包み直された例外にも対応するため、原因（__cause__ / __context__）もたどる。
+    """
+    seen = set()
+    while e is not None and id(e) not in seen:
+        if isinstance(e, requests.exceptions.ConnectionError):
+            return True
+        seen.add(id(e))
+        e = e.__cause__ or e.__context__
+    return False
 
 
 def date_chunks(start_date: str, end_date: str, years) -> List[Tuple[str, str]]:
@@ -254,8 +282,11 @@ class ChangeCollector:
                     + (f"・間隔 {self._request_delay} 秒" if self._request_delay else "") + "）")
         return spec
     
-    def collect_all_components(self):
-        """全コンポーネントのデータを収集"""
+    def collect_all_components(self) -> str:
+        """全コンポーネントのデータを収集し、実行全体の状態（"completed" / "incomplete"）を返す。
+
+        呼び出し元は、この状態に合わせて最後の 1 行を出す（design.md §6.6「終了時の表示」）。
+        """
         collection_config = self.config.get_collection_config()
         components = collection_config['components']
 
@@ -296,9 +327,10 @@ class ChangeCollector:
                 logger.error(f"**取り直しても取れなかったものがあります: {', '.join(remaining)}**。"
                              f"collection_manifest.jsonl の dropped_detail に位置があります。"
                              f"同じコマンドをもう一度実行すると、完了マーカーの無い区間だけを取り直します")
-            else:
-                manifest.finish("completed")
-                logger.info("全コンポーネントのデータ収集完了（取れなかったものはありません）")
+                return "incomplete"
+            manifest.finish("completed")
+            logger.info("全コンポーネントのデータ収集完了（取れなかったものはありません）")
+            return "completed"
         except BaseException as e:
             # 途中で止まった/落ちた場合も「どこまで取れたか」を必ず残す
             manifest.finish("interrupted", error=f"{type(e).__name__}: {e}")
@@ -354,10 +386,11 @@ class ChangeCollector:
 
                 drops_before = len(self._skipped_changes)
                 try:
-                    changes, commits, skipped = self._collect_chunk(
+                    # 通信できないことで失敗したら、先へ進まずに戻るまで待って取り直す（design.md §6.6）
+                    changes, commits, skipped = self._collect_chunk_waiting(
                         component, cs, ce, batch_size, gerrit_path, spec.get("chunk_days"))
                 except Exception as e:
-                    # 区間ごと取れなかった（通信断が続いた等）。**収集全体は止めない**。
+                    # 区間ごと取れなかった（通信が戻らない・戻っても失敗し続けた等）。**収集全体は止めない**。
                     # 記録して次の区間へ進み、完了マーカーは付けない（再実行でこの区間だけ取り直す）。
                     # 以前はここで例外を上に投げ、残りの区間・リポジトリを取らずに止まっていた
                     # （2026-10-04、chromium/src で発生。design.md §6.6）
@@ -420,6 +453,66 @@ class ChangeCollector:
                 # 黙って欠けたまま解析へ進むのを防ぐ
                 logger.warning(f"[{component}] **取得できずに飛ばした Change が {len(dropped)} 件あります**。"
                                f"collection_manifest.jsonl の dropped_detail で位置を確認できます")
+
+    def _collect_chunk_waiting(self, component: str, start_date: str, end_date: str,
+                               batch_size: int, gerrit_path: str, chunk_days: Optional[int]
+                               ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+        """_collect_chunk を呼び、通信できないことで失敗したら、戻るまで待って同じ区間を取り直す。
+
+        design.md §6.6「通信できない間は待つ」。待つのは通信できないときだけで、時間切れ・HTTP エラー・
+        上限は _collect_chunk の中でこれまでどおり区間を割って取り直す。
+        待っても戻らない、または戻っても同じ区間が通信のことで CONNECTION_RECOVERY_RETRIES 回失敗したら、
+        最後の例外をそのまま投げる（呼び出し元が記録して次の区間へ進み、完了マーカーは付かない）。
+        """
+        drops_before = len(self._skipped_changes)
+        recoveries = 0
+        while True:
+            try:
+                return self._collect_chunk(component, start_date, end_date,
+                                           batch_size, gerrit_path, chunk_days)
+            except Exception as e:
+                if not _is_connection_error(e) or recoveries >= CONNECTION_RECOVERY_RETRIES:
+                    raise
+                logger.error(f"[{component}] 区間 {start_date}〜{end_date} で通信できません"
+                             f"（{type(e).__name__}）。先へ進まずに、通信が戻るまで待ちます")
+                if not self._wait_for_connection(component):
+                    raise
+                recoveries += 1
+                # 途中まで取れていた分は捨てて、区間の最初から取り直す（上書き保存なので重複しない）。
+                # その間に記録した「取れなかったもの」も、取り直しで改めて記録されるので消しておく
+                del self._skipped_changes[drops_before:]
+                logger.warning(f"[{component}] 区間 {start_date}〜{end_date} を最初から取り直します"
+                               f"（通信が戻った後の取り直し {recoveries}/{CONNECTION_RECOVERY_RETRIES}）")
+
+    def _wait_for_connection(self, component: str) -> bool:
+        """接続先のサーバに軽い問い合わせを送り続け、応答が返ったら True を返す。
+
+        CONNECTION_PROBE_INTERVAL ごとに /config/server/version を 1 回だけ問い合わせる
+        （投げ直しの仕組みは通さない）。5xx 以外の応答が返れば通信は戻ったとみなす。
+        CONNECTION_WAIT_MAX 待っても戻らなければ False（呼び出し元が記録して先へ進む）。
+        待ち時間は time.monotonic で測るので、パソコンが眠っていた時間は数えない。
+        """
+        url = f"{self.endpoints['changes'].base_url}/config/server/version"
+        start = time.monotonic()
+        last_note = start
+        while time.monotonic() - start < CONNECTION_WAIT_MAX:
+            time.sleep(CONNECTION_PROBE_INTERVAL)
+            try:
+                resp = self.session.get(url, timeout=30)
+                if resp.status_code < 500:
+                    logger.warning(f"[{component}] 通信が戻りました"
+                                   f"（{(time.monotonic() - start) / 60:.0f} 分待ちました）")
+                    return True
+            except requests.exceptions.RequestException:
+                pass  # まだ戻っていない。毎回はログに出さない（下で間隔を空けて出す）
+            now = time.monotonic()
+            if now - last_note >= CONNECTION_WAIT_NOTE_INTERVAL:
+                logger.warning(f"[{component}] 通信が戻るのを待っています"
+                               f"（{(now - start) / 60:.0f} 分経過。最大 {CONNECTION_WAIT_MAX / 3600:.0f} 時間）")
+                last_note = now
+        logger.error(f"[{component}] {CONNECTION_WAIT_MAX / 3600:.0f} 時間待っても通信が戻りません。"
+                     f"この区間は記録して次へ進みます")
+        return False
 
     def _collect_chunk(self, component: str, start_date: str, end_date: str,
                        batch_size: int, gerrit_path: str, chunk_days: Optional[int]
@@ -499,14 +592,16 @@ class ChangeCollector:
             s, t = date.fromisoformat(start_date), date.fromisoformat(end_date)
             span = (t - s).days
             if span <= min_days:
-                # 1 日でも失敗した。期間ではなく **1 ページの件数を減らして** 取り直す（design.md §6.6）。
-                # 以前はここで例外を上に投げ、収集全体が止まっていた（2026-10-04、chromium/src の
-                # 2022-04-22。その日は 619 件で件数は多くない。1 ページ 500 件の中に組み立ての重い
-                # Change があったか、一時的な混雑と考えられる）
+                # 1 日でも失敗した。**時刻で割って**取り直す（1 時間 → 10 分 → 1 分 → 1 秒。design.md §6.6）。
+                # 1 ページの件数を減らすのは、1 秒の区間でも失敗したときだけ（_collect_subday の中）。
+                # 2026-10-06 までは、ここで件数を減らしていた。しかし深いページを読みに行くことは変わらず、
+                # 1 クエリ 100 ページの上限で HTTP 400 になり、2022-10-11 が取れずに残った。
+                # （さらに前は例外を上に投げ、収集全体が止まっていた。2026-10-04、chromium/src の 2022-04-22）
                 logger.warning(f"[{component}] 区間 {start_date}〜{end_date} は 1 日でも失敗しました"
-                               f"（{type(e).__name__}）。1 ページの件数を減らして取り直します")
-                return self._collect_range(component, start_date, end_date, batch_size,
-                                           gerrit_path=gerrit_path, reduce_on_failure=True)
+                               f"（{type(e).__name__}）。時刻で割って取り直します")
+                return self._collect_subday(component, datetime.combine(s, datetime.min.time()),
+                                            datetime.combine(t, datetime.min.time()),
+                                            batch_size, gerrit_path, SUBDAY_STEPS)
             mid = (s + timedelta(days=span // 2)).isoformat()
             logger.warning(f"[{component}] 区間 {start_date}〜{end_date}（{span}日）で失敗 → "
                            f"{start_date}〜{mid} と {mid}〜{end_date} に割って取り直します: "
@@ -520,11 +615,14 @@ class ChangeCollector:
     def _collect_subday(self, component: str, start: datetime, end: datetime,
                         batch_size: int, gerrit_path: str, steps: Tuple[timedelta, ...]
                         ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
-        """[start, end) を steps[0] ごとに時刻で区切って取得する（1 日でも上限に達したとき）。
+        """[start, end) を steps[0] ごとに時刻で区切って取得する（1 日でも上限に達した・失敗したとき）。
 
         時刻は UTC で、問い合わせでは after:"2026-01-05 06:00:00" のように引用符で囲む
         （ChangesEndpoint が行う）。1 区間が上限に達したら、その区間だけ steps の次の段階で割り直す。
         最後の段階（1 秒）でも達したら、欠損の可能性として記録して先へ進む。
+        **1 区間が時間切れ・HTTP エラー・壊れた応答で失敗したときも、その区間だけ次の段階で割り直す**
+        （2026-10-06 追加。design.md §6.6）。1 ページの件数を減らすのは最後の段階（1 秒）の区間だけ。
+        途中まで取れていた分は捨てて割り直した区間で取り直す（上書き保存なので重複しない）。
         境目は両方の区間に含まれうるが、change_number をキーに上書き保存されるので重複しない。
         """
         changes: List[Dict[str, Any]] = []
@@ -534,9 +632,24 @@ class ChangeCollector:
         while cursor < end:
             nxt = min(cursor + steps[0], end)
             a, b = f"{cursor:%Y-%m-%d %H:%M:%S}", f"{nxt:%Y-%m-%d %H:%M:%S}"
-            # 時刻の区間はこれ以上期間で割らないので、失敗したら 1 ページの件数を減らす（design.md §6.6）
-            got = self._collect_range(component, a, b, batch_size, gerrit_path=gerrit_path,
-                                      reduce_on_failure=True)
+            last = len(steps) == 1
+            try:
+                # 最後の段階（1 秒）の区間だけ、失敗したら 1 ページの件数を減らす（design.md §6.6）。
+                # それより粗い区間は例外を受けて、下で次の段階に割る
+                got = self._collect_range(component, a, b, batch_size, gerrit_path=gerrit_path,
+                                          reduce_on_failure=last)
+            except (ServerDeadlineExceeded, requests.exceptions.HTTPError,
+                    requests.exceptions.ReadTimeout, ValueError) as e:
+                if last:
+                    # 1 秒の区間は _collect_range の中で件数を減らして扱うので、ここには来ない想定。
+                    # 来た場合は割りようがないので、上に投げる（区間ごと失敗として記録される）
+                    raise
+                logger.warning(f"[{component}] 区間 {a}〜{b} で失敗しました（{type(e).__name__}）。"
+                               f"{steps[1]} ごとに割って取り直します")
+                got = self._collect_subday(component, cursor, nxt, batch_size, gerrit_path, steps[1:])
+                changes += got[0]; commits += got[1]; skipped += got[2]
+                cursor = nxt
+                continue
             if len(got[0]) + got[2] >= QUERY_LIMIT:
                 if len(steps) > 1:
                     logger.warning(f"[{component}] 区間 {a}〜{b} が上限に達しました。"
@@ -610,7 +723,8 @@ class ChangeCollector:
                        ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
         """1 つの日付区間の変更・コミットを取得して返す（(changes, commits, skipped)）。
 
-        reduce_on_failure=True（1 日・時刻の区間など、期間ではもう割らないとき）は、
+        reduce_on_failure=True（1 秒の時刻の区間など、期間ではもう割らないとき。2026-10-06 からは
+        1 日の区間ではなく、時刻で 1 秒まで割った区間だけで使う）は、
         応答の時間切れ・HTTP エラー・壊れた応答で例外を投げず、1 ページの件数を
         TIMEOUT_PAGE_SIZES の順に減らして取り直す。1 件でも失敗したら、その Change だけ
         本体とファイル一覧に分けて取る（_recover_change）。それでも駄目なら記録して次へ進む
@@ -905,8 +1019,14 @@ def main():
         if args.end:
             cfg["end_date"] = args.end
         logger.info(f"対象={cfg['components']} 期間={cfg['start_date']}〜{cfg['end_date']}")
-        collector.collect_all_components()
-        logger.info("データ収集が正常に完了しました")
+        status = collector.collect_all_components()
+        # 最後の 1 行は実行の状態に合わせる（design.md §6.6「終了時の表示」）。以前は incomplete でも
+        # 「正常に完了しました」と出し、直前の「取り直しても取れなかったものがあります」と食い違っていた
+        if status == "completed":
+            logger.info("データ収集が正常に完了しました")
+        else:
+            logger.warning("データ収集を終了しました。**取れなかったものがあります**（上のエラーに対象と位置。"
+                           "同じコマンドをもう一度実行すると、取れなかった区間だけを取り直します）")
     except Exception as e:
         logger.error(f"データ収集中にエラーが発生しました: {e}")
         raise
