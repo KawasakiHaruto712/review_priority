@@ -129,6 +129,16 @@ def retry_with_backoff(retry_config: Optional[RetryConfig] = None) -> Callable:
                     if isinstance(e, requests.exceptions.ReadTimeout):
                         raise
 
+                    # HTTP 400（要求が不正）も投げ直さない。何度投げても同じ結果になる
+                    # （project_selection/design.md §6.6「HTTP 400 は投げ直さない」）。
+                    # 2026-10-06、chromium/src の深いページ（1 クエリ 100 ページの上限）で
+                    # 400 を 6 回ずつ投げ直し、1 回の失敗に約 2 分を空費していた。
+                    # 対象は 400 だけ。403 は Wikimedia がアクセス頻度の制限に使うので投げ直しを続ける
+                    resp = getattr(e, "response", None)
+                    if resp is not None and resp.status_code == 400:
+                        logger.error(f"HTTPエラー(400)のため投げ直しません: {e}")
+                        raise
+
                     if retry_count >= retry_config.max_retries:
                         logger.error(f"最大リトライ回数到達: {e}")
                         raise

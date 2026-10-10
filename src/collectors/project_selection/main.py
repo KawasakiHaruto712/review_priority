@@ -231,21 +231,52 @@ def _merge_write(path: Path, new_rows: List[Dict[str, Any]], scanned_hosts: set,
 # 上限付きのときの実績：chromiumos_infra で 28,070 ÷ 28,051 = 1.0007。打ち切りが起きれば大きく下回る。
 VERIFY_MIN_RATIO = 0.99
 
+# fill で 1 件ずつ取るときに限った、読み込みの時間切れ（秒）と、時間切れのときの投げ直しの回数（design.md §4.3
+# 「時間切れを長くする理由と範囲」）。第 2 段階の収集で、chromium/src の 2 件（#3941687・#3938488）が
+# 1 件ずつに分けても 120 秒以内に返らず取れなかったため（2026-10-07）。
+# 通常の収集（change_collector）は 120 秒のまま変えない。収集では時間切れを「区間を割る合図」に使っており、
+# すべての問い合わせで長くすると、失敗の処理が遅くなり、相手のサーバにも重い処理を長くさせることになる。
+FILL_READ_TIMEOUT = 300.0
+FILL_TIMEOUT_RETRIES = 1     # 時間切れなら 1 回だけ投げ直す（同じ要求を合計 2 回まで）
 
-def _fetch_one(ep: Any, number: int) -> tuple:
+
+def _retry_on_timeout(call, delay: float):
+    """call() を呼び、読み込みの時間切れなら FILL_TIMEOUT_RETRIES 回まで投げ直す（design.md §4.3）。
+
+    一時的な混雑なら投げ直しで通る。それ以上は繰り返さない（相手のサーバに重い処理を何度もさせないため）。
+    投げ直す前には、収集と同じく delay 秒を空ける。時間切れ以外の失敗は、そのまま上に投げる。
+    """
+    import time
+    import requests
+    for attempt in range(FILL_TIMEOUT_RETRIES + 1):
+        try:
+            return call()
+        except requests.exceptions.ReadTimeout:
+            if attempt >= FILL_TIMEOUT_RETRIES:
+                raise
+            logger.warning(f"{FILL_READ_TIMEOUT:.0f} 秒で時間切れ。1 回だけ投げ直します")
+            if delay:
+                time.sleep(delay)
+
+
+def _fetch_one(ep: Any, number: int, delay: float = 0.0) -> tuple:
     """Change を 1 件、番号で取る（収集と同じ 5 オプション）。返り値は (Change または None, 取れなかった理由)。
 
     重くて通らなければ、本体と版ごとのファイル一覧に分けて取る。1 つの版でもファイル一覧が
     取れなければ、取れなかったものとして扱う（中身の欠けた Change を保存しない）。
+    どの問い合わせも、時間切れなら FILL_TIMEOUT_RETRIES 回まで投げ直す（時間切れの長さは呼び出し元が
+    ep に設定する FILL_READ_TIMEOUT。design.md §4.3）。
     """
     import requests
     try:
-        found = ep.make_request("changes/", {"q": f"change:{number}", "o": ep.FULL_OPTIONS})
+        found = _retry_on_timeout(
+            lambda: ep.make_request("changes/", {"q": f"change:{number}", "o": ep.FULL_OPTIONS}), delay)
     except (requests.exceptions.ReadTimeout, requests.exceptions.HTTPError, ValueError) as e:
         try:
-            change = ep.fetch_change(number)  # ファイル一覧なしの本体
+            change = _retry_on_timeout(lambda: ep.fetch_change(number), delay)  # ファイル一覧なしの本体
             for sha, meta in (change.get("revisions") or {}).items():
-                meta["files"] = ep.fetch_revision_files(number, meta.get("_number", sha))
+                rev = meta.get("_number", sha)
+                meta["files"] = _retry_on_timeout(lambda: ep.fetch_revision_files(number, rev), delay)
             return change, ""
         except Exception as e2:
             return None, f"{type(e).__name__} → 分割して取っても {type(e2).__name__}: {e2}"
@@ -310,9 +341,14 @@ def stage_fill(keys: List[str]) -> None:
 
         collector._switch_to(key)
         ep = collector.endpoints["changes"]
+        # この fill で使う窓口だけ、読み込みの時間切れを長くする（接続の時間切れは変えない。design.md §4.3）。
+        # 窓口は _switch_to のたびに作り直されるので、通常の収集の設定（120 秒）には影響しない
+        ep.timeout = (ep.timeout[0], FILL_READ_TIMEOUT)
+        logger.info(f"[{key}] 1 件ずつ取ります（読み込みの時間切れ {FILL_READ_TIMEOUT:.0f} 秒・"
+                    f"時間切れなら {FILL_TIMEOUT_RETRIES} 回まで投げ直す）")
         got = 0
         for number in missing:
-            change, reason = _fetch_one(ep, number)
+            change, reason = _fetch_one(ep, number, delay=collector._request_delay)
             if collector._request_delay:
                 time.sleep(collector._request_delay)
             if change is not None:
