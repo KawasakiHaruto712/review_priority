@@ -24,7 +24,8 @@ from src.analysis.preliminary_analysis.pretrained_encoders.dataset import record
 from src.analysis.preliminary_analysis.pretrained_encoders.features import feature_builder
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
-from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants, review_utils
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants
+from src.utils.bot_detection import BotDetector, host_of
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     stream=sys.stdout)
@@ -65,8 +66,8 @@ def build_and_save(project: str = None, n: int | None = None, seed_indices=None)
     # 1. データ読み込み
     rel_df = load_release_dates()
     changes = load_changes(project)
-    bot_names = review_utils.load_bot_names()
-    all_prs = feature_builder.build_all_prs_df(changes, bot_names)
+    detector = BotDetector(host_of(project))
+    all_prs = feature_builder.build_all_prs_df(changes, detector)
     device = st.resolve_device()
     logger.info(f"device = {device}")
 
@@ -77,7 +78,7 @@ def build_and_save(project: str = None, n: int | None = None, seed_indices=None)
 
     # 3. pretraining 集合
     pre_records = record_builder.build_records(changes, project, data_start, cutoff_dt,
-                                               bot_names, all_prs, rel_df)
+                                               detector, all_prs, rel_df)
     pre_sets = set_builder.build_sets(pre_records, constants.MAX_SET_SIZE)
     logger.info(f"事前学習用 集合数: {len(pre_sets)}（総レコード {set_builder.count_records(pre_sets)}）")
     scaler = st.Scaler.fit(pre_sets)

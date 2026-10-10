@@ -48,7 +48,7 @@ class DistributionPoint:
 def build_distribution(
     records: list,
     metric,
-    bot_names: set,
+    detector,
     cycle_start: datetime,
     cycle_end: datetime,
     x_mode: str = "normalized",
@@ -98,7 +98,7 @@ def build_distribution(
         # Open な各 Change の縦軸値を集める（寄与しないものは None なので除く）
         values: list[float] = []
         for r in active:
-            delta = metric.value_fn(r.change, t, bot_names)
+            delta = metric.value_fn(r.change, t, detector)
             if delta is not None:
                 values.append(to_unit(delta, duration_unit))
 

@@ -145,7 +145,7 @@ for project in projects:
 ## 🔧 設定・環境
 
 ### 必要な設定ファイル
-- `src/config/gerrymanderconfig.ini`: Gerrit接続設定
+- `src/config/bot_accounts.csv`: ボットの一覧（判定は `src/utils/bot_detection.py`。設計書 `src/utils/bot_detection.md`）
 - `data/processed/review_label.json`: レビューラベル定義
 
 ### 環境変数

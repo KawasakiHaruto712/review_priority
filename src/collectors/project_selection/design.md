@@ -578,18 +578,18 @@ gwsq                       ChromiumOS。レビュア割り当て
 
 したがって第 3 段階でボットの一覧を作り、その後に E2・E3 を判定する。
 
-#### 既存の仕組み
+#### 判定の仕組み（2026-10-11 に一本化）
 
-判定の仕組みは既にあり、3 つの出所を統合して名前・username・email・`_account_id` のいずれかで照合する（大文字小文字を区別しない）。
+ボットの判定は `src/utils/bot_detection.py`（設計書 `src/utils/bot_detection.md`）に一本化した。ホストごとに `BotDetector` を作り、次の ①〜④ のどれかに当てはまればボットとする。
 
 ```
-① gerrymanderconfig.ini の [organization] bots
-② third_party_ci_accounts.csv    193 件のサードパーティ CI
-③ extra_bots.txt                 補完用。現在は zuul と jenkins のみ
+① Gerrit の SERVICE_USER の印がある
+② メールアドレスが gserviceaccount.com で終わる
+③ name か display_name の最後の語が Bot・CI
+④ src/config/bot_accounts.csv（出どころ付きの一覧。ホスト必須、名前では照合しない）に載っている
 ```
-`src/analysis/background_problem/priority_distribution/utils/data_loader.py` の `load_bot_names()`
 
-**ただし中身は OpenStack 専用**で、①②とも OpenStack のツールと CI の一覧である。新しいインスタンスのボットは③に足す。
+以前は OpenStack 専用の 3 つの一覧（gerrymanderconfig.ini・third_party_ci_accounts.csv・extra_bots.txt）を名前でも照合していたが、新しいインスタンスには使えず、同じ名前の人間を誤判定していたため置き換えた。第 3 段階で見つけたボットは、出どころの資料があるものだけを ④ に足す（設計書 §2.3・§2.5）。
 
 #### インスタンスごとの事情
 
@@ -601,6 +601,8 @@ gwsq                       ChromiumOS。レビュア割り当て
 | Qt / LibreOffice | 中央に集約された一覧が見つからない。個別に確認が要る |
 
 Gerrit には `Service Users` という専用グループの仕組みがあるが、**当てにならない**。OpenStack でも 3 人しか登録されておらず（サードパーティ CI の 193 件は含まれない）、Qt にはグループ自体が存在せず（404）、LibreOffice と Wikimedia は閲覧が許可されていない（403）。
+
+> 追記（2026-10-11）：上の判断は、グループの中身の一覧を問い合わせた結果による。その後、収集したアカウント情報（`DETAILED_ACCOUNTS`）の `tags` には `SERVICE_USER` の印が付いていることが分かった（OpenStack で 138 個など。`src/utils/bot_detection.md` §8）。ただし登録の漏れはあるので、印だけには頼らず ②〜④ と組み合わせて使っている（同 §7.1）。
 
 Qt と LibreOffice は、収集済みデータからアカウントごとの投稿数を数え、上位から公式資料と照合して確定する。ボットは活動量が突出するため、上位数十件で大半が捕まる。
 
@@ -1048,7 +1050,7 @@ src/collectors/
     main.py              段階ごとの実行入口（--stage 1 / bots / metrics）
     ranking.py           第 1 段階：Change 作成数の集計と E4 の判定
     local_counts.py      収集済みリポジトリの件数をローカルから数える（§3.3.3）
-    metrics.py           第 3・4 段階：ボット判定と指標の算出
+    metrics.py           第 3・4 段階：アカウントの活動量と指標の算出（ボット判定は src/utils/bot_detection.py）
     source_files.py      linguist による実装言語の判定（E1 に使う。§5.6）
     hosts.py             インスタンスの一覧と個別の事情
 
@@ -1087,7 +1089,7 @@ data/
 |---|---|
 | E3 を除外基準にするか | 切る場合の水準は 90% 以上を想定 |
 | E1〜E4 の閾値 | 収集後に決める |
-| Qt・LibreOffice のボット一覧 | 第 3 段階で、収集済みデータの上位アカウントを公式資料と照合して確定する |
+| Qt・LibreOffice のボット一覧 | 第 3 段階で、収集済みデータの上位アカウントを公式資料と照合して確定する。判定の決まりは `src/utils/bot_detection.md` で確定済み（2026-10-11） |
 | 年ごとの順位表の回復 | 12 インスタンスぶんが失われた（やり直しの検証で上書きし、退避が漏れた）。**第 1 段階を全部やり直すので解消する**（2026-10-03） |
 | 第 2 段階の終わりの日付 | **決定（2026-10-03）**：2027-04-01 まで切り詰めずに問い合わせる（§6.3）。今年を含む区間を後日取り直す仕組みは、必要になったときに決める |
 | 日単位でも上限に達した場合 | **決定（2026-10-04）**：時刻で区切って割り直す（§3.3.2）。走査済みの ChromiumOS の 5 日は `--refill` で取り直す（§3.4）。収集でも同じように割る（§6.6） |

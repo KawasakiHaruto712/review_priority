@@ -39,7 +39,7 @@ from src.analysis.preliminary_analysis.pretrained_encoders.dataset import record
 from src.analysis.preliminary_analysis.pretrained_encoders.features import feature_builder
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
-from src.analysis.preliminary_analysis.pretrained_encoders.utils import review_utils
+from src.utils.bot_detection import BotDetector, host_of
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     stream=sys.stdout)
@@ -86,11 +86,11 @@ def _save_kind(res_by_metric: dict, base_dir: Path, meta: dict) -> None:
             plotter.plot_all(mr, out, constants.PLOT_DPI)
 
 
-def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
+def analyze(changes, rel_df, project, versions, out_root, detector=None):
     """1 プロジェクトの全リリースを実行して出力する（テスト可能なコア）。"""
     out_root = Path(out_root)
-    bot_names = review_utils.load_bot_names() if bot_names is None else bot_names
-    all_prs = feature_builder.build_all_prs_df(changes, bot_names)
+    detector = BotDetector(host_of(project)) if detector is None else detector
+    all_prs = feature_builder.build_all_prs_df(changes, detector)
     device = st.resolve_device()
     logger.info(f"device = {device}")
     model_name = constants.MODEL_NAME[0]
@@ -118,7 +118,7 @@ def analyze(changes, rel_df, project, versions, out_root, bot_names=None):
         logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()} / "
                     f"レコード生成 {rec_start.date()} から）---")
         records = record_builder.build_records(changes, project, rec_start, ce_R,
-                                               bot_names, all_prs, rel_df)
+                                               detector, all_prs, rel_df)
         day_sets = {s.t.date(): s for s in set_builder.build_sets(records, constants.MAX_SET_SIZE)}
         positions = binning.position_of_days(cs_R, ce_R, grid, constants.BIN_DAY_ALIGNED)
         eval_dates = [d for d in sorted(day_sets) if d in positions]

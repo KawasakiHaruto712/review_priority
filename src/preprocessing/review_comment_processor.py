@@ -5,7 +5,8 @@ from pathlib import Path
 import logging
 import re
 import numpy as np
-import configparser
+
+from src.utils.bot_detection import BotDetector
 
 # NLTKのインポートとデータダウンロードの指示を削除
 # import nltk
@@ -38,32 +39,6 @@ def _generate_ngrams(words: list[str], n_min: int, n_max: int) -> list[str]:
             ngram = " ".join(words[i : i + n])
             ngrams.append(ngram)
     return ngrams
-
-def _load_bot_names(config_path: Path) -> list[str]:
-    """
-    gerrymanderconfig.ini からボットのユーザー名を読み込む
-
-    Args:
-        config_path (Path): gerrymanderconfig.ini のパス
-
-    Returns:
-        List[str]: ボットのユーザー名リスト
-    """
-    bot_names = []
-    config = configparser.ConfigParser()
-    try:
-        config.read(config_path)
-        if 'organization' in config and 'bots' in config['organization']:
-            # カンマで分割し、空白を除去
-            bot_names = [name.strip() for name in config['organization']['bots'].split(',')]
-            logger.info(f"ボット名が {config_path} からロードされました: {bot_names}")
-        else:
-            logger.warning(f"'{config_path}' に 'organization' セクションまたは 'bots' エントリが見つかりません。")
-    except configparser.Error as e:
-        logger.error(f"'{config_path}' のパース中にエラーが発生しました: {e}")
-    except FileNotFoundError:
-        logger.error(f"エラー: gerrymanderconfig.ini が {config_path} に見つかりません。")
-    return bot_names
 
 def _load_review_labels(label_path: Path) -> list[str]:
     """
@@ -123,7 +98,7 @@ def summarize_keywords_by_inclusion(keywords: list[str]) -> list[str]:
 def extract_and_save_review_keywords(
     checklist_path: Path,
     output_keywords_path: Path,
-    gerrymander_config_path: Path,
+    bot_detector: BotDetector,
     review_label_path: Path, # 新しい引数
     min_comment_count: int = 10,
     min_precision_ratio: float = 0.90,
@@ -136,7 +111,8 @@ def extract_and_save_review_keywords(
     Args:
         checklist_path (Path): checklist.csvファイルのパス
         output_keywords_path (Path): 抽出されたキーワードを保存するJSONファイルのパス
-        gerrymander_config_path (Path): gerrymanderconfig.ini のパス
+        bot_detector (BotDetector): ボットの判定（src/utils/bot_detection.py）。
+            checklist.csv には投稿者の名前しかないため、当てられるのは名前の決まり（③）だけ
         review_label_path (Path): review_label.json のパス
         min_comment_count (int): 語彙を含むレビューコメントの最小数
         min_precision_ratio (float): 語彙を含むレビューコメントが修正要求/確認として分類される最小割合 (0.0〜1.0)
@@ -150,8 +126,6 @@ def extract_and_save_review_keywords(
         logger.error(f"エラー: checklist.csv が {checklist_path} に見つかりません.")
         return
 
-    # ボット名をロード
-    bot_names = _load_bot_names(gerrymander_config_path)
     # レビューラベルをロード
     review_labels = _load_review_labels(review_label_path)
     # レビューラベルから正規表現パターンを生成 (長いラベルを先にマッチさせるためソート済みのものを使用)
@@ -188,7 +162,7 @@ def extract_and_save_review_keywords(
         comment_author = str(row['author'])
 
         # ボットのコメントをスキップ
-        if comment_author in bot_names:
+        if bot_detector.is_bot({"name": comment_author}):
             logger.debug(f"ボット '{comment_author}' のコメントをスキップします。: {original_comment[:50]}...")
             continue
 
@@ -271,16 +245,17 @@ def extract_and_save_review_keywords(
 
 # このスクリプトを直接実行するためのエントリポイント
 if __name__ == "__main__":
-    from src.config.path import DEFAULT_DATA_DIR, DEFAULT_CONFIG
+    from src.config.path import DEFAULT_DATA_DIR
+    from src.utils.bot_detection import host_of
     checklist_csv_path = DEFAULT_DATA_DIR / "processed" / "checklist.csv"
     output_json_path = DEFAULT_DATA_DIR / "processed" / "review_keywords.json"
-    gerrymander_config_path = DEFAULT_CONFIG / "gerrymanderconfig.ini"
+    bot_detector = BotDetector(host_of("nova"))  # checklist.csv は nova の Change
     review_label_json_path = DEFAULT_DATA_DIR / "processed" / "review_label.json" # review_label.json のパスを追加
 
     extract_and_save_review_keywords(
         checklist_csv_path, 
         output_json_path,
-        gerrymander_config_path,
+        bot_detector,
         review_label_json_path, # 新しい引数を渡す
         min_comment_count=10,
         min_precision_ratio=0.90,

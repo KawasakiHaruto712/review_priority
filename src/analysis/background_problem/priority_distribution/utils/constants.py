@@ -5,17 +5,11 @@ priority_distribution 分析の設定値。
 原則ここだけを編集すれば済むようにしています（メトリクスの計算ロジック本体は
 metrics/duration_calculator.py に置いています）。
 """
-from src.config.path import DEFAULT_DATA_DIR, DEFAULT_CONFIG
+from src.config.path import DEFAULT_DATA_DIR
 
 # ── 入力 ───────────────────────────────────────────────
 # Change データ / リリース日の読み込みは common.data_loader に集約（既定パスもそちらが保持）。
-# ここではボット判定に使う設定（priority_distribution 固有）だけを定義する。
-# ボット名の定義
-GERRYMANDER_CONFIG = DEFAULT_CONFIG / "gerrymanderconfig.ini"
-# サードパーティ CI アカウント一覧（name,email の CSV。第三者 CI の取りこぼし補完用）
-BOT_ACCOUNTS_CSV = DEFAULT_CONFIG / "third_party_ci_accounts.csv"
-# 上記 2 つに載っていない追加のボット/自動アカウント一覧（zuul / jenkins 等。1 行 1 名）
-EXTRA_BOTS_FILE = DEFAULT_CONFIG / "extra_bots.txt"
+# ボットの判定は src/utils/bot_detection.py に集約（一覧は src/config/bot_accounts.csv）。
 
 # ── 出力 ───────────────────────────────────────────────
 OUTPUT_ROOT = DEFAULT_DATA_DIR / "analysis" / "background_problem" / "priority_distribution"

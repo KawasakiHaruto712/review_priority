@@ -32,7 +32,7 @@ from src.analysis.preliminary_analysis.pretrained_encoders.features import featu
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
 from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre_constants
-from src.analysis.preliminary_analysis.pretrained_encoders.utils import review_utils
+from src.utils.bot_detection import BotDetector, host_of
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     stream=sys.stdout)
@@ -60,8 +60,8 @@ def run(project: str, versions: list[str], n_seeds: int | None) -> None:
     """モデルを走らせて生予測・指標を保存し、表＋折れ線を描く。"""
     rel_df = load_release_dates()
     changes = load_changes(project)
-    bot_names = review_utils.load_bot_names()
-    all_prs = feature_builder.build_all_prs_df(changes, bot_names)
+    detector = BotDetector(host_of(project))
+    all_prs = feature_builder.build_all_prs_df(changes, detector)
     device = st.resolve_device()
     logger.info(f"device = {device}")
 
@@ -81,7 +81,7 @@ def run(project: str, versions: list[str], n_seeds: int | None) -> None:
         logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()} / "
                     f"学習データ開始 {span_start.date()}）---")
         day_sets = window_sweep.build_day_sets(changes, project, span_start, ce_R,
-                                               bot_names, all_prs, rel_df)
+                                               detector, all_prs, rel_df)
         eval_dates = [d for d in sorted(day_sets) if cs_R.date() <= d <= ce_R.date()]
         logger.info(f"評価日数: {len(eval_dates)} / 全日集合: {len(day_sets)}")
 

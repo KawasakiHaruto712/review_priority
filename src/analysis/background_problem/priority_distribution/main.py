@@ -34,10 +34,10 @@ from src.analysis.background_problem.priority_distribution.preprocessing.outlier
 from src.analysis.background_problem.priority_distribution.utils import constants
 from src.analysis.background_problem.priority_distribution.utils.data_loader import (
     get_release_cycle,
-    load_bot_names,
     load_changes,
     load_release_dates,
 )
+from src.utils.bot_detection import BotDetector, host_of
 from src.analysis.background_problem.priority_distribution.visualization.plotter import (
     plot_band,
     plot_percentiles,
@@ -95,7 +95,7 @@ def _save_outputs(points, meta, out_dir: Path, title, xlabel, ylabel, include_re
     )
 
 
-def analyze_project_metric(project: str, metric_name: str, changes, bot_names, rel_df):
+def analyze_project_metric(project: str, metric_name: str, changes, detector, rel_df):
     """1 プロジェクト × 1 メトリクスの分析を実行する。"""
     metric = get_metric(metric_name)
     xlabel = _xlabel(constants.X_AXIS_MODE)
@@ -120,7 +120,7 @@ def analyze_project_metric(project: str, metric_name: str, changes, bot_names, r
             if cdt is not None and pool_start <= cdt <= cycle_end:
                 cyc_changes.append(c)
 
-        records = compute_change_records(cyc_changes, metric, bot_names)
+        records = compute_change_records(cyc_changes, metric, detector)
         n_total = len(records)
         records = drop_unfinished(records)
         n_after_unfinished = len(records)
@@ -134,7 +134,7 @@ def analyze_project_metric(project: str, metric_name: str, changes, bot_names, r
         points = distribution_builder.build_distribution(
             records,
             metric,
-            bot_names,
+            detector,
             cycle_start,
             cycle_end,
             x_mode=constants.X_AXIS_MODE,
@@ -207,7 +207,6 @@ def analyze_project_metric(project: str, metric_name: str, changes, bot_names, r
 def run() -> None:
     """全プロジェクト × 全メトリクスを実行する。"""
     rel_df = load_release_dates()
-    bot_names = load_bot_names()
 
     for project in constants.TARGET_PROJECTS:
         logger.info(f"=== プロジェクト: {project} ===")
@@ -215,9 +214,10 @@ def run() -> None:
         if not changes:
             logger.warning(f"Change が無いためスキップ: {project}")
             continue
+        detector = BotDetector(host_of(project))
         for metric_name in constants.ENABLED_METRICS:
             logger.info(f"--- メトリクス: {metric_name} ---")
-            analyze_project_metric(project, metric_name, changes, bot_names, rel_df)
+            analyze_project_metric(project, metric_name, changes, detector, rel_df)
 
     logger.info(f"完了。出力先: {constants.OUTPUT_ROOT}")
 

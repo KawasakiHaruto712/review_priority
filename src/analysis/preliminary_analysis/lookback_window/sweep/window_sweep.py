@@ -40,9 +40,9 @@ def release_cycle(rel_df: pd.DataFrame, project: str, version: str):
 
 
 def build_day_sets(changes, project, span_start: datetime, ce_R: datetime,
-                   bot_names, all_prs, rel_df) -> dict:
+                   detector, all_prs, rel_df) -> dict:
     """[span_start, ce_R] の (Change, T) レコードを日ごとの TSet にまとめる。{date -> TSet}。"""
-    recs = record_builder.build_records(changes, project, span_start, ce_R, bot_names, all_prs, rel_df)
+    recs = record_builder.build_records(changes, project, span_start, ce_R, detector, all_prs, rel_df)
     sets = set_builder.build_sets(recs, pre.MAX_SET_SIZE)
     return {s.t.date(): s for s in sets}
 

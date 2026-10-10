@@ -13,7 +13,7 @@
 ### レビューコメント処理 (`review_comment_processor.py`)
 - **キーワード抽出**: checklistデータから修正要求・修正確認のキーワードを抽出
 - **N-gram生成**: 1〜10語のフレーズパターンを自動生成
-- **ボット除外**: 設定ファイルからボットアカウントを除外
+- **ボット除外**: `src/utils/bot_detection.py` の判定でボットのコメントを除外（checklist.csv には投稿者の名前しかないため、当てられるのは名前の決まり（③）だけ）
 - **テキスト前処理**: URL除去、記号除去、プロジェクト名除去
 - **統計分析**: キーワードの出現頻度と精度による品質評価
 
@@ -53,19 +53,20 @@
 
 ```python
 from src.preprocessing.review_comment_processor import extract_and_save_review_keywords
-from src.config.path import DEFAULT_DATA_DIR, DEFAULT_CONFIG
+from src.config.path import DEFAULT_DATA_DIR
+from src.utils.bot_detection import BotDetector, host_of
 
 # 入力ファイルのパス設定
 checklist_path = DEFAULT_DATA_DIR / "processed" / "checklist.csv"
 output_path = DEFAULT_DATA_DIR / "processed" / "review_keywords.json"
-config_path = DEFAULT_CONFIG / "gerrymanderconfig.ini"
+bot_detector = BotDetector(host_of("nova"))  # checklist.csv は nova の Change
 label_path = DEFAULT_DATA_DIR / "processed" / "review_label.json"
 
 # キーワード抽出の実行
 extract_and_save_review_keywords(
     checklist_path=checklist_path,
     output_keywords_path=output_path,
-    gerrymander_config_path=config_path,
+    bot_detector=bot_detector,
     review_label_path=label_path,
     min_comment_count=10,        # 最小出現回数
     min_precision_ratio=0.90,    # 最小精度（90%以上）
@@ -158,11 +159,8 @@ def summarize_keywords_by_inclusion(keywords: list[str]) -> list[str]:
 
 ## 🔧 設定ファイル
 
-### gerrymanderconfig.ini
-```ini
-[organization]
-bots = jenkins, zuul, ci-bot, review-bot
-```
+### bot_accounts.csv
+ボットの一覧は `src/config/bot_accounts.csv`（説明は `src/config/README.md`）。
 
 ### review_label.json
 ```json

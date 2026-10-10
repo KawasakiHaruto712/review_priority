@@ -177,8 +177,8 @@ pytest tests/ --cov=src --cov-report=html
 
 ### 必要な設定ファイル
 ```bash
-# Gerrit接続設定（オプション）
-src/config/gerrymanderconfig.ini
+# ボットの一覧（判定は src/utils/bot_detection.py。設計書 src/utils/bot_detection.md）
+src/config/bot_accounts.csv
 
 # レビューラベル定義
 data/processed/review_label.json

@@ -1,14 +1,10 @@
 """pretrained_encoders の設定値（共有基盤：事前学習エンコーダ＋汎用ヘッドの作成・保存）。
 
 design.md 参照。本ディレクトリは concept_drift_detection に依存しない自己完結の基点。
-生データ読み込み（changes / release_dates / bot 設定）と src.features・src.config のみ共有インフラを使う。
+生データ読み込み（changes / release_dates）とボットの判定（src.utils.bot_detection）、
+src.features・src.config のみ共有インフラを使う。
 """
-from src.config.path import DEFAULT_CONFIG, DEFAULT_DATA_DIR
-
-# ── 入力（ボット判定用の一覧） ─────────────────────────────
-GERRYMANDER_CONFIG = DEFAULT_CONFIG / "gerrymanderconfig.ini"
-BOT_ACCOUNTS_CSV = DEFAULT_CONFIG / "third_party_ci_accounts.csv"
-EXTRA_BOTS_FILE = DEFAULT_CONFIG / "extra_bots.txt"
+from src.config.path import DEFAULT_DATA_DIR
 
 # ── 出力（保存先） ────────────────────────────────────
 OUTPUT_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "pretrained_encoders"
