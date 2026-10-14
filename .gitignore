@@ -1,4 +1,6 @@
 data
+paper
+.vscode
 tests
 src/review_priority.egg-info
 .env
