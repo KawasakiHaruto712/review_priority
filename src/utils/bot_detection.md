@@ -37,6 +37,8 @@ Gerrit には「Service Users」という既定のグループがあり、各ホ
 
 **印は、問い合わせた時点のグループの中身から作られる**（Gerrit のソースコード `InternalAccountDirectory` / `ServiceUserClassifierImpl` で確認）。記録として保存されているわけではないので、分析期間中に動いていて、その後にグループから外れたボットには印が付かない（§7.1）。
 
+**グループの旧名（2026-10-14 追記）**：このグループは、Gerrit 3.3 より前は「**Non-Interactive Users**」という名前だった。3.3 で「Service Users」に名前が変わったもので、グループそのもの（グループの ID）は同じである（出どころ：Gerrit 3.3 のリリースノート。原文は未確認）。古い Gerrit の説明書・ホストの設定・メーリングリストなどで「Non-Interactive Users」と書かれていれば、このグループのことである。印（`SERVICE_USER`）は問い合わせた時点のグループの中身から作られるので、旧名の時代に登録されたアカウントにも、今も登録されていれば印が付く。
+
 ### 1.2 ② gserviceaccount.com
 
 Google Cloud のサービスアカウントは、人ではなくアプリケーションなどが使うアカウントで、メールアドレスは `…@….iam.gserviceaccount.com` などの形になる（Google Cloud 公式ドキュメント service-account-overview / service-account-types）。ChromiumOS と Android の機械のアカウントの多くがこの形である。

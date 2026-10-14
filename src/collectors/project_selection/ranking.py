@@ -227,6 +227,17 @@ class HostTally:
                 self.created_by_year[int(created[:4])][repository] += 1
         self.branches[repository] = branches
 
+    def merge(self, other: "HostTally") -> None:
+        """別に走査した集計（収集済みリポジトリの走査。design.md §3.3.3）を、このインスタンスの集計に足す。"""
+        self.seen |= other.seen
+        self.duplicates += other.duplicates
+        self.truncated.extend(other.truncated)
+        self.created.update(other.created)
+        for year, counts in other.created_by_year.items():
+            self.created_by_year[year].update(counts)
+        for repository, counts in other.branches.items():
+            self.branches[repository].update(counts)
+
     def top_branch_share(self, repository: str) -> float:
         """最大ブランチの占有率。E4 の判定に使う（design.md §5.2）。"""
         counts = self.branches.get(repository)
@@ -241,13 +252,48 @@ class HostTally:
 SCAN_COLUMNS = ["number", "repository", "branch", "created", "updated"]
 
 
+def add_saved_scan(tally: HostTally, scan_path: Path, period_start: str, period_end: str) -> None:
+    """保存してある走査結果（design.md §3.4）を読み、走査したときと同じ数え方で tally に足す。"""
+    with gzip.open(scan_path, "rt", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            tally.add({"_number": int(row["number"]), "project": row["repository"],
+                       "branch": row["branch"], "created": row["created"],
+                       "updated": row["updated"]}, period_start, period_end)
+
+
+def tally_from_saved(name: str, scan_path: Path, period_start: str, period_end: str) -> HostTally:
+    """保存してある走査結果だけから数え直す（通信なし。--stage 1 --recount。design.md §3.5）。"""
+    if not scan_path.exists():
+        raise FileNotFoundError(f"走査結果が見つかりません: {scan_path}")
+    tally = HostTally(name)
+    add_saved_scan(tally, scan_path, period_start, period_end)
+    logger.info(f"[{name}] {scan_path.name} から数え直しました：{len(tally.seen):,} 件 / "
+                f"対象期間に作成 {sum(tally.created.values()):,} 件")
+    return tally
+
+
+def scan_repository(name: str, host: Dict[str, Any], repository: str,
+                    period_start: str, period_end: str, scan_end: str,
+                    scan_path: Path, scan_start: str) -> HostTally:
+    """1 リポジトリだけを走査して集計する（収集済みリポジトリの走査。design.md §3.3.3）。
+
+    インスタンスの走査（scan_host）と同じ割り方・上限の扱い・間隔・重複の除去・保存のしかたで、
+    問い合わせの条件だけを project:<リポジトリ> にする。
+    """
+    return scan_host(f"{name}/{repository}", host, period_start, period_end, scan_end, scan_path,
+                     scan_start=scan_start, query_base=f"project:{repository}")
+
+
 def scan_host(name: str, host: Dict[str, Any],
               period_start: str, period_end: str, scan_end: str,
-              scan_path: Optional[Path] = None) -> HostTally:
+              scan_path: Optional[Path] = None, *,
+              scan_start: Optional[str] = None, query_base: Optional[str] = None) -> HostTally:
     """1 インスタンスを走査して集計する。
 
-    最終更新日が period_start 以降の Change を scan_end まで走査し、作成日が
-    [period_start, period_end) のものを数える。最終更新日は必ず作成日以降なので、
+    最終更新日が scan_start（省略時は period_start）以降の Change を scan_end まで走査し、作成日が
+    [period_start, period_end) のものを数える。走査の始まりと数える期間は別に持つ
+    （2026-10-12 に数える期間を 2023 年からにしたが、走査の範囲は 2022-01-01 からのまま。design.md §3.5）。
+    query_base を与えると、問い合わせの条件をそれに置き換える（既定は走査から外すリポジトリを除く条件）。最終更新日は必ず作成日以降なので、
     走査の終わりを数える期間より先（2027-04-01）に置けば、対象期間に作成された Change を
     漏れなく捉えられる（design.md §3.3）。以前は走査の終わりも period_end（2025-01-01）にしており、
     期間内に作成され 2025 年以降にも更新された Change を数えていなかった（nova で 11.9%）。
@@ -265,7 +311,8 @@ def scan_host(name: str, host: Dict[str, Any],
         writer = csv.writer(handle)
         writer.writerow(SCAN_COLUMNS)
     try:
-        tally = _scan_host(name, host, period_start, period_end, scan_end, writer)
+        tally = _scan_host(name, host, period_start, period_end, scan_end, writer,
+                           scan_start or period_start, query_base)
     finally:
         if handle is not None:
             handle.close()
@@ -276,20 +323,24 @@ def scan_host(name: str, host: Dict[str, Any],
 
 
 def _scan_host(name: str, host: Dict[str, Any], period_start: str, period_end: str,
-               scan_end: str, writer: Optional[Any]) -> HostTally:
+               scan_end: str, writer: Optional[Any], scan_start: str,
+               query_base: Optional[str] = None) -> HostTally:
     tally = HostTally(name, writer)
     session = hosts_module.create_session(host)
     options = hosts_module.query_options(host)
     delay = float(host.get("delay", hosts_module.DEFAULT_REQUEST_DELAY))
 
-    excluded = hosts_module.excluded_repositories(host)
-    query_base = " ".join(f"-project:{r}" for r in excluded)
+    excluded: List[str] = []
+    if query_base is None:
+        excluded = hosts_module.excluded_repositories(host)
+        query_base = " ".join(f"-project:{r}" for r in excluded)
 
-    start = date.fromisoformat(period_start)
+    start = date.fromisoformat(scan_start)       # 走査の始まり（数える期間の始まりではない）
     end = date.fromisoformat(str(scan_end)[:10])  # 走査の終わり（数える期間の終わりではない）
 
-    logger.info(f"[{name}] 走査を開始します（区切り {host.get('slice', 'month')}"
-                + (f"・{len(excluded)} リポジトリを除外" if excluded else "") + "）")
+    logger.info(f"[{name}] 走査を開始します（{start}〜{end}・区切り {host.get('slice', 'month')}"
+                + (f"・{len(excluded)} リポジトリを除外" if excluded else "")
+                + (f"・条件 {query_base}" if query_base and not excluded else "") + "）")
     started = time.time()
     seen = _scan_range(session, host["base"], query_base, start, end,
                        host.get("slice", "month"), int(host.get("page_size", 500)),
@@ -332,11 +383,7 @@ def refill_host(name: str, host: Dict[str, Any], period_start: str, period_end: 
     try:
         tally = HostTally(name, writer)
         # 保存してある走査結果を読み込み、走査したときと同じ数え方で数え直す
-        with gzip.open(scan_path, "rt", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                tally.add({"_number": int(row["number"]), "project": row["repository"],
-                           "branch": row["branch"], "created": row["created"],
-                           "updated": row["updated"]}, period_start, period_end)
+        add_saved_scan(tally, scan_path, period_start, period_end)
         logger.info(f"[{name}] 保存してある走査結果 {len(tally.seen):,} 件を読み込みました"
                     f"（走査を始めた時刻 {scan_started:%Y-%m-%d %H:%M} UTC）")
 

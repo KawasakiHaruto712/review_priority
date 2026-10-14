@@ -112,17 +112,117 @@ GERRIT_PROJECTS = {
         "host": "https://chromium-review.googlesource.com",
         "path": "chromiumos/platform2", "auth": False, "chunk_days": 90,
     },
+
+    # ── 2026-10-13 に候補を上位 15 件に広げて足したもの（project_selection/design.md §4
+    #    「上位 15 件に広げる」）。件数は 2023-01-01〜2025-12-31 に作成された Change ──
+    # zephyrproject は 2025-11〜2026-01 に 1 日約 2,000 件と集中しているので、
+    # 1 区間がおよそ 4,000 件になるよう 2 日で区切る
+    "chromiumos_zephyrproject": {           # 82,560 件
+        "host": "https://chromium-review.googlesource.com",
+        "path": "chromiumos/third_party/zephyrproject", "auth": False, "chunk_days": 2,
+    },
+    "chromiumos_infra_recipes": {           # 24,737 件
+        "host": "https://chromium-review.googlesource.com",
+        "path": "chromiumos/infra/recipes", "auth": False, "chunk_days": 90,
+    },
+    # Wikimedia は短時間に集中すると 403 を返すので、第 1 段階と同じく 8 秒空ける。
+    # User-Agent の連絡先は .env の CONTACT から読む（project_selection/design.md §6.2）
+    "wikimedia_puppet": {                   # 26,326 件
+        "host": "https://gerrit.wikimedia.org/r",
+        "path": "operations/puppet", "auth": False, "chunk_days": 90, "delay": 8.0,
+    },
+
+    # ── 2026-10-14 に候補を上位 30 件に広げて足したもの（project_selection/design.md §4
+    #    「上位 30 件に広げる」）。件数は 2023-01-01〜2025-12-31 に作成された Change ──
+    # どれも年 4,000〜8,000 件なので、1 区間がおよそ 4,000 件になるよう 90 日で区切る。
+    # web-workload だけは 2024 年に 13,235 件と多いので 30 日
+    "android_cts": {                        # 22,520 件
+        "host": "https://android-review.googlesource.com",
+        "path": "platform/cts", "auth": False, "chunk_days": 90,
+    },
+    "chromiumos_coreboot": {                # 22,397 件
+        "host": "https://chromium-review.googlesource.com",
+        "path": "chromiumos/third_party/coreboot", "auth": False, "chunk_days": 90,
+    },
+    "chromium_devtools_frontend": {         # 18,805 件
+        "host": "https://chromium-review.googlesource.com",
+        "path": "devtools/devtools-frontend", "auth": False, "chunk_days": 90,
+    },
+    # Wikimedia は puppet と同じく 8 秒空ける（User-Agent の連絡先も同じ）。
+    # 正式版のタグは 1.N.0。版の名前もタグのまま（project_selection/design.md §5.2「追記：区切りの日をタグから取る」）
+    "wikimedia_mediawiki_core": {           # 18,624 件
+        "host": "https://gerrit.wikimedia.org/r",
+        "path": "mediawiki/core", "auth": False, "chunk_days": 90, "delay": 8.0,
+        "tag_pattern": r"^(1\.\d+\.0)$", "tag_series": r"\1",
+    },
+    "chromiumos_ec": {                      # 17,223 件
+        "host": "https://chromium-review.googlesource.com",
+        "path": "chromiumos/platform/ec", "auth": False, "chunk_days": 90,
+    },
+    "chromium_web_workload": {              # 17,170 件
+        "host": "https://chromium-review.googlesource.com",
+        "path": "web-workload", "auth": False, "chunk_days": 30,
+    },
+    # Qt は qtbase と同じく認証つき・1 回 50 件。区切りの日は qtbase と同じ決め方で、自分のタグから取る
+    # （project_selection/design.md §5.2「追記：区切りの日をタグから取る」）
+    "qtdeclarative": {                      # 16,685 件
+        "host": "https://codereview.qt-project.org/a", "path": "qt/qtdeclarative",
+        "auth": True, "env": "QT_GERRIT", "batch_size": 50, "chunk_days": 90,
+        "tag_pattern": r"^v(\d+)\.(\d+)\.0$", "tag_series": r"\1.\2.0",
+    },
+    "android_manifest": {                   # 16,462 件
+        "host": "https://android-review.googlesource.com",
+        "path": "platform/manifest", "auth": False, "chunk_days": 90,
+    },
+    "chromiumos_board_overlays": {          # 14,247 件
+        "host": "https://chromium-review.googlesource.com",
+        "path": "chromiumos/overlays/board-overlays", "auth": False, "chunk_days": 90,
+    },
+    # 正式版のタグは go1・go1.N（go1.20 まで）・go1.N.0（go1.21 から）。版の名前は go1・go1.N に揃える。
+    # rc・beta と go1.N.M（M≥1）は拾わない（project_selection/design.md §5.2「追記：区切りの日をタグから取る」）
+    "go": {                                 # 14,153 件
+        "host": "https://go-review.googlesource.com",
+        "path": "go", "auth": False, "chunk_days": 90,
+        "tag_pattern": r"^(go1(?:\.\d+)?)(?:\.0)?$", "tag_series": r"\1",
+    },
+    "chromium_emscripten_releases": {       # 13,490 件
+        "host": "https://chromium-review.googlesource.com",
+        "path": "emscripten-releases", "auth": False, "chunk_days": 90,
+    },
+    "android_bluetooth": {                  # 13,412 件
+        "host": "https://android-review.googlesource.com",
+        "path": "platform/packages/modules/Bluetooth", "auth": False, "chunk_days": 90,
+    },
+    "typo3_cms": {                          # 12,733 件
+        "host": "https://review.typo3.org",
+        "path": "Packages/TYPO3.CMS", "auth": False, "chunk_days": 90,
+    },
 }
 
 # 新規に収集する対象（OpenStack は収集済みなので既定には入れない）
 NEW_COLLECT_TARGETS = ["qtbase", "qtcreator", "libreoffice"]
 
-# 選定の第 2 段階で収集する候補（上位 12 件のうち未収集の 10 件）。
-# core（libreoffice）と qt/qtbase は全期間を収集済みなので含めない。
+# 区切りの日を正式版のタグから取る対象（release_tags_collector の既定。
+# 今回の論文で分析する追加の 3 件。project_selection/design.md §4「論文に向けた対象の絞り込み」・
+# §5.2「追記：区切りの日をタグから取る」。2026-10-14 に qtdeclarative を mediawiki/core に入れ替えた）
+RELEASE_TAG_TARGETS = ["qtbase", "wikimedia_mediawiki_core", "go"]
+
+# 選定の候補（2023〜2025 年の上位 15 件のうち、全期間が手元にない 12 件。
+# project_selection/design.md §4「上位 15 件に広げる」）。
+# core（libreoffice）・qt/qtbase・qt-creator は全期間を収集済みなので含めない。
+# 2026-10-13 に上位 12 件から変更。外れた tast-tests・platform2 はデータと登録を予備として残す
+# 2026-10-14 に上位 30 件へ広げた（design.md §4「上位 30 件に広げる」）。予備だった platform2・tast-tests も戻し、27 件
 SELECTION_CANDIDATES = [
-    "chromium_src", "chromiumos_overlay", "chromiumos_kernel",
-    "android_kernel_common", "chromiumos_infra_superproject", "chromiumos_zephyr",
-    "android_frameworks_support", "v8", "chromiumos_tast_tests", "chromiumos_platform2",
+    "chromium_src", "chromiumos_overlay", "chromiumos_infra_superproject",
+    "android_kernel_common", "chromiumos_zephyrproject", "android_frameworks_support",
+    "chromiumos_kernel", "chromiumos_zephyr", "v8",
+    "chromiumos_infra", "wikimedia_puppet", "chromiumos_infra_recipes",
+    # 16〜30 位
+    "android_cts", "chromiumos_coreboot", "chromiumos_platform2", "chromiumos_tast_tests",
+    "chromium_devtools_frontend", "wikimedia_mediawiki_core", "chromiumos_ec",
+    "chromium_web_workload", "qtdeclarative", "android_manifest",
+    "chromiumos_board_overlays", "go", "chromium_emscripten_releases",
+    "android_bluetooth", "typo3_cms",
 ]
 
 # 日付範囲

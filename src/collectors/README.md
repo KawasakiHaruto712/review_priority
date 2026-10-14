@@ -9,6 +9,8 @@
 | `openstack.py` | OpenStack Gerritからのデータ収集クラス |
 | `release_collector.py` | リリース情報の収集機能（`releases_summary.csv` を出力） |
 | `major_release_storage.py` | 公式のサイクル一覧から、サイクル単位の `major_releases_summary.csv` を生成（2026-10 改訂。下の「メジャーリリースの表」） |
+| `release_tags_collector.py` | 正式版のタグから、OpenStack 以外（qtbase・mediawiki/core・go）の行を `major_releases_summary.csv` に書く |
+| `build_release_table.py` | 表全体を作り直す入口。上の 2 つを順に呼ぶ（`python -m src.collectors.build_release_table`） |
 
 ## 🔧 主要機能
 
@@ -67,10 +69,15 @@ OpenStack の公式のサイクル一覧（`releases_repo/data/series_status.yam
   swift の正式版は公式の日付より 2〜3 週間早い。
 
 ### OpenStack 以外の行
-`release_tags_collector.py` が同じ CSV に qtbase・qtcreator・libreoffice の行を追記している。
-いまの `MajorReleaseStorage.save()` は CSV 全体を上書きするので、**作り直すときは OpenStack 以外の行を残す**。
+`release_tags_collector.py` が同じ CSV に、正式版のタグから取った行を書く。対象は `constants.RELEASE_TAG_TARGETS`
+（2026-10-14 から qtbase・mediawiki/core・go。区切りの日はタグの日。`project_selection/design.md` §5.2
+「追記：区切りの日をタグから取る」）。対象のプロジェクトの行はすべて入れ替え、ほかの行と並びは変えない。
+`MajorReleaseStorage.save()` も、作り直すときは OpenStack 以外の行を残す。
 OpenStack 以外のプロジェクトの区切り（何を「メジャーリリース」とみなすか）は、プロジェクトの選定のときに決める。
 区切りが公開されているプロジェクトだけを使う。
+表全体は `python -m src.collectors.build_release_table` で作り直せる（`major_release_storage` のあと `release_tags_collector` を流す）。
+2026-10-14 より前の表（qtbase・qtcreator・libreoffice をタグから取り、qtbase を公開日に直したもの）は
+`data/project_selection/old/release_dates_20261014/` にある。
 
 ### 手順（コードで作り、手で編集しない）
 ```bash

@@ -10,14 +10,18 @@ YAML で管理する専用リポジトリ）を clone して版と日付を得�
 どのタグを版とみなすかは `constants.GERRIT_PROJECTS` の `tag_pattern` / `tag_series` で決める。
 RC やビルド番号まで刻むプロジェクト（LibreOffice の `libreoffice-25.2.0.3` など）があるため、
 **同じ版シリーズに属するタグのうち最も古い日付**をそのリリース日として採用する。
+日付のないタグしかない版は飛ばし、ログに警告として残す（project_selection/design.md §5.2
+「追記：区切りの日をタグから取る」）。
 
-出力は既存の `major_releases_summary.csv` と同じ形式（project, version, release_date, yaml_url）で、
-**既存行は保持したまま併合**する（OpenStack の行を壊さない）。
+出力は既存の `major_releases_summary.csv` と同じ列（project, series, version, release_date, status, yaml_url）で、
+**対象のプロジェクトの行をすべて入れ替え、ほかのプロジェクトの行と並びは変えない**（OpenStack の行を壊さない）。
+
+既定の対象は `constants.RELEASE_TAG_TARGETS`（qtbase・mediawiki/core・go）。表全体の作り直しは
+`python -m src.collectors.build_release_table`（OpenStack の行を作る `major_release_storage` のあとに、これを呼ぶ）。
 
 実行:
-    python -m src.collectors.release_tags_collector                     # 未収集の対象すべて
+    python -m src.collectors.release_tags_collector                     # 既定の対象すべて
     python -m src.collectors.release_tags_collector --project qtbase    # 1 つだけ
-    python -m src.collectors.release_tags_collector --dry-run           # 書き込まずに確認
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ import logging
 import os
 import re
 import sys
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -36,15 +41,17 @@ import requests
 from dotenv import load_dotenv
 
 from src.config.path import DEFAULT_DATA_DIR
-from src.utils.constants import GERRIT_PROJECTS, NEW_COLLECT_TARGETS
+from src.utils.constants import GERRIT_PROJECTS, RELEASE_TAG_TARGETS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 OUTPUT_CSV = DEFAULT_DATA_DIR / "openstack_collected" / "major_releases_summary.csv"
-COLUMNS = ["project", "version", "release_date", "yaml_url"]
+# major_release_storage.py の表と同じ列（series はサイクル名で、タグから取る版には無いので空）
+COLUMNS = ["project", "series", "version", "release_date", "status", "yaml_url"]
 PAGE = 1000
+REQUEST_DELAY = 1.0   # 問い合わせの間隔（秒）。収集と同じ既定値（project_selection/design.md §6.2）
 
 
 def _session(spec: dict) -> requests.Session:
@@ -54,7 +61,11 @@ def _session(spec: dict) -> requests.Session:
     （既定 GERRIT_* = OpenStack、Qt は QT_GERRIT_*）。
     """
     s = requests.Session()
-    s.headers.update({"Accept": "application/json"})
+    # 収集（change_collector）と同じ User-Agent。Wikimedia は連絡先を求める（project_selection/design.md §6.2）
+    load_dotenv()
+    contact = os.getenv("CONTACT") or "academic study of code review"
+    s.headers.update({"Accept": "application/json",
+                      "User-Agent": f"review-priority-research/1.0 ({contact})"})
     if spec.get("auth", True):
         load_dotenv()
         prefix = spec.get("env", "GERRIT")
@@ -83,6 +94,8 @@ def fetch_tags(project_key: str) -> list[dict]:
 
     tags, start = [], 0
     while True:
+        # 登録表に delay があるホスト（Wikimedia は 8 秒）はそれに従う
+        time.sleep(float(spec.get("delay", REQUEST_DELAY)))
         url = f"{base}/projects/{name}/tags/?n={PAGE}&S={start}"
         r = sess.get(url, timeout=(30, 120))
         r.raise_for_status()
@@ -109,21 +122,30 @@ def extract_releases(project_key: str, tags: list[dict]) -> pd.DataFrame:
 
     rx = re.compile(pattern)
     first: dict[str, pd.Timestamp] = {}
+    undated: dict[str, list[str]] = {}   # 日付の取れなかったタグ（版 -> タグ名）
     for t in tags:
         name = str(t.get("ref", "")).replace("refs/tags/", "")
         m = rx.match(name)
         if not m:
             continue
-        # 注釈付きタグは tagger.date、軽量タグは created に日付が入る
-        raw = (t.get("tagger") or {}).get("date") or t.get("created")
-        date = pd.to_datetime(str(raw).replace(".000000000", ""), errors="coerce")
-        if pd.isna(date):
-            continue
         version = m.expand(series)
+        # 注釈付きタグは tagger.date、軽量タグは created に日付が入る（入らないこともある）
+        raw = (t.get("tagger") or {}).get("date") or t.get("created")
+        date = pd.to_datetime(str(raw).replace(".000000000", ""), errors="coerce") if raw else pd.NaT
+        if pd.isna(date):
+            undated.setdefault(version, []).append(name)
+            continue
         if version not in first or date < first[version]:
             first[version] = date
 
-    rows = [{"project": project_key, "version": v, "release_date": d.date().isoformat(),
+    # 日付のあるタグが 1 本も無い版は飛ばし、ログに残す（黙って抜けさせない）
+    skipped = {v: names for v, names in undated.items() if v not in first}
+    if skipped:
+        logger.warning(f"[{project_key}] 日付の取れないタグしかない版を飛ばしました（{len(skipped)} 版）: "
+                       + ", ".join(f"{v}（{'・'.join(n)}）" for v, n in sorted(skipped.items())))
+
+    rows = [{"project": project_key, "series": "", "version": v, "release_date": d.date().isoformat(),
+             "status": "released",
              "yaml_url": f"{spec['host'].rstrip('/')}/projects/"
                          f"{urllib.parse.quote(spec['path'], safe='')}/tags/"}
             for v, d in sorted(first.items(), key=lambda kv: kv[1])]
@@ -134,22 +156,27 @@ def extract_releases(project_key: str, tags: list[dict]) -> pd.DataFrame:
 
 
 def merge_into_csv(new: pd.DataFrame, csv_path: Path = OUTPUT_CSV) -> Path:
-    """既存 CSV に併合して書き戻す（同じ (project, version) は新しい方で上書き）。"""
+    """既存 CSV に併合して書き戻す。
+
+    new に含まれるプロジェクトの行は**すべて入れ替える**（古い版の行が残らないように）。
+    ほかのプロジェクトの行（OpenStack など）は、中身も並びも変えない。
+    """
     csv_path = Path(csv_path)
     if csv_path.exists():
-        old = pd.read_csv(csv_path)
-        merged = pd.concat([old, new], ignore_index=True)
-        merged = merged.drop_duplicates(subset=["project", "version"], keep="last")
+        old = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+        others = old[~old["project"].isin(new["project"].unique())]
+        merged = pd.concat([others, new.astype(str)], ignore_index=True)
+        cols = list(old.columns) + [c for c in new.columns if c not in old.columns]
     else:
         merged = new
-    merged = merged.sort_values(["project", "release_date"]).reset_index(drop=True)
+        cols = list(new.columns)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_csv(csv_path, index=False)
+    merged[cols].to_csv(csv_path, index=False, encoding="utf-8")
     logger.info(f"保存: {csv_path}（全 {len(merged)} 行）")
     return csv_path
 
 
-def collect(projects: list[str], dry_run: bool = False) -> pd.DataFrame:
+def collect(projects: list[str]) -> pd.DataFrame:
     frames = []
     for p in projects:
         if p not in GERRIT_PROJECTS:
@@ -160,22 +187,17 @@ def collect(projects: list[str], dry_run: bool = False) -> pd.DataFrame:
         logger.warning("対象がありません")
         return pd.DataFrame(columns=COLUMNS)
     new = pd.concat(frames, ignore_index=True)
-    if dry_run:
-        logger.info("dry-run のため書き込みません")
-        print(new.to_string(index=False))
-    else:
-        merge_into_csv(new)
+    merge_into_csv(new)
     return new
 
 
 def _parse_args():
     ap = argparse.ArgumentParser(description="Gerrit の tags API からリリース情報を収集する")
     ap.add_argument("--project", nargs="*", default=None,
-                    help=f"対象（既定 {NEW_COLLECT_TARGETS}）")
-    ap.add_argument("--dry-run", action="store_true", help="CSV に書き込まず内容だけ表示する")
+                    help=f"対象（既定 {RELEASE_TAG_TARGETS}）")
     return ap.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    collect(args.project or list(NEW_COLLECT_TARGETS), dry_run=args.dry_run)
+    collect(args.project or list(RELEASE_TAG_TARGETS))
