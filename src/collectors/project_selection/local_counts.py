@@ -14,6 +14,7 @@ from collections import Counter
 from pathlib import Path
 from typing import List, Tuple
 
+from src.collectors.project_selection import parallel
 from src.config.path import DEFAULT_DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -21,20 +22,12 @@ logger = logging.getLogger(__name__)
 COLLECTED_DIR = DEFAULT_DATA_DIR / "openstack_collected"
 
 
-def load(directory_name: str) -> Tuple[List[str], Counter]:
-    """収集済みディレクトリから (作成日の一覧, ブランチの分布) を返す。
-
-    作成日は "YYYY-MM-DD" の文字列。期間での絞り込みは呼び出し側が行う。
-    """
-    changes_dir = COLLECTED_DIR / directory_name / "changes"
-    if not changes_dir.is_dir():
-        raise FileNotFoundError(f"収集済みデータが見つかりません: {changes_dir}")
-
+def _load_chunk(paths: List[Path]) -> Tuple[List[str], Counter, int]:
+    """ファイルのかたまりを読み、(作成日の一覧, ブランチの分布, 読めなかった数) を返す。"""
     created_dates: List[str] = []
     branches: Counter = Counter()
     broken = 0
-
-    for path in changes_dir.glob("change_*.json"):
+    for path in paths:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -45,6 +38,29 @@ def load(directory_name: str) -> Tuple[List[str], Counter]:
         if created:
             created_dates.append(created)
             branches[data.get("branch") or "(不明)"] += 1
+    return created_dates, branches, broken
+
+
+def load(directory_name: str, workers: int = 1) -> Tuple[List[str], Counter]:
+    """収集済みディレクトリから (作成日の一覧, ブランチの分布) を返す。
+
+    作成日は "YYYY-MM-DD" の文字列。期間での絞り込みは呼び出し側が行う。
+    workers が 2 以上なら、ファイルをかたまりに分けて並列に読む（design.md §4.4）。結果は同じ。
+    """
+    changes_dir = COLLECTED_DIR / directory_name / "changes"
+    if not changes_dir.is_dir():
+        raise FileNotFoundError(f"収集済みデータが見つかりません: {changes_dir}")
+
+    created_dates: List[str] = []
+    branches: Counter = Counter()
+    broken = 0
+
+    paths = sorted(changes_dir.glob("change_*.json"))
+    for chunk_dates, chunk_branches, chunk_broken in parallel.map_files(
+            directory_name, paths, _load_chunk, (), workers):
+        created_dates.extend(chunk_dates)
+        branches.update(chunk_branches)
+        broken += chunk_broken
 
     if broken:
         logger.warning(f"{directory_name}: 読めなかったファイルが {broken} 件ありました")
