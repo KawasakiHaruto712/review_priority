@@ -126,7 +126,10 @@ def _resolve_encoders(project: str, device):
 def compute_version(project: str, version: str, spec: dict, *, changes, rel_df, encoders,
                     scaler, device, detector, all_prs, run_id: str) -> int:
     """1 版ぶんの IG を計算して保存する。返り値は書いた行数。"""
-    window, step, grid = detection.window_for(project), detection.step_for(project), detection.grid_for(project)
+    window, step = detection.window_for(project), detection.step_for(project)
+    # 格子サイズ N_v は版のサイクル長から決まる（距離×時期行列の分析 §4.2 と同じ式）
+    cs_R, ce_R, _prev = binning.target_cycles(rel_df, project, version)
+    grid = detection.grid_for(project, binning.cycle_days(cs_R, ce_R, detection.BIN_DAY_ALIGNED))
     base2 = constants.DETECTION_ROOT / project / constants.MODEL_NAME / version
     dpath = base2 / "daily_metrics.csv.gz"
     if not dpath.exists():
@@ -139,16 +142,16 @@ def compute_version(project: str, version: str, spec: dict, *, changes, rel_df, 
 
     distances = constants.resolve_axis(spec.get("distances"), grid)
     pspec = spec.get("positions")
-    target_pos = set(range(1, grid + 1)) if pspec in ("all", None) else {int(v) for v in pspec}
+    target_pos = set(constants.resolve_axis(pspec, grid))   # 位置も 0 始まり（p0 ＝ リリースの直前）
 
     # 距離×時期行列の分析と同じ手順で 日ごとの集合と位置を作る
-    cs_R, ce_R, _prev = binning.target_cycles(rel_df, project, version)
-    rec_start = binning.record_start(cs_R, window, step, grid, detection.RECORD_MARGIN_DAYS)
+    rec_start = binning.record_start(ce_R, window, step, grid, detection.RECORD_MARGIN_DAYS,
+                                     detection.BIN_DAY_ALIGNED)
     logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()} / "
                 f"レコード生成 {rec_start.date()} から / 距離 {len(distances)} × 位置 {len(target_pos)}）---")
     records = record_builder.build_records(changes, project, rec_start, ce_R, detector, all_prs, rel_df)
     day_sets = {s.t.date(): s for s in set_builder.build_sets(records, detection.MAX_SET_SIZE)}
-    pos_of = binning.position_of_days(cs_R, ce_R, grid, detection.BIN_DAY_ALIGNED)
+    pos_of = binning.position_of_days(ce_R, step, grid, detection.BIN_DAY_ALIGNED)
 
     probes = {k: probe_store.load_probes(constants.DETECTION_ROOT, project, window, k)
               for k in range(len(encoders))}
@@ -156,12 +159,12 @@ def compute_version(project: str, version: str, spec: dict, *, changes, rel_df, 
         logger.warning(f"スキップ（保存済み probe がありません）: {project} 窓長 {window} 日")
         return 0
 
-    eval_days = [d for d in sorted(day_sets) if d in pos_of and (pos_of[d] + 1) in target_pos]
+    eval_days = [d for d in sorted(day_sets) if d in pos_of and pos_of[d] in target_pos]
     logger.info(f"対象の評価日: {len(eval_days)} 日")
     rows, missing_probe = [], 0
     for n, X in enumerate(eval_days, 1):
         eval_set = day_sets[X]
-        p1 = pos_of[X] + 1
+        p0 = pos_of[X]
         feats_std = st.standardize_feats(scaler, eval_set.feats)
         used_seeds = set()
         for d in distances:
@@ -176,13 +179,13 @@ def compute_version(project: str, version: str, spec: dict, *, changes, rel_df, 
             st.freeze_for_gradients(head)
             prof = ig.day_profiles(encoders[seed][0], head, feats_std, eval_set.labels,
                                    constants.IG_STEPS, device)
-            rows += _rows(run_id, X, p1, d, seed, "probe", prof)
+            rows += _rows(run_id, X, p0, d, seed, "probe", prof)
             used_seeds.add(seed)
         # 汎用ヘッドは距離に依存しないので、その日に使われた seed の種類ぶんだけ（§5.5）
         for seed in sorted(used_seeds):
             prof = ig.day_profiles(encoders[seed][0], encoders[seed][1], feats_std,
                                    eval_set.labels, constants.IG_STEPS, device)
-            rows += _rows(run_id, X, p1, "general", seed, "general", prof)
+            rows += _rows(run_id, X, p0, "general", seed, "general", prof)
         if n % 10 == 0 or n == len(eval_days):
             logger.info(f"  {n}/{len(eval_days)} 日（{len(rows)} 行）")
     if missing_probe:

@@ -1,7 +1,7 @@
 """メジャーリリースの表（major_releases_summary.csv）の生成。
 
 OpenStack の公式のサイクル一覧（releases リポジトリの `data/series_status.yaml`）から、
-**サイクル単位**の表を作る。分析側 `load_release_dates` はこの CSV を、特徴量 days_to_major_release と
+**サイクル単位**の表を作る。分析側 `load_release_dates` はこの CSV を、特徴量 days_to_feature_release と
 分析期間の区切り（事前学習の締め・評価する版の期間）に使う。
 設計：src/collectors/README.md の「メジャーリリースの表」、pretrained_encoders/design.md §11.4。
 

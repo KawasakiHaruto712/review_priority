@@ -4,10 +4,12 @@
 したがってビンは **横軸（位置＝評価日をまとめる表示単位）を決めるためだけ**に使う。
 
 - `target_cycles`     : 対象リリース R と直前リリースのサイクル境界
-- `position_of_days`  : 対象サイクルを N 等分し {日付 -> 位置 p(0..N-1)} を返す（§4.3）
-- `record_start`      : レコード生成の開始日を「窓長 ＋ 刻み×(N−1) ＋ 余裕」で逆算（§4.4）
+- `cycle_days`        : 対象サイクルの長さ（日）。格子サイズ N_v = ⌈サイクル長 ÷ 刻み⌉ の元（§4.2）
+- `position_of_days`  : リリースの日 ce から刻みずつさかのぼり {日付 -> 位置 p(0..N_v-1)} を返す（§4.3）
+- `record_start`      : レコード生成の開始日を「最初の評価日 − 窓長 − 刻み×(N_v−1) − 余裕」で逆算（§4.4）
 
-旧方式にあった「直前リリースを N 等分してマイナス番号を振る仕組み」は廃止した
+列の幅は刻みで固定し、列の数 N_v を版ごとに変える（2026-10-15 改訂。旧版はサイクルを N 等分していた）。
+旧方式にあった「直前リリースを N 等分してマイナス番号を振る仕組み」も廃止した
 （学習期間を日付で切り出すため、前サイクルに届いても番号付けが不要）。
 境界は 0 時に揃える（`BIN_DAY_ALIGNED`）。リリース日程は `_drop_release_anomalies` で異常エントリを除外。
 """
@@ -54,60 +56,43 @@ def target_cycles(rel_df: pd.DataFrame, project: str, version: str):
     return cs_R.to_pydatetime(), ce_R.to_pydatetime(), (cs_prev.to_pydatetime() if cs_prev is not None else None)
 
 
-def bin_edges(cs: datetime, ce: datetime, bin_count: int, day_aligned: bool) -> list[datetime]:
-    """[cs, ce] を bin_count 等分する境界（bin_count+1 個）。day_aligned なら各境界を 0 時に丸める。
-
-    丸めで境界が潰れないよう、単調増加（前より最低 1 日後）を保証する。
-    """
-    span = (ce - cs).total_seconds()
-    edges = [cs + timedelta(seconds=span * j / bin_count) for j in range(bin_count + 1)]
-    if not day_aligned:
-        return edges
-    snapped: list[datetime] = []
-    for e in edges:
-        m = _midnight(e)
-        if snapped and m <= snapped[-1]:
-            m = snapped[-1] + timedelta(days=1)  # 単調増加を保証
-        snapped.append(m)
-    return snapped
+def _day_of(dt: datetime, day_aligned: bool):
+    """リリース日時を日付にする。day_aligned なら最も近い 0 時に丸め、そうでなければ切り捨てる。"""
+    return (_midnight(dt) if day_aligned else dt).date()
 
 
-def _which_bin(t: datetime, edges: list[datetime]) -> int | None:
-    """t が edges のどの区間 [edges[j], edges[j+1]) に入るか（0..len-2）。範囲外は None。"""
-    if t < edges[0] or t >= edges[-1]:
-        return None
-    for j in range(len(edges) - 1):
-        if edges[j] <= t < edges[j + 1]:
-            return j
-    return None
+def cycle_days(cs_R: datetime, ce_R: datetime, day_aligned: bool) -> int:
+    """対象サイクルの長さ（日）＝ ce − cs（design.md §4.2）。格子サイズ N_v はここから決める。"""
+    return (_day_of(ce_R, day_aligned) - _day_of(cs_R, day_aligned)).days
 
 
-def position_of_days(cs_R: datetime, ce_R: datetime, grid: int, day_aligned: bool) -> dict:
-    """対象サイクルを grid 等分し、{日付 -> 位置 p（0..grid-1）} を返す（design.md §4.3）。
+def position_of_days(ce_R: datetime, step_days: int, grid: int, day_aligned: bool) -> dict:
+    """リリースの日 ce から刻みずつさかのぼり、{日付 -> 位置 p（0..grid-1）} を返す（design.md §4.3）。
 
+    評価日は [ce − 刻み×grid, ce − 1] の 刻み×grid 日。位置は p = ⌊(ce − 1 − x) ÷ 刻み⌋ で、
+    p = 0 がリリースの直前の刻み日数分。どの列も刻みと同じ日数になる（いちばん遠い列は
+    直前のリリースの日より前の日を含むことがある）。
     位置は「評価日をまとめる表示単位」であり、学習には関与しない。
     キーは date（day_sets のキーと合わせる）。
     """
-    edges = bin_edges(cs_R, ce_R, grid, day_aligned)
+    ce = _day_of(ce_R, day_aligned)
     out: dict = {}
-    t = edges[0]
-    one = timedelta(days=1)
-    while t < edges[-1]:
-        j = _which_bin(t, edges)
-        if j is not None:
-            out[t.date()] = j
-        t += one
+    for back in range(1, step_days * grid + 1):      # back = ce − x（1 〜 刻み×grid 日）
+        out[ce - timedelta(days=back)] = (back - 1) // step_days
     return out
 
 
-def record_start(cs_R: datetime, window_days: int, step_days: int, grid: int,
-                 margin_days: int = 0) -> datetime:
+def record_start(ce_R: datetime, window_days: int, step_days: int, grid: int,
+                 margin_days: int = 0, day_aligned: bool = True) -> datetime:
     """レコード生成の開始日を逆算する（design.md §4.4）。
 
-    最古の学習データが要るのは「サイクル初日 × 最大距離 d = grid−1」の組み合わせ：
-        学習期間の開始 = 最初の評価日 − 刻み×(grid−1) − 窓長
-    ＝ 遡り量は「窓長 ＋ 刻み×(grid−1)」（既定 7 + 7×25 = 182 日 ≒ 1 サイクル）。余裕を足して返す。
+    最古の学習データが要るのは「いちばん遠い列の最初の評価日 × 最大距離 d = grid−1」の組み合わせ：
+        最初の評価日   = ce − 刻み×grid（直前のリリースの日以前のこともある。§4.3）
+        学習期間の開始 = 最初の評価日 − 窓長 − 刻み×(grid−1)
+    （例：窓長・刻み 7 日、grid 26 なら ce から 182 + 182 日）。余裕を足して返す。
     旧方式の「直前リリース日から」では足りない（nova 26.0.0 で 7 日不足）ため、式で逆算する。
     """
-    back = window_days + step_days * (grid - 1) + margin_days
-    return cs_R - timedelta(days=back)
+    ce = _day_of(ce_R, day_aligned)
+    back = step_days * grid + window_days + step_days * (grid - 1) + margin_days
+    start = ce - timedelta(days=back)
+    return datetime(start.year, start.month, start.day)

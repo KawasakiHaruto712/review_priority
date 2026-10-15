@@ -4,6 +4,8 @@ design.md 参照。事前学習エンコーダ＋汎用ヘッド・データ構�
 `pretrained_encoders` から import して使う（本ディレクトリでは事前学習しない）。
 ここに置くのは concept_drift 固有の設定（ビン分割・load 対象・指標・図・検定）。
 """
+import math
+
 from src.config.path import DEFAULT_DATA_DIR
 
 # ── 出力 ─────────────────────────────────────────────
@@ -45,8 +47,8 @@ def versions_for(project: str) -> list[str]:
 # 窓長は PROJECTS の "window_days"（プロジェクト別）。下の WINDOW_DAYS はその既定値（未設定時）。
 WINDOW_DAYS = 7              # 窓長の既定値（PROJECTS に window_days が無い project 用）
 DISTANCE_STEP_DAYS = None    # 距離1段ぶんの日数。None なら その project の窓長と同じ（独立指定も可）
-NOMINAL_CYCLE_DAYS = 182     # 基準サイクル長（約半年）。格子サイズの自動決定に使う
-GRID_SIZE = None             # 距離の行数＝位置の列数。None なら 基準サイクル長 ÷ 刻み
+# 格子サイズ（距離の行数＝位置の列数）は定数を持たず、版ごとに ⌈サイクル長 ÷ 刻み⌉ で決める（grid_for）。
+# 2026-10-15 に NOMINAL_CYCLE_DAYS（182）・GRID_SIZE を廃止（列の幅を刻みで固定するため。design.md §4.2）。
 BIN_DAY_ALIGNED = True       # 位置の境界を 0 時に揃える
 MAX_SET_SIZE = None          # 1 集合の最大 Change 数（pretrained_encoders と一致させる。旧版は 512。None で無制限）
 RECORD_MARGIN_DAYS = 7       # レコード生成範囲の余裕（§4.4）
@@ -62,14 +64,13 @@ def step_for(project: str) -> int:
     return window_for(project) if DISTANCE_STEP_DAYS is None else int(DISTANCE_STEP_DAYS)
 
 
-def grid_for(project: str) -> int:
-    """その project の格子サイズ N（距離の行数＝位置の列数）。未指定なら 基準サイクル長 ÷ 刻み。
+def grid_for(project: str, cycle_len_days: int) -> int:
+    """その版の格子サイズ N_v（距離の行数＝位置の列数）＝ ⌈サイクル長 ÷ 刻み⌉（design.md §4.2）。
 
-    既定の窓長だと：7日→26 / 14日→13 / 30日→6 / 60日→3。
+    cycle_len_days は binning.cycle_days の値。列の幅は刻みで固定し、列の数が版ごとに変わる。
+    例（刻み 7 日）：182 日→26 / 192 日→28 / 28 日→4 / 406 日→58。
     """
-    if GRID_SIZE is not None:
-        return int(GRID_SIZE)
-    return max(1, round(NOMINAL_CYCLE_DAYS / step_for(project)))
+    return max(1, math.ceil(cycle_len_days / step_for(project)))
 
 
 # ── 事前学習エンコーダの読み込み（§6.1） ─────────────────────
@@ -101,7 +102,7 @@ PERMUTATION_N = 1000
 SIGNIFICANCE = 0.05
 
 # ── 図（§10） ────────────────────────────────────────
-# N×N ヒートマップ（既定 26×26。色のみ）。数値表示は既定 False（後から切替可）。
+# N_v×N_v ヒートマップ（版ごとに大きさが違う。刻み 7 日・サイクル約半年なら約 26×26。色のみ）。数値表示は既定 False（後から切替可）。
 HEATMAP_SHOW_CELL_VALUES = False
 HEATMAP_VALUE_FMT = "{:.2f}"
 PLOT_METRICS = ["auc"]       # ヒートマップを描く指標（既定 AUC のみ）。CSV/json は全指標を保存。
