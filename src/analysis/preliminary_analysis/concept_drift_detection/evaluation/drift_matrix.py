@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class MatrixResult:
     """1 指標の d×p 行列。各配列は [距離 d(0始まり), 位置 p(0始まり)] の 2 次元。
 
-    bin_count は格子サイズ N（距離の行数 ＝ 位置の列数。design.md §4.2）。
+    bin_count はその版の格子サイズ N_v（距離の行数 ＝ 位置の列数。版ごとに違う。design.md §4.2）。
     距離 d は 0 始まりで、**d=0 が窓長の調査の fresh 窓**に対応する。
 
     value   : セル値（日ごとの seed 中央値を、位置の日数で平均したもの。§8.1）
@@ -113,7 +113,7 @@ def _daily_row(day, distance, seed_idx: int, position: int,
                n_pos_e: int, n_neg_e: int, n_pos_t: int, n_neg_t: int,
                missing: bool, reason: str, mvals: dict | None) -> dict:
     """(評価日, 距離, seed) ごとの指標行（保存用。§10）。distance='general' は汎用ヘッド。"""
-    row = {"day": day.isoformat(), "distance": distance, "seed": seed_idx, "position": position + 1,
+    row = {"day": day.isoformat(), "distance": distance, "seed": seed_idx, "position": position,
            "n_pos_eval": n_pos_e, "n_neg_eval": n_neg_e,
            "n_pos_train": n_pos_t, "n_neg_train": n_neg_t,
            "missing": int(missing), "missing_reason": reason}
@@ -129,9 +129,9 @@ def build_matrices(day_sets: dict, eval_dates: list, positions: dict, *,
     """日次スライド学習で probe / general / diff の行列（指標ごと）を構築する（§4, §6.2）。
 
     day_sets   : {日付 -> TSet}（学習に遡る範囲＋評価期間を含む。1 日 1 集合）
-    eval_dates : 評価日の列（対象サイクルの全日）
-    positions  : {日付 -> 位置 p（0..grid-1）}（binning.position_of_days の出力）
-    grid       : 格子サイズ N（距離の行数 ＝ 位置の列数）
+    eval_dates : 評価日の列（[ce − 刻み×grid, ce − 1] のうち集合がある日。§4.3）
+    positions  : {日付 -> 位置 p（0..grid-1。p=0 がリリースの直前）}（binning.position_of_days の出力）
+    grid       : その版の格子サイズ N_v（距離の行数 ＝ 位置の列数。版ごとに違う。§4.2）
     window_days: 学習に使う期間の長さ（日）
     step_days  : 距離 1 段ぶんの日数
     encoders   : [(凍結エンコーダ, 汎用ヘッド), ...]（seed ごと。§6.1）

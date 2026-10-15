@@ -104,8 +104,8 @@ def targets_for(project: str) -> dict:
 
 
 def resolve_axis(spec, grid: int) -> list[int]:
-    """"all" または明示リストを 0 始まりの index 列にする。距離は 0 始まり、位置は **1 始まり**で
-    指定させるので、位置側は呼び出し元で調整する。"""
+    """"all" または明示リストを 0 始まりの index 列にする。距離も位置も 0 始まりで指定する
+    （d0 ＝ 直近の窓、p0 ＝ リリースの直前）。"""
     if spec == "all" or spec is None:
         return list(range(grid))
     return [int(v) for v in spec]

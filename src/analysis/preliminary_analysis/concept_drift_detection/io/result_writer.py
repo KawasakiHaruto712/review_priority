@@ -16,11 +16,11 @@ from src.analysis.preliminary_analysis.concept_drift_detection.evaluation.drift_
 def _value_df(value: np.ndarray) -> pd.DataFrame:
     """四角行列を DataFrame に（行=距離 d、列=位置 p）。
 
-    距離は **0 始まり（d0..）**＝ d0 が窓長の調査の fresh 窓。位置は 1 始まり（p1..）で図と一致。
+    距離は **0 始まり（d0..）**＝ d0 が窓長の調査の fresh 窓。位置も 0 始まり（p0..）＝ p0 がリリースの直前。
     """
     n = value.shape[0]
     return pd.DataFrame(value, index=[f"d{d}" for d in range(n)],
-                        columns=[f"p{p}" for p in range(1, value.shape[1] + 1)])
+                        columns=[f"p{p}" for p in range(value.shape[1])])
 
 
 def write_matrix(result: MatrixResult, meta: dict, out_dir: Path) -> None:
@@ -32,7 +32,7 @@ def write_matrix(result: MatrixResult, meta: dict, out_dir: Path) -> None:
     _value_df(result.value).to_csv(out_dir / "drift_matrix.csv")
 
     # json: 行列＋ばらつき（seed間IQR／日間std）＋有効日数＋各反復の生スコア＋メタ
-    per_repeat = {f"d{d}_p{p + 1}": v for (d, p), v in result.per_repeat.items()}
+    per_repeat = {f"d{d}_p{p}": v for (d, p), v in result.per_repeat.items()}
     payload = {
         "meta": {**meta, "metric": result.metric, "bin_count": result.bin_count},
         "value": _value_df(result.value).where(pd.notna(result.value), None).values.tolist(),
@@ -45,12 +45,12 @@ def write_matrix(result: MatrixResult, meta: dict, out_dir: Path) -> None:
     with open(out_dir / "drift_matrix.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    # 距離固定の位置別スコア（long 形式）。distance は 0 始まり、position は 1 始まり（図と一致）。
+    # 距離固定の位置別スコア（long 形式）。distance も position も 0 始まり（図と一致）。
     # ばらつきは 2 種類を並べる（§9）：iqr＝モデル間の不一致、day_std＝日によるブレ。
     rows = []
     for d in range(result.bin_count):
         for p in range(result.bin_count):
-            rows.append({"distance": d, "position": p + 1,
+            rows.append({"distance": d, "position": p,
                          "value": _cell(result.value, d, p),
                          "iqr": _cell(result.iqr, d, p),
                          "day_std": _cell(result.day_std, d, p),
@@ -122,7 +122,7 @@ def write_daily_metrics(rows: list[dict], meta: dict, out_dir: Path) -> Path | N
     with open(out_dir / "daily_metrics_meta.json", "w", encoding="utf-8") as f:
         json.dump({**meta, "columns": list(df.columns), "n_rows": len(df),
                    "note": "評価日ごと（Δ=1）の指標。distance は 0 始まり（d0=窓長の調査の fresh 窓）、"
-                           "distance='general' は汎用ヘッド。position は 1 始まり。"
+                           "distance='general' は汎用ヘッド。position は 0 始まり（p0=リリースの直前）。"
                            "位置のまとめ方を変えて再集計できる。"},
                   f, ensure_ascii=False, indent=2)
     return path

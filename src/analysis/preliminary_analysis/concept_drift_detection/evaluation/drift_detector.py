@@ -55,8 +55,8 @@ def detect_drift(result: MatrixResult, n_perm: int, alpha: float, seed: int = 0)
         cnt = sum(1 for _ in range(n_perm)
                   if _changepoint_stat(rng.permutation(scores))[0] >= obs)
         p_value = (1 + cnt) / (n_perm + 1)
-        # 報告する位置は 1 始まり（図/CSV と一致。positions は内部 0 始まりの列 index なので +1）
-        change_position = positions[k] + 1 if k is not None else None
+        # 報告する位置は 0 始まりの列 index のまま（図/CSV と一致。p0 ＝ リリースの直前）
+        change_position = positions[k] if k is not None else None
         by_distance[d] = {"p_value": p_value, "statistic": obs,
                           "change_position": change_position, "n_positions": len(pts)}
         min_p = min(min_p, p_value)

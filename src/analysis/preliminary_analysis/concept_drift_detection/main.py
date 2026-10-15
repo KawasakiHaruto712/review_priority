@@ -100,27 +100,31 @@ def analyze(changes, rel_df, project, versions, out_root, detector=None):
 
     metric_names = metrics.metric_columns(constants.K_LIST)
     summary = {m: [] for m in constants.PLOT_METRICS}
-    # 窓長・刻み・格子サイズは project ごと（§4.2。窓長の調査で選んだ最良窓に基づく）
+    # 窓長・刻みは project ごと（§4.2。窓長の調査で選んだ最良窓に基づく）。格子サイズは版ごと
     window = constants.window_for(project)
     step = constants.step_for(project)
-    grid = constants.grid_for(project)
     # probe は版に依存しないので、プロジェクト単位で集めて最後に 1 回書く（§6.7）
     probes = probe_store.ProbeStore(out_root, project, window) if constants.SAVE_PROBES else None
-    logger.info(f"格子: {grid}×{grid}（窓長 {window} 日・刻み {step} 日・スパン {step * (grid - 1)} 日）")
     for version in versions:
         try:
             cs_R, ce_R, _cs_prev = binning.target_cycles(rel_df, project, version)
         except ValueError as e:
             logger.warning(f"スキップ [{project} {version}]: {e}")
             continue
+        # 格子サイズ N_v ＝ ⌈サイクル長 ÷ 刻み⌉（列の幅は刻みで固定。§4.2）
+        cycle_len = binning.cycle_days(cs_R, ce_R, constants.BIN_DAY_ALIGNED)
+        grid = constants.grid_for(project, cycle_len)
+        logger.info(f"格子: {grid}×{grid}（サイクル {cycle_len} 日・窓長 {window} 日・刻み {step} 日・"
+                    f"評価 {step * grid} 日）")
         # 3. レコード生成（範囲は §4.4 で逆算）→ 日ごとの集合 → 位置（列）の割当
-        rec_start = binning.record_start(cs_R, window, step, grid, constants.RECORD_MARGIN_DAYS)
+        rec_start = binning.record_start(ce_R, window, step, grid, constants.RECORD_MARGIN_DAYS,
+                                         constants.BIN_DAY_ALIGNED)
         logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()} / "
                     f"レコード生成 {rec_start.date()} から）---")
         records = record_builder.build_records(changes, project, rec_start, ce_R,
                                                detector, all_prs, rel_df)
         day_sets = {s.t.date(): s for s in set_builder.build_sets(records, constants.MAX_SET_SIZE)}
-        positions = binning.position_of_days(cs_R, ce_R, grid, constants.BIN_DAY_ALIGNED)
+        positions = binning.position_of_days(ce_R, step, grid, constants.BIN_DAY_ALIGNED)
         eval_dates = [d for d in sorted(day_sets) if d in positions]
         logger.info(f"評価日数: {len(eval_dates)} / 全日集合: {len(day_sets)}")
 

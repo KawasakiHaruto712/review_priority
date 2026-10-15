@@ -26,7 +26,7 @@ PROJECTS = {
     "swift":    {"cutoff": "2.29.0", "versions": ["2.30.0", "2.31.0", "2.32.0", "2.33.0", "2.34.0"]},
 }
 
-# 特徴量 days_to_major_release の「次のリリース」は、サイクル単位のリリースの表
+# 特徴量 days_to_feature_release（次の機能リリースまでの日数。旧名 days_to_major_release）の「次のリリース」は、サイクル単位のリリースの表
 # （major_releases_summary.csv）から日付の順に探す（design.md §11.4）。swift も公式の日付に揃えたので、
 # 旧版にあった RELEASE_LEVEL（swift だけ X.Y.0 を区切りとする設定）は廃止した。
 

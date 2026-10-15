@@ -81,13 +81,16 @@ def add_lines_info_to_dataframe(df: pd.DataFrame, project_name: str) -> pd.DataF
     
     return df_with_lines
 
-def calculate_days_to_major_release(
+def calculate_days_to_feature_release(
     analysis_time: datetime,
     component_name: str,
     all_releases_df: pd.DataFrame,
 ) -> float:
     """
-    指定された分析時点から、対象コンポーネントの次のリリース日までの残り日数を計算
+    指定された分析時点から、対象コンポーネントの次の機能リリース（feature release）の日までの残り日数を計算
+
+    機能リリース＝新しい機能を含む定期的なリリース（Qt の x.y.0、MediaWiki の 1.N.0、Go の go1.N、
+    OpenStack のサイクルなど）。2026-10-15 に旧名 calculate_days_to_major_release から改名した。
 
     all_releases_df はサイクル単位のリリースの表（major_releases_summary.csv。1 サイクル 1 行。
     作り方は src/collectors/README.md の「メジャーリリースの表」）。その component の
