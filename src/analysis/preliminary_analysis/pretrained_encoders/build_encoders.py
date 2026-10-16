@@ -7,8 +7,8 @@
   4. N 個（seed 違い）のエンコーダ＋汎用ヘッドを事前学習して保存
 
 実行:
-    python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders                    # nova を N_REPEATS 個
-    python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders --project neutron  # 対象プロジェクト指定
+    python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders                    # PROJECTS の 6 件を順に、各 N_REPEATS 個
+    python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders --project qtbase   # 対象プロジェクト指定（OpenStack も名前で指定可）
     python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders --n 3              # 個数を指定
 """
 from __future__ import annotations
@@ -38,9 +38,9 @@ def _resolve_cutoff(rel_df: pd.DataFrame, project: str):
     ラベル = PROJECTS[project]["cutoff"] の版。日付はその版の release_date を
     major_releases_summary.csv（rel_df）から引く（日付は二重管理しない）。
     """
-    cfg = constants.PROJECTS.get(project)
+    cfg = constants.project_config(project)
     if cfg is None:
-        raise ValueError(f"未対応のプロジェクトです（PROJECTS に定義してください）: {project}")
+        raise ValueError(f"未対応のプロジェクトです（PROJECTS か OPENSTACK_PROJECTS に定義してください）: {project}")
     label = cfg["cutoff"]
     row = rel_df[(rel_df["project"] == project) & (rel_df["version"] == label)]
     if row.empty:
@@ -49,14 +49,14 @@ def _resolve_cutoff(rel_df: pd.DataFrame, project: str):
     return dt, label
 
 
-def build_and_save(project: str = None, n: int | None = None, seed_indices=None) -> None:
+def build_and_save(project: str, n: int | None = None, seed_indices=None) -> None:
     """指定プロジェクトの共有エンコーダ＋汎用ヘッドを作って保存する。
 
-    project: 対象プロジェクト（既定 constants.TARGET_PROJECT="nova"）。PROJECTS に定義が必要。
+    project: 対象プロジェクト（必須）。PROJECTS か OPENSTACK_PROJECTS に定義が必要。
+             旧版の既定 constants.TARGET_PROJECT="nova" は廃止した（design.md §7）。
     seed_indices を渡すと、その index(k) だけを作る（不足分の追加ビルド用）。
     未指定なら 0..n-1（n 既定 N_REPEATS）。
     """
-    project = constants.TARGET_PROJECT if project is None else project
     if seed_indices is None:
         n = constants.N_REPEATS if n is None else n
         seed_indices = list(range(n))
@@ -96,12 +96,15 @@ def build_and_save(project: str = None, n: int | None = None, seed_indices=None)
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="事前学習エンコーダ＋汎用ヘッドの作成・保存")
-    ap.add_argument("--project", default=constants.TARGET_PROJECT,
-                    help=f"対象プロジェクト（既定 {constants.TARGET_PROJECT}）")
+    ap.add_argument("--project", default=None,
+                    help="対象プロジェクト（未指定なら constants.PROJECTS の全プロジェクトを順に。'all' も同義）")
     ap.add_argument("--n", type=int, default=None,
                     help="作るエンコーダ数（既定 constants.N_REPEATS）")
     args = ap.parse_args()
-    build_and_save(project=args.project, n=args.n)
+    projects = list(constants.PROJECTS) if args.project in (None, "all") else [args.project]
+    for project in projects:
+        logger.info(f"===== プロジェクト: {project} =====")
+        build_and_save(project=project, n=args.n)
 
 
 if __name__ == "__main__":

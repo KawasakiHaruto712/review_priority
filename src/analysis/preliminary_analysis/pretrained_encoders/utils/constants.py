@@ -12,12 +12,24 @@ OUTPUT_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "pretrain
 # ── 事前学習の対象・締め切り（design.md §1, §7） ─────────────
 # 事前学習データ = プロジェクト開始 〜 そのプロジェクトの cutoff リリース日まで。
 # プロジェクトごとに独立の共有モデルを作る（per-release では作らない）。
-TARGET_PROJECT = "nova"            # デフォルトの対象プロジェクト
 # プロジェクト別設定：project -> {"cutoff": 版ラベル, "versions": チューニング5版}。
 # cutoff は事前学習の締め（サイクル開始）。cutoff の「日付」は major_releases_summary.csv から実行時に引く
 # （日付は二重管理しない）。versions は下流のチューニング対象（本ディレクトリでは cutoff のみ使用）。
-# 同じ表を lookback_window/constants.py にも別途保持する（各ディレクトリ自己完結。重複は許容）。
+# 同じ表を lookback_window・concept_drift_detection の constants にも別途保持する（各ディレクトリ自己完結。重複は許容）。
+# PROJECTS は今回の論文の 6 件（2025 年末までの直近 5 機能リリース。design.md §1）。何も指定しなければこの 6 件を回す。
+# 2026-10-15 に OpenStack 6 件から切り替え、旧 TARGET_PROJECT（既定の 1 件 "nova"）は廃止した（§7）。
 PROJECTS = {
+    "qtbase":                   {"cutoff": "6.5.0", "versions": ["6.6.0", "6.7.0", "6.8.0", "6.9.0", "6.10.0"]},
+    "qtcreator":                {"cutoff": "13.0.0", "versions": ["14.0.0", "15.0.0", "16.0.0", "17.0.0", "18.0.0"]},
+    "wikimedia_mediawiki_core": {"cutoff": "1.40.0", "versions": ["1.41.0", "1.42.0", "1.43.0", "1.44.0", "1.45.0"]},
+    "qtdeclarative":            {"cutoff": "6.5.0", "versions": ["6.6.0", "6.7.0", "6.8.0", "6.9.0", "6.10.0"]},
+    "go":                       {"cutoff": "go1.20", "versions": ["go1.21", "go1.22", "go1.23", "go1.24", "go1.25"]},
+    "typo3_cms":                {"cutoff": "13.0.0", "versions": ["13.1.0", "13.2.0", "13.3.0", "13.4.0", "14.0.0"]},
+}
+
+# OpenStack 6 件（以前の対象）。今回の論文では分析しないが、設定は残す（design.md §7）。
+# 名前を指定したときだけ引ける（project_config は PROJECTS → OPENSTACK_PROJECTS の順に探す）。
+OPENSTACK_PROJECTS = {
     "nova":     {"cutoff": "25.0.0", "versions": ["26.0.0", "27.0.0", "28.0.0", "29.0.0", "30.0.0"]},
     "neutron":  {"cutoff": "20.0.0", "versions": ["21.0.0", "22.0.0", "23.0.0", "24.0.0", "25.0.0"]},
     "cinder":   {"cutoff": "20.0.0", "versions": ["21.0.0", "22.0.0", "23.0.0", "24.0.0", "25.0.0"]},
@@ -25,6 +37,11 @@ PROJECTS = {
     "keystone": {"cutoff": "21.0.0", "versions": ["22.0.0", "23.0.0", "24.0.0", "25.0.0", "26.0.0"]},
     "swift":    {"cutoff": "2.29.0", "versions": ["2.30.0", "2.31.0", "2.32.0", "2.33.0", "2.34.0"]},
 }
+
+
+def project_config(project: str) -> dict | None:
+    """その project の設定（PROJECTS → OPENSTACK_PROJECTS の順に探す）。無ければ None。"""
+    return PROJECTS.get(project) or OPENSTACK_PROJECTS.get(project)
 
 # 特徴量 days_to_feature_release（次の機能リリースまでの日数。旧名 days_to_major_release）の「次のリリース」は、サイクル単位のリリースの表
 # （major_releases_summary.csv）から日付の順に探す（design.md §11.4）。swift も公式の日付に揃えたので、

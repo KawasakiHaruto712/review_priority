@@ -13,15 +13,19 @@
 - label ロジックは `pretrained_encoders`（基点）から import。
 
 ## 2. 対象・データ
-- **複数プロジェクト対応**：nova / neutron / cinder / glance / keystone / swift。**プロジェクトごとに「最新5メジャー版」**をチューニング対象とする（`PROJECTS`＝§12。データ末尾 2024-12-31 基準）。
-  - nova=26–30 / neutron=21–25 / cinder=21–25 / glance=25–29 / keystone=22–26（.0.0）／ **swift=2.30–2.34**（swift は `2.Y.0` で刻む）。
-  - nova 型5プロジェクトはリリース日がほぼ一致（2022-10〜2024-10）。swift のみ数週ズレ。
-- 評価は各リリースの**サイクル全日を 1 日ずつ**（5 サイクル、約 180 日/サイクル）。
-- 事前学習エンコーダ／汎用ヘッドは**その project 用の共有モデル**（`pretrained_encoders`、cutoff は project 別＝`PROJECTS`。例 nova=25.0.0 / swift=2.29.0）。
+- **複数プロジェクト対応**：今回の論文の 6 件（qtbase / qtcreator / wikimedia_mediawiki_core / qtdeclarative / go / typo3_cms。2026-10-15 に OpenStack 6 件から切り替えた）。
+  **プロジェクトごとに「2025 年末までの直近 5 機能リリース」**をチューニング対象とする（`PROJECTS`＝§12。締めと 5 版は `pretrained_encoders/design.md` §1 の表）。
+  - 版の単位は機能リリース（新しい機能を含む定期的なリリース）。1 版の長さは qtbase・qtdeclarative・mediawiki・go が約 6 か月、qtcreator が約 4 か月、
+    typo3_cms は 1〜13 か月でばらつく（13.4.0 は 28 日、14.0.0 は 406 日）。
+  - OpenStack 6 件（以前の対象）：nova=26–30 / neutron=21–25 / cinder=21–25 / glance=25–29 / keystone=22–26（.0.0）／ swift=2.30–2.34。
+    設定は `OPENSTACK_PROJECTS` に移して残し、名前を指定したときだけ回る（§12）。
+- 評価は各リリースの**サイクル全日を 1 日ずつ**（5 サイクル）。
+- 事前学習エンコーダ／汎用ヘッドは**その project 用の共有モデル**（`pretrained_encoders`、cutoff は project 別＝`PROJECTS`。例 qtbase=6.5.0 / go=go1.20）。
 - **デフォルトは `PROJECTS` の全プロジェクトを順に実行**（`--project` 未指定時）。`--project <name>` で単一に絞れる（`all` も全実行）。関数（`run`/`recompute`/`draw`/`rank`）は単一 project を引数で受ける。
 
 ## 3. 計測点・集合の単位
 - 計測点 T ＝ **毎日 0 時**（1 日 1 スナップショット）。各 T のアクティブな Change 群を 1 集合とする（定義・構築コードは `pretrained_encoders` から import）。
+- **2026-10-15 から、集合・ラベル・文脈の作りは `pretrained_encoders/design.md` §12 に従う**（その日の途中に作られた・復活した Change も入れ、予測の時点・ラベルの窓・見える文脈を Change ごとに決める）。
 - 実測（30.0.0）：1 日あたり Open 約 260 Change・そのうち Δ以内レビュー（正例）約 4 件（≈1.5%）。**正例が薄いのは仕様**（狭い定義×放置 Change 込み全 Open×日次の帰結）。
 
 ## 4. 学習窓スイープ（本分析の主軸）
@@ -91,6 +95,9 @@
   - **値**＝日ごとに seed 中央値 → 評価日で平均。
   - **標準偏差**＝日ごとに seed 中央値 → **その日次系列の評価日方向の標準偏差**（ddof=1）。＝**期間内の AUC のブレ**（平均が良い窓が本当に安定して良いのかを見る）。値と同じ土台（日ごとに seed 中央値を取った系列）で算出。
 - **右端に「Ave」列**＝**全リリースの全評価日をまとめた 平均 ± 標準偏差**（版を等重みにせず、**全評価日を等重み**で算出。日数が多い版ほど自然に効く）。＝どの窓長が平均的に良いか＝本分析の主結論。
+  - **限界（typo3_cms）**：版の長さが 1〜13 か月でばらつくため、評価日 665 日のうち 14.0.0 が 406 日（約 6 割）を占め、
+    Ave、したがって窓長の選択がほぼ 14.0.0 の成績で決まる（13.4.0 は 28 日で約 4%）。ほかの 5 件は 1 版の長さがそろっていて、各版の重みは約 2 割ずつ。
+    **判定の決まり（① Ave → ② std）は変えず、限界として論文に書く**（2026-10-15 本人判断。版ごとの平均を等重みで平均する案は採らない）。
 - **CSV（`summary_<metric>.csv`）**：各版の値の隣に std 列を置く（`window, 26.0.0, 26.0.0_std, …, 30.0.0, 30.0.0_std, Ave, Ave_std`）。欠測量は従来どおり別ファイル `summary_<metric>_missing.csv`。
 - `--metric` で表の指標も切替（既定 auc）。
 
@@ -119,9 +126,12 @@
 - **保存先**：`data/analysis/preliminary_analysis/lookback_window/<project>/summary/rank_<metric>.csv`（§11.1 の `summary_<metric>.csv` と並ぶ）。
 
 ## 12. パラメータ（constants に集約）
-- 本ディレクトリ `constants.py` に：窓長 `WINDOWS_DAYS=[1,3,7,14,30,60]`、`REVIEW_HORIZON_DAYS=1`（＝Δ）、top-k の `K_LIST=[5,10,20]`（＋正例数）、欠測ガード、`PLOT_METRIC_DEFAULT="auc"`、seed・集約、既定 `PROJECT="nova"` 等。`pretrained_encoders` の保存先・load API を参照。
+- 本ディレクトリ `constants.py` に：窓長 `WINDOWS_DAYS=[1,3,7,14,30,60]`、`REVIEW_HORIZON_DAYS=1`（＝Δ）、top-k の `K_LIST=[5,10,20]`（＋正例数）、欠測ガード、`PLOT_METRIC_DEFAULT="auc"`、seed・集約 等（参考の代表 `PROJECT="nova"` はどこからも使っていなかったので 2026-10-15 に廃止）。`pretrained_encoders` の保存先・load API を参照。
 - **`PROJECTS`（プロジェクト別設定）**：`project -> {"cutoff": <版ラベル>, "versions": [<5版>]}` の対応表を本ディレクトリにも保持する（`pretrained_encoders/constants.py` と**同じ内容を各ディレクトリが自己完結で持つ**。重複は許容）。
-  - 6プロジェクト分：nova(25.0.0; 26–30) / neutron(20.0.0; 21–25) / cinder(20.0.0; 21–25) / glance(24.0.0; 25–29) / keystone(21.0.0; 22–26) / swift(2.29.0; 2.30–2.34)。
+  - 今回の論文の 6 件：qtbase(6.5.0; 6.6.0–6.10.0) / qtcreator(13.0.0; 14.0.0–18.0.0) / wikimedia_mediawiki_core(1.40.0; 1.41.0–1.45.0) /
+    qtdeclarative(6.5.0; 6.6.0–6.10.0) / go(go1.20; go1.21–go1.25) / typo3_cms(13.0.0; 13.1.0–13.4.0・14.0.0)。
+  - **OpenStack 6 件は `OPENSTACK_PROJECTS` に移して残す**（2026-10-15）：nova(25.0.0; 26–30) / neutron(20.0.0; 21–25) / cinder(20.0.0; 21–25) / glance(24.0.0; 25–29) / keystone(21.0.0; 22–26) / swift(2.29.0; 2.30–2.34)。
+    `--project` を付けなければ `PROJECTS` の 6 件だけが回る。名前を指定したときは `PROJECTS` → `OPENSTACK_PROJECTS` の順に探す。
   - `--project` 指定でこの表から cutoff・versions を引く。旧 `PRETRAINED_CUTOFF="25.0.0"`（nova 固定）は廃止し、`PROJECTS[project]["cutoff"]` に置き換える。
 
 ## 13. スコープ外（今回）＋ 将来

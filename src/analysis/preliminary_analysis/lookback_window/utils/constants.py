@@ -9,12 +9,23 @@ OUTPUT_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "lookback
 
 # ── 対象（design.md §2, §12） ─────────────────────────
 # main の既定は「PROJECTS の全プロジェクト」を順に回す（--project で単一に絞れる）。
-PROJECT = "nova"               # 参考：代表プロジェクト（実行既定ではない）
+# 参考の代表 PROJECT = "nova" はどこからも使っていなかったので 2026-10-15 に廃止した（design.md §12）。
 
 # プロジェクト別設定：project -> {"cutoff": 版ラベル, "versions": チューニング5版}。
 # cutoff は使う事前学習エンコーダ（pretrained_encoders の保存物）の cutoff ラベル。
 # pretrained_encoders/constants.py と同じ内容を、本ディレクトリも自己完結で保持する（重複は許容）。
+# PROJECTS は今回の論文の 6 件（2026-10-15 に OpenStack 6 件から切り替えた。design.md §2）。
 PROJECTS = {
+    "qtbase":                   {"cutoff": "6.5.0", "versions": ["6.6.0", "6.7.0", "6.8.0", "6.9.0", "6.10.0"]},
+    "qtcreator":                {"cutoff": "13.0.0", "versions": ["14.0.0", "15.0.0", "16.0.0", "17.0.0", "18.0.0"]},
+    "wikimedia_mediawiki_core": {"cutoff": "1.40.0", "versions": ["1.41.0", "1.42.0", "1.43.0", "1.44.0", "1.45.0"]},
+    "qtdeclarative":            {"cutoff": "6.5.0", "versions": ["6.6.0", "6.7.0", "6.8.0", "6.9.0", "6.10.0"]},
+    "go":                       {"cutoff": "go1.20", "versions": ["go1.21", "go1.22", "go1.23", "go1.24", "go1.25"]},
+    "typo3_cms":                {"cutoff": "13.0.0", "versions": ["13.1.0", "13.2.0", "13.3.0", "13.4.0", "14.0.0"]},
+}
+
+# OpenStack 6 件（以前の対象）。今回の論文では分析しないが、設定は残す。名前を指定したときだけ引ける。
+OPENSTACK_PROJECTS = {
     "nova":     {"cutoff": "25.0.0", "versions": ["26.0.0", "27.0.0", "28.0.0", "29.0.0", "30.0.0"]},
     "neutron":  {"cutoff": "20.0.0", "versions": ["21.0.0", "22.0.0", "23.0.0", "24.0.0", "25.0.0"]},
     "cinder":   {"cutoff": "20.0.0", "versions": ["21.0.0", "22.0.0", "23.0.0", "24.0.0", "25.0.0"]},
@@ -24,14 +35,22 @@ PROJECTS = {
 }
 
 
+def project_config(project: str) -> dict:
+    """その project の設定（PROJECTS → OPENSTACK_PROJECTS の順に探す）。無ければ KeyError。"""
+    cfg = PROJECTS.get(project) or OPENSTACK_PROJECTS.get(project)
+    if cfg is None:
+        raise KeyError(f"未知のプロジェクトです（PROJECTS か OPENSTACK_PROJECTS に定義してください）: {project}")
+    return cfg
+
+
 def cutoff_for(project: str) -> str:
     """その project の事前学習 cutoff ラベルを返す。"""
-    return PROJECTS[project]["cutoff"]
+    return project_config(project)["cutoff"]
 
 
 def versions_for(project: str) -> list[str]:
     """その project のチューニング対象5版を返す。"""
-    return list(PROJECTS[project]["versions"])
+    return list(project_config(project)["versions"])
 
 
 # ── 使う事前学習エンコーダ（pretrained_encoders の保存物） ────────────

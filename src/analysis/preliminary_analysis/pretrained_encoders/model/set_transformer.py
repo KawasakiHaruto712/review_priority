@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -74,6 +76,48 @@ def _pad_batch(sets: list[TSet], scaler: Scaler, device: torch.device):
             torch.from_numpy(valid).to(device))
 
 
+# ── 文脈のマスク（design.md §12.4） ─────────────────────────────
+_EPOCH = datetime(1970, 1, 1)
+
+
+def _seconds(ts) -> np.ndarray:
+    """datetime（None は無限大＝閉じていない）の列を秒の配列にする。"""
+    return np.array([np.inf if x is None else (x - _EPOCH).total_seconds() for x in ts], dtype=np.float64)
+
+
+def context_block_mask(s: TSet) -> np.ndarray | None:
+    """集合 s の文脈のマスク (L, L)。True＝見えない（自己注意で無視する）。
+
+    Change i（行）から Change j（列）が見えるのは、j の予測の時点が i 以前（同じ時刻なら互いに見える）で、
+    かつ i の予測の時点で j がまだ閉じていない（j の Open の期間の終わりが i の予測の時点より後）とき。自分自身は常に見える。
+    s.times がない集合（旧来の作り）は None（全員が互いに見える）。
+    """
+    if s.times is None:
+        return None
+    t = _seconds(s.times)
+    u = _seconds(s.open_until if s.open_until is not None else [None] * len(t))
+    allowed = (t[None, :] <= t[:, None]) & (u[None, :] > t[:, None])
+    np.fill_diagonal(allowed, True)
+    return ~allowed
+
+
+def _context_batch(sets: list[TSet], lmax: int, device: torch.device) -> torch.Tensor | None:
+    """集合のリストの文脈のマスクを (B, Lmax, Lmax) にパディングする。パディングの行・列は False（無視しない）。
+
+    パディングの列（キー）は src_key_padding_mask のほうで無視される。パディングの行は有効な列を見られるので、
+    行がすべて無視されて NaN になることはない。どの集合にも times がなければ None。
+    """
+    masks = [context_block_mask(s) for s in sets]
+    if all(m is None for m in masks):
+        return None
+    out = np.zeros((len(sets), lmax, lmax), dtype=bool)
+    for i, m in enumerate(masks):
+        if m is not None:
+            n = m.shape[0]
+            out[i, :n, :n] = m
+    return torch.from_numpy(out).to(device)
+
+
 # ── エンコーダ（自己注意・位置エンコなし＝集合として扱う。design.md §3） ──
 class SetEncoder(nn.Module):
     def __init__(self, d_model: int, n_layers: int, n_heads: int, ffn_dim: int, dropout: float):
@@ -85,13 +129,20 @@ class SetEncoder(nn.Module):
         # enable_nested_tensor=False: パディングマスク使用時の nested-tensor 高速化パスを無効化。
         # 当該 op が MPS 未対応で eval 時に落ちるため（正攻法の回避）。精度・挙動は変わらない。
         self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers, enable_nested_tensor=False)
+        self.n_heads = n_heads
         # 注：位置エンコーディングは足さない → 置換不変（集合として扱う）
 
-    def forward(self, feats: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
-        """feats:(B,L,15) → per-item 埋め込み (B,L,d_model)。valid_mask:True=有効。"""
+    def forward(self, feats: torch.Tensor, valid_mask: torch.Tensor,
+                ctx_block: torch.Tensor | None = None) -> torch.Tensor:
+        """feats:(B,L,特徴量の数) → per-item 埋め込み (B,L,d_model)。valid_mask:True=有効。
+
+        ctx_block:(B,L,L) の文脈のマスク（True=見えない。design.md §12.4）。None なら全員が互いに見える。
+        """
         x = self.input_proj(feats)
+        # 文脈のマスクは (B*ヘッド数, L, L) に広げて渡す（バッチの集合ごとに違うため）
+        mask = None if ctx_block is None else ctx_block.repeat_interleave(self.n_heads, dim=0)
         # TransformerEncoder の src_key_padding_mask は True=無視（パディング）なので反転して渡す
-        out = self.encoder(x, src_key_padding_mask=~valid_mask)
+        out = self.encoder(x, mask=mask, src_key_padding_mask=~valid_mask)
         return out
 
 
@@ -140,7 +191,7 @@ def pretrain(pretrain_sets: list[TSet], scaler: Scaler, seed: int, device: torch
         shuffled = [pretrain_sets[i] for i in order]
         for batch in _iter_batches(shuffled, constants.PRETRAIN_BATCH_SETS):
             feats, labels, valid = _pad_batch(batch, scaler, device)
-            emb = encoder(feats, valid)
+            emb = encoder(feats, valid, _context_batch(batch, feats.shape[1], device))
             logits = head(emb)                    # (B, L)
             m = valid.reshape(-1)
             loss = loss_fn(logits.reshape(-1)[m], labels.reshape(-1)[m])
@@ -161,7 +212,7 @@ def embed_sets(encoder: SetEncoder, scaler: Scaler, sets: list[TSet], device: to
     out: list[np.ndarray] = []
     for batch in _iter_batches(sets, constants.PRETRAIN_BATCH_SETS):
         feats, _labels, valid = _pad_batch(batch, scaler, device)
-        emb = encoder(feats, valid).cpu().numpy()  # (B, Lmax, d_model)
+        emb = encoder(feats, valid, _context_batch(batch, feats.shape[1], device)).cpu().numpy()  # (B, Lmax, d_model)
         for i, s in enumerate(batch):
             out.append(emb[i, :len(s)])             # パディング除去
     return out
@@ -250,10 +301,10 @@ def freeze_for_gradients(*modules) -> None:
 
 
 def item_logits(encoder: SetEncoder, head: Head, feats: torch.Tensor,
-                valid: torch.Tensor) -> torch.Tensor:
+                valid: torch.Tensor, ctx_block: torch.Tensor | None = None) -> torch.Tensor:
     """標準化済み特徴 (B, L, 15) から per-item の**ロジット** (B, L) を返す（勾配を通す）。
 
     確率ではなくロジットを返すのは、シグモイドの飽和で IG が潰れるのを避けるためと、
     線形ヘッドの分解（IG ＝ 翻訳表 × 重み）を保つため（concept_drift_cause/design.md §2.2, §2.5）。
     """
-    return head(encoder(feats, valid))
+    return head(encoder(feats, valid, ctx_block))   # ctx_block は文脈のマスク (B, L, L)（design.md §12.4）

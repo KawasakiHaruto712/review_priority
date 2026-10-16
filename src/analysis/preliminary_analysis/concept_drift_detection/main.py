@@ -181,7 +181,7 @@ def run(projects=None, versions=None) -> None:
     rel_df = load_release_dates()
     targets = list(projects) if projects else list(constants.PROJECTS)
     for project in targets:
-        if project not in constants.PROJECTS:
+        if not constants.is_known(project):   # OpenStack は OPENSTACK_PROJECTS から名前で引ける
             logger.warning(f"スキップ（未知のプロジェクト）: {project}")
             continue
         vs = constants.versions_for(project)

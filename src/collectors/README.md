@@ -9,8 +9,9 @@
 | `openstack.py` | OpenStack Gerritからのデータ収集クラス |
 | `release_collector.py` | リリース情報の収集機能（`releases_summary.csv` を出力） |
 | `major_release_storage.py` | 公式のサイクル一覧から、サイクル単位の `major_releases_summary.csv` を生成（2026-10 改訂。下の「メジャーリリースの表」） |
-| `release_tags_collector.py` | 正式版のタグから、OpenStack 以外（qtbase・mediawiki/core・go）の行を `major_releases_summary.csv` に書く |
-| `build_release_table.py` | 表全体を作り直す入口。上の 2 つを順に呼ぶ（`python -m src.collectors.build_release_table`） |
+| `release_tags_collector.py` | 正式版のタグから、OpenStack 以外（qtbase・qt-creator・mediawiki/core・qtdeclarative・go・TYPO3.CMS）の行を `major_releases_summary.csv` に書く |
+| `main_branch_collector.py` | 本流の表 `main_branches.csv` を作る。今の本流は Gerrit の API（HEAD）、昔の本流は `constants.py` の登録から（2026-10-15。下の「本流の表」） |
+| `build_release_table.py` | 公式の情報から作る表を作り直す入口。区切りの表（上の 2 つ）と本流の表を順に作る（`python -m src.collectors.build_release_table`） |
 
 ## 🔧 主要機能
 
@@ -35,7 +36,7 @@
 
 ## 📅 メジャーリリースの表（`major_releases_summary.csv`、2026-10 改訂）
 
-特徴量 `days_to_major_release` と、分析期間の区切り（事前学習の締め・評価する版の期間）に使う表。
+特徴量 `days_to_feature_release`（次の機能リリースまでの日数。旧名 `days_to_major_release`）と、分析期間の区切り（事前学習の締め・評価する版の期間）に使う表。
 特徴量側の扱いは [pretrained_encoders/design.md](../analysis/preliminary_analysis/pretrained_encoders/design.md) §11.4。
 
 ### 旧方式の問題
@@ -70,10 +71,10 @@ OpenStack の公式のサイクル一覧（`releases_repo/data/series_status.yam
 
 ### OpenStack 以外の行
 `release_tags_collector.py` が同じ CSV に、正式版のタグから取った行を書く。対象は `constants.RELEASE_TAG_TARGETS`
-（2026-10-14 から qtbase・mediawiki/core・go。区切りの日はタグの日。`project_selection/design.md` §5.2
+（2026-10-15 から qtbase・qt-creator・mediawiki/core・qtdeclarative・go・TYPO3.CMS の 6 件。版の単位は機能リリース。区切りの日はタグの日。`project_selection/design.md` §5.2
 「追記：区切りの日をタグから取る」）。対象のプロジェクトの行はすべて入れ替え、ほかの行と並びは変えない。
 `MajorReleaseStorage.save()` も、作り直すときは OpenStack 以外の行を残す。
-OpenStack 以外のプロジェクトの区切り（何を「メジャーリリース」とみなすか）は、プロジェクトの選定のときに決める。
+OpenStack 以外のプロジェクトの区切り（どのタグを機能リリースとみなすか）は、プロジェクトの選定のときに決める（`project_selection/design.md` §5.2「追記：版の単位」）。
 区切りが公開されているプロジェクトだけを使う。
 表全体は `python -m src.collectors.build_release_table` で作り直せる（`major_release_storage` のあと `release_tags_collector` を流す）。
 2026-10-14 より前の表（qtbase・qtcreator・libreoffice をタグから取り、qtbase を公開日に直したもの）は
@@ -89,6 +90,33 @@ python -m src.collectors.major_release_storage
 - `release_collector.py` の `__main__` は保存先を `data/openstack` にしているが、releases リポジトリと表は
   `data/openstack_collected` にある。実装の際に `data/openstack_collected` に直す。
 - 作り直したときは、project ごとの行数・最初と最後のサイクル・planned の行をログに出す。
+
+## 🌿 本流の表（`main_branches.csv`、2026-10-15 追加）
+分析の特徴量「本流か否か」（`pretrained_encoders/design.md` §12.2）に使う表。**手で書いた一覧を分析のコードに持たず、この表から引く**（再現性のため）。
+置き場所は区切りの表の隣（`data/openstack_collected/main_branches.csv`）。
+
+**作り方**（`main_branch_collector.py`）
+- 対象は区切りの表と同じ `constants.RELEASE_TAG_TARGETS`（今は論文の 6 件）。
+- **今の本流**：Gerrit の API `/projects/<名前>/HEAD`（既定のブランチ）で取る。1 本ずつ、リポジトリの間を 30 秒空ける。Qt は認証つき。
+  - 出どころ：Gerrit の REST API の説明書の「Get HEAD」（https://gerrit-review.googlesource.com/Documentation/rest-api-projects.html#get-head）。
+    "Retrieves for a project the name of the branch to which HEAD points." で、応答は `"refs/heads/master"` の形（2026-10-15 に本人が原文を確認）。
+  - サーバ側のリポジトリの HEAD は、`git clone` したときに最初にチェックアウトされるブランチ（既定のブランチ）を決める。
+    プロジェクトはこれに開発のブランチを選ぶので、今の本流とみなす（例：Qt の wiki "The default branch (the one that gets checked out on a new clone) is dev."）。
+- **昔の本流**：API では取れないので、`constants.GERRIT_PROJECTS` の各項目の `former_main_branches` に、出どころつきで書いておいたものを入れる。
+  例：`"former_main_branches": [{"branch": "master", "until": "2021-11-29", "source": "<URL>", "note": "..."}]`。改名の日が分からないものは `until` を空にする。
+- 列：`project, branch, kind, until, source, note, fetched_at`。`kind` は `current`（今の本流）か `former`（**昔の本流**）。
+  分析は `current` も `former` も本流（1）として扱う。
+- 作り直すときは、対象のリポジトリの行をすべて入れ替え、ほかの行は残す（区切りの表と同じ）。
+
+**昔の本流の名前**（2026-10-15 時点。出どころの原文は `pretrained_encoders/design.md` §12.2）
+
+| project | 今の本流 | 昔の本流 | 改名の時期 | 出どころ |
+|---|---|---|---|---|
+| qtbase・qtdeclarative | `dev` | `master` | 2012-09-27 に告知。実際の日は未確認（2012 年末〜2013-09 の間） | https://lists.qt-project.org/pipermail/development/2012-September/006691.html |
+| typo3_cms | `main` | `master` | 2021-11-29 | https://news.typo3.com/archive/typo3-core-development-to-change-branch-name |
+| qtcreator・wikimedia_mediawiki_core・go | `master` | なし | ― | ― |
+
+**手順**：区切りの表と一緒に `python -m src.collectors.build_release_table` で作る（通信は区切りの表の 6 回と本流の 6 回で 12 回、30 秒ずつ空けて約 6 分）。
 
 ## 📊 収集データ形式
 

@@ -35,7 +35,7 @@
 - **`calculate_recent_merge_rate`**: 最近のマージ率
 
 ### 🏗️ プロジェクトメトリクス (`project_metrics.py`)
-- **`calculate_days_to_major_release`**: メジャーリリースまでの日数
+- **`calculate_days_to_feature_release`**: 次の機能リリース（新しい機能を含む定期的なリリース）までの日数（旧名 `calculate_days_to_major_release`）
 - **`calculate_predictive_target_ticket_count`**: 予測対象チケット数
 - **`calculate_reviewed_lines_in_period`**: 期間内レビュー行数
 - **`add_lines_info_to_dataframe`**: 行数情報の追加
@@ -65,7 +65,7 @@ feature_vector = [
     recent_report_count,     # 最近レポート数
     merge_rate,              # マージ率 (0-1)
     recent_merge_rate,       # 最近マージ率 (0-1)
-    days_to_major_release,   # リリースまで日数
+    days_to_feature_release, # 次の機能リリースまでの日数
     open_ticket_count,       # オープンチケット数
     reviewed_lines_in_period, # 期間内レビュー行数
     refactoring_confidence,  # リファクタリング確信度 (0-1)
@@ -150,7 +150,7 @@ default_values = {
 ├── lines_deleted: 平均=23.1, 標準偏差=67.3
 ├── files_changed: 平均=3.2, 標準偏差=5.1
 ├── merge_rate: 平均=0.78, 標準偏差=0.25
-└── days_to_major_release: 平均=120.5, 標準偏差=98.7
+└── days_to_feature_release: 平均=120.5, 標準偏差=98.7
 ```
 
 ## ⚡ パフォーマンス最適化

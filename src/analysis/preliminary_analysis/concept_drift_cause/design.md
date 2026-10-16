@@ -15,6 +15,11 @@
   2026-10-15 に、位置を「サイクルを `N` 等分」から「**リリースの日から刻みずつ過去へ区切る**（`p = 0` がリリースの直前、列の幅は刻みで固定）」に改め、
   格子の大きさ `N_v` は版ごとに `⌈サイクル長 ÷ 刻み⌉` で決まるようにした。本書の「26 本」「26 枚」などの数は、旧版（全版 26×26）で計算した例であり、
   新しい作りでは版ごとに変わる。位置の割り当ては距離×時期行列の分析と同じ関数（`binning.position_of_days`）を使い、両者でずれないようにする。
+- **対象は今回の論文の 6 件**（qtbase / qtcreator / wikimedia_mediawiki_core / qtdeclarative / go / typo3_cms。2026-10-15 に OpenStack 6 件から切り替えた）。
+  対象のセル（`IG_TARGETS`・`IG_TARGETS_OLDER`）は距離×時期行列の分析の `PROJECTS` から自動で決まるので、本書の設定は変えない。
+  本書の計算量・結果の例（nova など）は OpenStack で計算したもの。6 件の計算量は 1 日あたりの集合の大きさで大きく変わる（§10）。
+- **2026-10-15 から、集合・ラベル・文脈の作りは `pretrained_encoders/design.md` §12 に従う**。IG でロジットを計算するとき（`item_logits`）も、文脈のマスクを渡す。
+  特徴量の数が 15 から増える（§12.5）ので、図など数を前提にした箇所は、本分析を回す前に直す。
 
 ---
 
@@ -373,7 +378,7 @@ data/analysis/preliminary_analysis/concept_drift_cause/
 - **横向きの発散棒グラフ**。中央を 0 とし、負は左・正は右に伸ばす。
 - 棒の長さは**セル内の評価日をまたいだ平均**（§8 の集約と同じ）。
 - **15 次元すべてを `FEATURE_NAMES` の定義順**に並べる。並び順を図ごとに変えると比較できない。
-  - `days_to_major_release` / `open_ticket_count` / `reviewed_lines_in_period` は**構造上すべての図でゼロになる**（`t` と project だけで決まり、同じ日の集合内で全 Change が同じ値をとるため、基準点との差が 0）。図には載せるが注記はしない。
+  - `days_to_major_release`（2026-10-15 に `days_to_feature_release` へ改名）/ `open_ticket_count` / `reviewed_lines_in_period` は**構造上すべての図でゼロになる**（`t` と project だけで決まり、同じ日の集合内で全 Change が同じ値をとるため、基準点との差が 0）。図には載せるが注記はしない。
 
 #### 9.4.4 ばらつきの表示
 
