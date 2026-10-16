@@ -22,7 +22,19 @@ OUTPUT_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "concept_
 # 変わった 4 件はいずれも 1 位と 2 位の差が 0.001〜0.003 で、日次ばらつき（std 0.11〜0.24）よりずっと小さい。
 # 1w〜2M の差は有意ではなく、上の規則を機械的に適用した結果を使う。
 # 明確なのは 3d・1d が全プロジェクトで劣ること（1d は最良より 0.02〜0.07 低い）。
+# 2026-10-15：PROJECTS を今回の論文の 6 件に切り替えた（design.md §2）。window_days は窓長の調査を 6 件で回してから入れる
+# （それまでは WINDOW_DAYS = 7）。上の OpenStack の窓長の記録は OPENSTACK_PROJECTS に残す。
 PROJECTS = {
+    "qtbase":                   {"cutoff": "6.5.0", "versions": ["6.6.0", "6.7.0", "6.8.0", "6.9.0", "6.10.0"]},
+    "qtcreator":                {"cutoff": "13.0.0", "versions": ["14.0.0", "15.0.0", "16.0.0", "17.0.0", "18.0.0"]},
+    "wikimedia_mediawiki_core": {"cutoff": "1.40.0", "versions": ["1.41.0", "1.42.0", "1.43.0", "1.44.0", "1.45.0"]},
+    "qtdeclarative":            {"cutoff": "6.5.0", "versions": ["6.6.0", "6.7.0", "6.8.0", "6.9.0", "6.10.0"]},
+    "go":                       {"cutoff": "go1.20", "versions": ["go1.21", "go1.22", "go1.23", "go1.24", "go1.25"]},
+    "typo3_cms":                {"cutoff": "13.0.0", "versions": ["13.1.0", "13.2.0", "13.3.0", "13.4.0", "14.0.0"]},
+}
+
+# OpenStack 6 件（以前の対象）。今回の論文では分析しないが、設定は残す。名前を指定したときだけ引ける。
+OPENSTACK_PROJECTS = {
     "nova":     {"cutoff": "25.0.0", "versions": ["26.0.0", "27.0.0", "28.0.0", "29.0.0", "30.0.0"], "window_days": 7},
     "neutron":  {"cutoff": "20.0.0", "versions": ["21.0.0", "22.0.0", "23.0.0", "24.0.0", "25.0.0"], "window_days": 7},
     "cinder":   {"cutoff": "20.0.0", "versions": ["21.0.0", "22.0.0", "23.0.0", "24.0.0", "25.0.0"], "window_days": 7},
@@ -32,14 +44,27 @@ PROJECTS = {
 }
 
 
+def project_config(project: str) -> dict:
+    """その project の設定（PROJECTS → OPENSTACK_PROJECTS の順に探す）。無ければ KeyError。"""
+    cfg = PROJECTS.get(project) or OPENSTACK_PROJECTS.get(project)
+    if cfg is None:
+        raise KeyError(f"未知のプロジェクトです（PROJECTS か OPENSTACK_PROJECTS に定義してください）: {project}")
+    return cfg
+
+
+def is_known(project: str) -> bool:
+    """PROJECTS か OPENSTACK_PROJECTS に定義がある project か。"""
+    return project in PROJECTS or project in OPENSTACK_PROJECTS
+
+
 def cutoff_for(project: str) -> str:
     """その project の事前学習 cutoff ラベル（pretrained_encoders の保存キー）。"""
-    return PROJECTS[project]["cutoff"]
+    return project_config(project)["cutoff"]
 
 
 def versions_for(project: str) -> list[str]:
     """その project の対象5版。"""
-    return list(PROJECTS[project]["versions"])
+    return list(project_config(project)["versions"])
 
 
 # ── 距離 d × 位置 p の格子（§4.2） ─────────────────────────
@@ -56,7 +81,7 @@ RECORD_MARGIN_DAYS = 7       # レコード生成範囲の余裕（§4.4）
 
 def window_for(project: str) -> int:
     """その project の学習窓長（日）。PROJECTS の window_days（無ければ WINDOW_DAYS）。"""
-    return int(PROJECTS[project].get("window_days", WINDOW_DAYS))
+    return int(project_config(project).get("window_days", WINDOW_DAYS))
 
 
 def step_for(project: str) -> int:

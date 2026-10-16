@@ -16,7 +16,7 @@ RC やビルド番号まで刻むプロジェクト（LibreOffice の `libreoffi
 出力は既存の `major_releases_summary.csv` と同じ列（project, series, version, release_date, status, yaml_url）で、
 **対象のプロジェクトの行をすべて入れ替え、ほかのプロジェクトの行と並びは変えない**（OpenStack の行を壊さない）。
 
-既定の対象は `constants.RELEASE_TAG_TARGETS`（qtbase・mediawiki/core・go）。表全体の作り直しは
+既定の対象は `constants.RELEASE_TAG_TARGETS`（qtbase・qt-creator・mediawiki/core・qtdeclarative・go・TYPO3.CMS の 6 件）。表全体の作り直しは
 `python -m src.collectors.build_release_table`（OpenStack の行を作る `major_release_storage` のあとに、これを呼ぶ）。
 
 実行:
@@ -52,6 +52,7 @@ OUTPUT_CSV = DEFAULT_DATA_DIR / "openstack_collected" / "major_releases_summary.
 COLUMNS = ["project", "series", "version", "release_date", "status", "yaml_url"]
 PAGE = 1000
 REQUEST_DELAY = 1.0   # 問い合わせの間隔（秒）。収集と同じ既定値（project_selection/design.md §6.2）
+PROJECT_INTERVAL = 30.0  # リポジトリとリポジトリの間に空ける秒数（project_selection/design.md §5.2「1 本ずつ、30 秒ほど空ける」）
 
 
 def _session(spec: dict) -> requests.Session:
@@ -178,10 +179,12 @@ def merge_into_csv(new: pd.DataFrame, csv_path: Path = OUTPUT_CSV) -> Path:
 
 def collect(projects: list[str]) -> pd.DataFrame:
     frames = []
-    for p in projects:
+    for i, p in enumerate(projects):
         if p not in GERRIT_PROJECTS:
             logger.warning(f"未登録のプロジェクト: {p}")
             continue
+        if i > 0:
+            time.sleep(PROJECT_INTERVAL)   # 1 本ずつ、リポジトリの間を空ける
         frames.append(extract_releases(p, fetch_tags(p)))
     if not frames:
         logger.warning("対象がありません")

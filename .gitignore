@@ -4,6 +4,10 @@ paper
 tests
 src/review_priority.egg-info
 .env
+# AI への引き継ぎのメモ（本人の判断で追跡しない。2026-10-15）
+docs/HANDOFF.md
+AGENTS.md
+CLAUDE.md
 
 *.pyc
 # 収集・解析の実行ログ（巨大になるため追跡しない）

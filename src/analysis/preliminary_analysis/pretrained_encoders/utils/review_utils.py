@@ -40,6 +40,10 @@ def next_human_review_after(change: dict, t: datetime, detector: BotDetector) ->
 #   "Abandoned" / "Patch Set 3: Abandoned"、"Restored" / "Patch Set 3: Restored"
 _ABANDON_RE = re.compile(r"^(Patch Set \d+:\s*)?Abandoned")
 _RESTORE_RE = re.compile(r"^(Patch Set \d+:\s*)?Restored")
+# Qt の後回し（Deferred）は放棄と同じく閉じ、Reopened で開く（design.md §11.1。2026-10-16 追加）。
+# 古い形 "Patch Set N: Deferred" は出どころが確かめられないので使わない
+_DEFER_RE = re.compile(r"^Deferred")
+_REOPEN_RE = re.compile(r"^Reopened")
 
 # updated で代用した Change（取れなかった理由 -> change_number の集合）。実行の最後にログへ出す。
 # open_periods は同じ Change について何度も呼ばれるので、件数ではなく Change の集合で持つ
@@ -85,7 +89,12 @@ def open_periods(change: dict) -> list[tuple[datetime, datetime | None]]:
         if not isinstance(m, dict):
             continue
         line = _first_line(m)
-        kind = "close" if _ABANDON_RE.match(line) else "open" if _RESTORE_RE.match(line) else None
+        if _ABANDON_RE.match(line) or _DEFER_RE.match(line):
+            kind = "close"
+        elif _RESTORE_RE.match(line) or _REOPEN_RE.match(line):
+            kind = "open"
+        else:
+            kind = None
         if kind is None:
             continue
         dt = parse_dt(m.get("date"))
@@ -100,6 +109,10 @@ def open_periods(change: dict) -> list[tuple[datetime, datetime | None]]:
         # 放棄の記録が見つからない（6 件の収集データでは 0 件）
         _note_fallback("ABANDONED に放棄の記録なし", change)
         events.append((parse_dt(change.get("updated")) or created, "close"))
+    elif status == "DEFERRED" and not any(k == "close" for _, k in events):
+        # 後回しの記録が見つからない（Qt の 3 件では 0 件。古い形 "Patch Set N: Deferred" だけのものはここに入る）
+        _note_fallback("DEFERRED に後回しの記録なし", change)
+        events.append((parse_dt(change.get("updated")) or created, "close"))
 
     periods: list[tuple[datetime, datetime | None]] = []
     start: datetime | None = created
@@ -110,7 +123,7 @@ def open_periods(change: dict) -> list[tuple[datetime, datetime | None]]:
         elif kind == "open" and start is None:
             start = dt
     if start is not None:
-        if status in ("MERGED", "ABANDONED"):
+        if status in ("MERGED", "ABANDONED", "DEFERRED"):
             # 最後が復活で終わっているのに状態は閉じている（記録の矛盾）。updated で閉じる
             _note_fallback("閉じた Change が復活で終わっている", change)
             periods.append((start, max(parse_dt(change.get("updated")) or start, start)))

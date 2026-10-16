@@ -4,6 +4,7 @@
 各 T で Open な Change を 1 レコード (change_id, T, features, label) にする。
 Open かどうかは review_utils.open_periods（作成・放棄・復活・マージの記録から作る Open の期間）で判定する（design.md §11.1）。
 同一 Change は複数の日次 T に現れる（複数レコード＝実運用忠実）。
+加えて、日の途中で Open になった Change（作成・復活）も、その時刻を予測の時点としてその日のレコードにする（design.md §12.4）。
 ラベル = Δ以内レビューの2値。未確定（窓が観測末尾超）のレコードは作らない。
 """
 from __future__ import annotations
@@ -29,6 +30,9 @@ class Record:
     """1 件の (Change, T) レコード。
 
     labels: 目的変数名 -> ラベル値（本設計は {constants.TARGET: 0.0/1.0} の単一目的変数）。
+    t: 予測の時点。0 時のレコードは日の 0 時、日の途中で Open になったレコードはその時刻（design.md §12.4）。
+       どの日の集合に入るかは t の日付（0 時に切り捨て）で決まる。
+    open_until: t を含む Open の期間の終わり（閉じていなければ None）。文脈のマスクに使う（§12.4）。
     """
     change_id: object
     t: datetime
@@ -37,6 +41,7 @@ class Record:
     features: list[float]
     labels: dict
     bin: int | None = field(default=None)
+    open_until: datetime | None = field(default=None)
 
 
 def decision_time(change: dict) -> datetime | None:
@@ -46,6 +51,56 @@ def decision_time(change: dict) -> datetime | None:
     """
     periods = review_utils.open_periods(change)
     return periods[-1][1] if periods else None
+
+
+def day_of(t: datetime) -> datetime:
+    """t を含む日の 0 時（UTC。集合はこの日ごとにまとめる。design.md §12.4）。"""
+    return datetime(t.year, t.month, t.day)
+
+
+def period_end_at(periods: list[tuple[datetime, datetime | None]], t: datetime) -> datetime | None:
+    """t を含む Open の期間の終わり（閉じていなければ None）。t がどの期間にも入らなければ None。"""
+    for s, e in periods:
+        if s <= t and (e is None or t < e):
+            return e
+    return None
+
+
+def first_revision_time(change: dict) -> datetime | None:
+    """最初の版（パッチセット）の作成時刻。版の記録がなければ None。"""
+    revs = change.get("revisions")
+    if not isinstance(revs, dict):
+        return None
+    times = [parse_dt(r.get("created")) for r in revs.values() if isinstance(r, dict)]
+    times = [x for x in times if x is not None]
+    return min(times) if times else None
+
+
+def midday_open_points(change: dict, periods: list[tuple[datetime, datetime | None]]
+                       ) -> list[tuple[datetime, datetime | None]]:
+    """日の途中で Open になった時点の列 [(予測の時点, その Open の期間の終わり)]（design.md §12.4）。
+
+    - 作成（最初の期間）：予測の時点は「作成時刻」と「最初の版の作成時刻」の遅いほう（版の記録がなければ作成時刻）
+    - 復活（2 つ目以降の期間）：復活の時刻のまま
+    - ちょうど 0 時に Open になったものは 0 時のレコードとして数えるので、ここには入れない
+    - 予測の時点が日をまたぐもの、予測の時点までに閉じたもの（Open の期間の長さが 0 のものを含む）は入れない
+    """
+    out: list[tuple[datetime, datetime | None]] = []
+    for k, (s, e) in enumerate(periods):
+        day = day_of(s)
+        if s == day:
+            continue                                  # 0 時ちょうど → 0 時のレコード
+        t = s
+        if k == 0:
+            first_rev = first_revision_time(change)
+            if first_rev is not None and first_rev > t:
+                t = first_rev                         # 中身（最初の版）が見えるようになった時点
+        if t >= day + timedelta(days=1):
+            continue                                  # 日をまたいだ → その日の途中のレコードは作らない
+        if e is not None and t >= e:
+            continue                                  # 予測の時点までに閉じている（長さ 0 を含む）
+        out.append((t, e))
+    return out
 
 
 def daily_grid(pool_start: datetime, cycle_end: datetime, step_days: int) -> list[datetime]:
@@ -79,6 +134,7 @@ def build_records(changes: list[dict], project: str, pool_start: datetime, cycle
     data_end = all_prs_df["updated"].max()
     data_end = cycle_end if pd.isna(data_end) else pd.Timestamp(data_end).to_pydatetime()
 
+    grid_days = set(grid)
     records: list[Record] = []
     for idx, change in enumerate(changes):
         created = parse_dt(change.get("created"))
@@ -105,7 +161,20 @@ def build_records(changes: list[dict], project: str, pool_start: datetime, cycle
             if label is None:
                 continue  # 窓が観測末尾を超え未確定 → このレコードは作らない
             feats = feature_builder.build_features(change, t, index, comp, project)
-            records.append(Record(cid, t, created, dec, feats, {constants.TARGET: label}))
+            records.append(Record(cid, t, created, dec, feats, {constants.TARGET: label},
+                                  open_until=period_end_at(periods, t)))
+        # 日の途中で Open になった Change（作成・復活。design.md §12.4）。
+        # ラベルの窓は (予測の時点, その日の終わり]。0 時のレコードの (T, T+Δ] と同じ終わり
+        for t_i, end in midday_open_points(change, periods):
+            day = day_of(t_i)
+            if day not in grid_days or t_i - created > lookback:
+                continue
+            label = label_builder.reviewed_within_delta(review_times, t_i, day + delta - t_i, data_end)
+            if label is None:
+                continue
+            feats = feature_builder.build_features(change, t_i, index, comp, project)
+            records.append(Record(cid, t_i, created, dec, feats, {constants.TARGET: label},
+                                  open_until=end))
     review_utils.log_fallbacks()
     pos = sum(1 for r in records if r.labels[constants.TARGET] == 1.0)
     logger.info(f"[{project}] レコード数: {len(records)}（計測点 {len(grid)}, 正例 {pos} = "

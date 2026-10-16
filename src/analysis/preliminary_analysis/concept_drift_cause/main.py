@@ -166,6 +166,7 @@ def compute_version(project: str, version: str, spec: dict, *, changes, rel_df, 
         eval_set = day_sets[X]
         p0 = pos_of[X]
         feats_std = st.standardize_feats(scaler, eval_set.feats)
+        ctx_block = st.context_block_mask(eval_set)   # 文脈のマスク（pretrained_encoders/design.md §12.4）
         used_seeds = set()
         for d in distances:
             seed = chosen.get((X.isoformat(), str(d)))
@@ -178,13 +179,13 @@ def compute_version(project: str, version: str, spec: dict, *, changes, rel_df, 
             head = st.head_from_vector(vec, device)
             st.freeze_for_gradients(head)
             prof = ig.day_profiles(encoders[seed][0], head, feats_std, eval_set.labels,
-                                   constants.IG_STEPS, device)
+                                   constants.IG_STEPS, device, ctx_block=ctx_block)
             rows += _rows(run_id, X, p0, d, seed, "probe", prof)
             used_seeds.add(seed)
         # 汎用ヘッドは距離に依存しないので、その日に使われた seed の種類ぶんだけ（§5.5）
         for seed in sorted(used_seeds):
             prof = ig.day_profiles(encoders[seed][0], encoders[seed][1], feats_std,
-                                   eval_set.labels, constants.IG_STEPS, device)
+                                   eval_set.labels, constants.IG_STEPS, device, ctx_block=ctx_block)
             rows += _rows(run_id, X, p0, "general", seed, "general", prof)
         if n % 10 == 0 or n == len(eval_days):
             logger.info(f"  {n}/{len(eval_days)} 日（{len(rows)} 行）")

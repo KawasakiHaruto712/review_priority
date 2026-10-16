@@ -33,6 +33,17 @@ OPENSTACK_CORE_COMPONENTS = [
 #            HTTP 403（Too many requests）を返し、しばらく解けない。3 秒では足りず
 #            8 秒で安定した。制限に掛かると再試行の待ち時間に入って時間を無駄にするので、
 #            最初から間隔を空けておくほうが速い。
+#   former_main_branches : 昔の本流（API の HEAD では今の本流しか取れないため、出どころつきで書く）。
+#            main_branch_collector が「昔の本流（kind=former）」として本流の表に入れる。
+#            until は改名の日（分からなければ空）。pretrained_encoders/design.md §12.2・src/collectors/README.md「本流の表」
+
+# Qt（qtbase・qtdeclarative）の昔の本流。Qt 5 のときに master から dev に移った（実際の日は未確認）
+QT_FORMER_MASTER = {
+    "branch": "master", "until": "",
+    "source": "https://lists.qt-project.org/pipermail/development/2012-September/006691.html",
+    "note": "2012-09-27 に告知（10 月中旬に dev を開く予定）。実際の日は未確認で、2012 年末〜2013-09 の間とみられる",
+}
+
 GERRIT_PROJECTS = {
     # ── OpenStack（収集済み。リリース情報は openstack/releases リポジトリから取得）──
     "nova":     {"host": "https://review.opendev.org/a", "path": "openstack/nova",     "auth": True},
@@ -50,11 +61,15 @@ GERRIT_PROJECTS = {
         "host": "https://codereview.qt-project.org/a", "path": "qt/qtbase",
         "auth": True, "env": "QT_GERRIT", "batch_size": 50,
         "tag_pattern": r"^v(\d+)\.(\d+)\.0$", "tag_series": r"\1.\2.0",
+        # 昔の本流（API では取れないので出どころつきで書く。main_branch_collector が「昔の本流」として表に入れる）
+        "former_main_branches": [QT_FORMER_MASTER],
     },
     "qtcreator": {
         "host": "https://codereview.qt-project.org/a", "path": "qt-creator/qt-creator",
         "auth": True, "env": "QT_GERRIT", "batch_size": 50,
-        "tag_pattern": r"^v(\d+)\.0\.0$", "tag_series": r"\1.0.0",
+        # 機能リリース x.y.0（2021 年より前の 4.x を含む。2026-10-15 にメジャー版 v<X>.0.0 だけから改めた）。
+        # qds/・qp-・csa- で始まる別製品のタグは頭が v でないので拾わない
+        "tag_pattern": r"^v(\d+)\.(\d+)\.0$", "tag_series": r"\1.\2.0",
     },
 
     # ── LibreOffice（タグは RC まで刻むので、シリーズ（X.Y）の最初のタグ日を採用）──
@@ -169,6 +184,7 @@ GERRIT_PROJECTS = {
         "host": "https://codereview.qt-project.org/a", "path": "qt/qtdeclarative",
         "auth": True, "env": "QT_GERRIT", "batch_size": 50, "chunk_days": 90,
         "tag_pattern": r"^v(\d+)\.(\d+)\.0$", "tag_series": r"\1.\2.0",
+        "former_main_branches": [QT_FORMER_MASTER],   # qtbase と同じ（Qt 5 のときに master → dev）
     },
     "android_manifest": {                   # 16,462 件
         "host": "https://android-review.googlesource.com",
@@ -196,6 +212,16 @@ GERRIT_PROJECTS = {
     "typo3_cms": {                          # 12,733 件
         "host": "https://review.typo3.org",
         "path": "Packages/TYPO3.CMS", "auth": False, "chunk_days": 90,
+        # 機能リリース x.y.0（sprint release を含む）。時期によってタグの形が TYPO3_X-Y-0・X.Y.0・vX.Y.0 と違うので、
+        # 「または」でつなぐ。前半に当たれば数は \1・\2、後半なら \3・\4 に入り、当たらなかった側は空の文字になる
+        # ので、どの形でも "X.Y.0" になる（project_selection/design.md §5.2「区切りの日をタグから取る」）
+        "tag_pattern": r"^(?:TYPO3_(\d+)-(\d+)-0|v?(\d+)\.(\d+)\.0)$", "tag_series": r"\1\3.\2\4.0",
+        # 昔の本流（2021-11-29 に master → main。pretrained_encoders/design.md §12.2）
+        "former_main_branches": [{
+            "branch": "master", "until": "2021-11-29",
+            "source": "https://news.typo3.com/archive/typo3-core-development-to-change-branch-name",
+            "note": "2021-11-28 に告知。改名の時点で Open だった約 220 件は手元のデータでは main と記録されている（推測）",
+        }],
     },
 }
 
@@ -203,9 +229,9 @@ GERRIT_PROJECTS = {
 NEW_COLLECT_TARGETS = ["qtbase", "qtcreator", "libreoffice"]
 
 # 区切りの日を正式版のタグから取る対象（release_tags_collector の既定。
-# 今回の論文で分析する追加の 3 件。project_selection/design.md §4「論文に向けた対象の絞り込み」・
-# §5.2「追記：区切りの日をタグから取る」。2026-10-14 に qtdeclarative を mediawiki/core に入れ替えた）
-RELEASE_TAG_TARGETS = ["qtbase", "wikimedia_mediawiki_core", "go"]
+# 今回の論文で分析する 6 件。project_selection/design.md §4「論文の対象」・
+# §5.2「追記：区切りの日をタグから取る」。2026-10-15 に 3 件から 6 件へ広げた）
+RELEASE_TAG_TARGETS = ["qtbase", "qtcreator", "wikimedia_mediawiki_core", "qtdeclarative", "go", "typo3_cms"]
 
 # 選定の候補（2023〜2025 年の上位 15 件のうち、全期間が手元にない 12 件。
 # project_selection/design.md §4「上位 15 件に広げる」）。
