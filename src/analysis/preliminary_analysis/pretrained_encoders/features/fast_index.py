@@ -91,10 +91,14 @@ class FastFeatureIndex:
         return int(np.searchsorted(arr, _ns(t), side="right")
                    - np.searchsorted(arr, start, side="left"))
 
+    # 作者が数える期間に Change を作っていないとき（値が出せないとき）は 0.5（design.md §11.1・§13.2「割合は 0.5」。
+    # 2026-10-18 改めた。旧版は 0.0 で「1 件もマージされない」の意味になっていた）
+    MISSING_RATE = 0.5
+
     def merge_rate(self, email: str, t: datetime) -> float:
         reported = self.past_report_count(email, t)
         if reported == 0:
-            return 0.0
+            return self.MISSING_RATE
         m = self._merged_by_dev.get(email)
         merged = 0 if m is None else int(np.searchsorted(m, _ns(t), side="right"))
         return merged / reported
@@ -102,14 +106,14 @@ class FastFeatureIndex:
     def recent_merge_rate(self, email: str, t: datetime, lookback_months: int = 3) -> float:
         cm = self._cm_by_dev.get(email)
         if cm is None:
-            return 0.0
+            return self.MISSING_RATE
         created_arr, merged_arr = cm
         t_ns = _ns(t)
         start = _ns(t - timedelta(days=30 * lookback_months))
         lo = int(np.searchsorted(created_arr, start, side="left"))
         hi = int(np.searchsorted(created_arr, t_ns, side="right"))
         if hi - lo == 0:
-            return 0.0
+            return self.MISSING_RATE
         merged_recent = int(np.count_nonzero(merged_arr[lo:hi] <= t_ns))
         return merged_recent / (hi - lo)
 

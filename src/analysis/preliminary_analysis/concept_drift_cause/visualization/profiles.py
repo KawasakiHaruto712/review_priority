@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from src.analysis.preliminary_analysis.concept_drift_cause.utils import constants
-from src.analysis.preliminary_analysis.pretrained_encoders.features.feature_builder import FEATURE_NAMES
+from src.analysis.preliminary_analysis.pretrained_encoders.model.set_transformer import FEATURE_NAMES   # MODEL_FEATURES
 
 logger = logging.getLogger(__name__)
 
@@ -72,15 +72,21 @@ def build_series(daily: pd.DataFrame, series: str, group: str) -> pd.DataFrame |
 def cell_stats(rows: pd.DataFrame) -> pd.DataFrame:
     """セル（距離 × 位置）ごとに 15 次元の平均と標準偏差を出す（§8 の集約と同じ）。
 
-    返す列: distance, position, n_days, <特徴量>, <特徴量>_std
+    返す列: distance, position, n_days, <特徴量>, <特徴量>_std, <特徴量>_absmean
+    （_absmean は評価日を通した寄与の絶対値の平均。図に並べる上位を選ぶのに使う。§9.4.3。2026-10-18 追加）
     """
     if "position" not in rows.columns:
         raise ValueError("position 列がありません")
     keys = ["distance", "position"]
+    rows = rows.copy()
+    for f in FEATURE_NAMES:
+        rows[f + "_abs"] = rows[f].abs()
     agg = {f: ["mean", "std"] for f in FEATURE_NAMES}
-    agg["day"] = "nunique"
+    agg.update({f + "_abs": ["mean"] for f in FEATURE_NAMES})
+    agg["day"] = ["nunique"]
     t = rows.groupby(keys, dropna=False).agg(agg)
-    t.columns = [f"{a}_std" if b == "std" else ("n_days" if a == "day" else a)
+    t.columns = [f"{a}_std" if b == "std" else ("n_days" if a == "day" else
+                                                (a[:-4] + "_absmean" if a.endswith("_abs") else a))
                  for a, b in t.columns]
     return t.reset_index()
 

@@ -53,12 +53,15 @@ def _cell_frame(rows: pd.DataFrame) -> dict:
     total = float(mean.sum())
     # 寄与率は生の値から復元できるので保存はしないが、ここで出す（§9.1）
     share = mean / total if total != 0 else pd.Series(np.nan, index=FEATURE_NAMES)
+    absmean = feats.abs().mean(axis=0)     # 評価日を通した寄与の絶対値の平均（図の上位の選び方。§9.4.3）
+    top = list(absmean.sort_values(ascending=False, kind="stable").index[:constants.PLOT_TOP_N or len(FEATURE_NAMES)])
     out = {"n_days": int(len(rows)), "n_changes": float(rows["n_changes"].mean()),
-           "sum_ig": total}
+           "sum_ig": total, "top_features": ";".join(top)}     # 図に並べる上位（順位の順）
     for f in FEATURE_NAMES:
         out[f] = float(mean[f])
         out[f"{f}_std"] = float(std[f])
         out[f"{f}_share"] = float(share[f])
+        out[f"{f}_absmean"] = float(absmean[f])
     return out
 
 
@@ -95,7 +98,7 @@ def build_table(ig_daily: pd.DataFrame, daily_metrics: pd.DataFrame,
         return df
     df["_order"] = pd.to_numeric(df["distance"], errors="coerce")
     df = df.sort_values(["_order", "position"], kind="stable").drop(columns="_order")
-    cols = ["distance", "position", "n_days", "n_changes"] + ACC_COLS + ["sum_ig"]
+    cols = ["distance", "position", "n_days", "n_changes"] + ACC_COLS + ["sum_ig", "top_features"]
     rest = [c for c in df.columns if c not in cols]
     return df[cols + rest]
 

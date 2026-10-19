@@ -25,6 +25,9 @@
 
 ## 3. 計測点・集合の単位
 - 計測点 T ＝ **毎日 0 時**（1 日 1 スナップショット）。各 T のアクティブな Change 群を 1 集合とする（定義・構築コードは `pretrained_encoders` から import）。
+  - **2026-10-18 改めた**：レコードは `build_records` で作らず、**`feature_table` の評価期間の表から、使う範囲を切り出して集合を作る**
+    （`ensure_table(project, "eval")`。表がなければ作り、作った条件の指紋が違えば止める。`feature_table/design.md` §2.6・§2.9。本人判断）。
+    集合は今の `build_records` → `build_sets` と同じになる（テストで確かめる）。
 - **2026-10-15 から、集合・ラベル・文脈の作りは `pretrained_encoders/design.md` §12 に従う**（その日の途中に作られた・復活した Change も入れ、予測の時点・ラベルの窓・見える文脈を Change ごとに決める）。
 - 実測（30.0.0）：1 日あたり Open 約 260 Change・そのうち Δ以内レビュー（正例）約 4 件（≈1.5%）。**正例が薄いのは仕様**（狭い定義×放置 Change 込み全 Open×日次の帰結）。
 
@@ -38,7 +41,11 @@
 - `pretrained_encoders.load_pretrained(project="nova", cutoff="25.0.0", seed)` で**凍結エンコーダ＋汎用ヘッド＋Scaler＋config** を取得。
 - **Scaler は事前学習で fit 済みの統計を使うだけ**（チューニング窓・評価で**再 fit しない**）。
 - **埋め込みは全 Change について 1 回だけ計算してキャッシュ**（凍結なので使い回せる。`embed_sets` を import）。以降は各 (評価日 × 窓長) でキャッシュ埋め込みの上に**線形ヘッドを貼り直す**（`train_probe` を import）。
-- 特徴は 15 種類（`pretrained_encoders` の `FEATURE_NAMES` と同一）。
+  2026-10-20 追記：`embed_sets` は 4 日ずつに分けて計算し、かたまりごとに GPU のキャッシュを空にするように改めた（メモリのため。値は変わらない。
+  `pretrained_encoders/design.md` §6）。本ディレクトリのコードは変えない。
+- 特徴は ~~15 種類（`pretrained_encoders` の `FEATURE_NAMES` と同一）~~。
+  **2026-10-18 改めた**：`pretrained_encoders/features/feature_set.py` の `MODEL_FEATURES`（相関で残したもの）。値は評価期間の表から読む。
+  load したエンコーダの特徴量の並びが `MODEL_FEATURES` と違えば、`load_pretrained` が止める（`pretrained_encoders/design.md` §6）。
 - **汎用ヘッド（チューニングなし）の基準線**：load した汎用ヘッドを各評価日にそのまま適用した AUC も算出し、**デフォルトで図に重ねる**（「窓チューニングが汎用より効くか」の比較用。`--no-general` で外せる）。
 
 ## 6. 欠測ガード

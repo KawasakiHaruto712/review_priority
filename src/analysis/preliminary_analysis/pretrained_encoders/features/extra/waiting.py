@@ -2,7 +2,8 @@
 
 人のコメントかどうかは MessageFact.is_human（bot_detection.is_auto_record）に任せる。作者を除くかは特徴量ごと（§13.2）：
 W8・W9・W18 は作者以外、W13 は作者だけ、W10 は作者を含む。
-CI の結果を読まないリポジトリ（Qt の 3 件。repo_rules.uses_ci）では CI の 5 つ（W6・W15 の 3 つ・W16）をすべて −1 にする。
+CI の結果を読まないリポジトリ（Qt の 3 件。repo_rules.uses_ci）では CI の 5 つ（W6・W15 の 3 つ・W16）を ~~すべて −1 にする~~
+§13.2 の代わりの値で埋める（2026-10-18 改めた：最後の CI からの日数は作成からの日数、結果・失敗の割合は 0.5、回数は 0）。
 """
 from __future__ import annotations
 
@@ -12,7 +13,8 @@ from src.analysis.preliminary_analysis.pretrained_encoders.features.extra import
 from src.analysis.preliminary_analysis.pretrained_encoders.features.extra.common import ChangeFacts
 from src.analysis.preliminary_analysis.pretrained_encoders.features.extra.ticket import _MENTION_RE
 
-MISSING = -1.0   # 値が出せないとき（§13.2）
+MISSING = -1.0   # 版がないなど、代わりの値も出せないとき（レコードでは起きない。§12.4・§13.2）
+MISSING_RATE = 0.5   # 割合の代わりの値（§13.2）
 _DAY = 86400.0
 
 WAITING_FEATURES = [
@@ -44,14 +46,26 @@ def weighted_vote_score(facts: ChangeFacts, t: datetime) -> float:
     return float(total)
 
 
-def waiting_features(facts: ChangeFacts, t: datetime, repo: str) -> dict[str, float]:
-    """そのレコード（Change, t）の待っている間の動きの 17 個。"""
+def waiting_features(facts: ChangeFacts, t: datetime, repo: str, filled: set | None = None) -> dict[str, float]:
+    """そのレコード（Change, t）の待っている間の動きの 17 個。
+
+    値が出せないときは §13.2 の代わりの値（2026-10-18 改めた。旧版は −1）。filled を渡すと、代わりの値を入れた特徴量の名前を足す。
+    """
+    fill: set = set()
     msgs = facts.messages_until(t)
     human = [m for m in msgs if m.is_human]
     reviewer_comments = [m for m in human if not m.is_owner]
     revs = facts.revisions_until(t)
     gaps = [_days(a.created, b.created) for a, b in zip(revs, revs[1:])]
     first_resp = next((m for m in msgs if not m.is_owner and (m.is_bot or m.is_human)), None)
+    if gaps:
+        avg_gap = sum(gaps) / len(gaps)
+    elif revs:                   # 版が 1 つだけ → 最初の版の作成から t までの日数（§13.2）
+        avg_gap = _days(revs[0].created, t)
+        fill.add("avg_days_between_revisions")
+    else:                        # 版がない（レコードでは起きない。§12.4）
+        avg_gap = MISSING
+    since_created = _days(facts.created, t)
 
     out = {
         "created_weekday_utc": float((facts.created.weekday() + 1) % 7),     # 日曜 0〜土曜 6
@@ -63,14 +77,17 @@ def waiting_features(facts: ChangeFacts, t: datetime, repo: str) -> dict[str, fl
         "author_comment_count": float(sum(1 for m in human if m.is_owner)),
         "bot_event_count": float(sum(1 for m in msgs if m.is_bot)),
         "first_response_is_bot": float(first_resp is not None and first_resp.is_bot),
-        "avg_days_between_revisions": sum(gaps) / len(gaps) if gaps else MISSING,
+        "avg_days_between_revisions": avg_gap,
         "last_comment_has_mention": float(bool(reviewer_comments)
                                           and bool(_MENTION_RE.search(reviewer_comments[-1].text))),
         "was_restored": float(any(m.is_restore for m in msgs)),
     }
 
     if not repo_rules.uses_ci(repo):
-        out.update({k: MISSING for k in CI_FEATURES})
+        # Qt の 3 件は CI の結果を読まない → 5 つとも代わりの値（§13.5。2026-10-18 改めた。旧版は −1）
+        out.update({"days_since_last_ci": since_created, "ci_last_result": MISSING_RATE,
+                    "ci_fail_ratio": MISSING_RATE, "ci_run_count": 0.0, "recheck_count": 0.0})
+        fill.update(CI_FEATURES)
     else:
         ci = [m for m in msgs if m.ci_result is not None]
         recheck, last_ci = 0, None
@@ -79,11 +96,17 @@ def waiting_features(facts: ChangeFacts, t: datetime, repo: str) -> dict[str, fl
                 last_ci = m.ci_result
             elif m.is_human and last_ci == 0 and "recheck" in m.text.lower():
                 recheck += 1                             # 直前の CI の結果が失敗のときだけ
-        out.update({
-            "days_since_last_ci": _days(ci[-1].date, t) if ci else MISSING,
-            "ci_last_result": float(ci[-1].ci_result) if ci else MISSING,
-            "ci_fail_ratio": sum(1 for m in ci if m.ci_result == 0) / len(ci) if ci else MISSING,
-            "ci_run_count": float(len(ci)),
-            "recheck_count": float(recheck),
-        })
+        if ci:
+            out.update({
+                "days_since_last_ci": _days(ci[-1].date, t),
+                "ci_last_result": float(ci[-1].ci_result),
+                "ci_fail_ratio": sum(1 for m in ci if m.ci_result == 0) / len(ci),
+            })
+        else:                    # CI の結果がまだない → 作成からの日数・割合は 0.5（§13.2）
+            out.update({"days_since_last_ci": since_created, "ci_last_result": MISSING_RATE,
+                        "ci_fail_ratio": MISSING_RATE})
+            fill.update(("days_since_last_ci", "ci_last_result", "ci_fail_ratio"))
+        out.update({"ci_run_count": float(len(ci)), "recheck_count": float(recheck)})
+    if filled is not None:
+        filled.update(fill)
     return {k: float(out[k]) for k in WAITING_FEATURES}

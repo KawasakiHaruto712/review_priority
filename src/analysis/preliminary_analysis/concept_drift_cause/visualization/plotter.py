@@ -4,7 +4,9 @@
   個別セル図   (距離, 位置) の組 1 つを 1 枚の横向き発散棒グラフにする
   格子一覧     その個別セル図を距離の行ごと・位置の列ごとに格子状に並べる（集約はしない）
 
-棒は中央 0 の左右振り分けで、15 次元すべてを `FEATURE_NAMES` の定義順に並べる。
+棒は中央 0 の左右振り分けで、~~15 次元すべてを `FEATURE_NAMES` の定義順に並べる~~。
+2026-10-18 改めた：セルごとに、評価日を通した寄与の絶対値の平均で上位 PLOT_TOP_N 件（既定 10）を選び、順位の順に上から並べる（§9.4.3）。
+格子一覧も各パネルがそのセルの上位なので、特徴量名はすべてのパネルに書く（§9.4.6）。
 軸はプロジェクト × 系列ごとに共通（§9.4.5）。
 """
 from __future__ import annotations
@@ -20,7 +22,7 @@ import pandas as pd
 
 from src.analysis.preliminary_analysis.concept_drift_cause.utils import constants
 from src.analysis.preliminary_analysis.lookback_window.visualization._fonts import configure_japanese_font
-from src.analysis.preliminary_analysis.pretrained_encoders.features.feature_builder import FEATURE_NAMES
+from src.analysis.preliminary_analysis.pretrained_encoders.model.set_transformer import FEATURE_NAMES   # MODEL_FEATURES
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +38,29 @@ def _row(stats: pd.DataFrame, distance, position) -> pd.Series | None:
     return None if s.empty else s.iloc[0]
 
 
+def top_features(row: pd.Series, top_n: int | None = None) -> list[str]:
+    """そのセルで図に並べる特徴量（§9.4.3）：評価日を通した寄与の絶対値の平均（<特徴量>_absmean）の大きい順に上位 top_n 件。
+
+    _absmean がない行（古い形の表）は |平均| で代える。同じ値は特徴量の並びの順。top_n が None なら全特徴量。
+    """
+    top_n = constants.PLOT_TOP_N if top_n is None else top_n
+    score = [abs(float(row.get(f + "_absmean", abs(float(row[f]))))) for f in FEATURE_NAMES]
+    order = sorted(range(len(FEATURE_NAMES)), key=lambda k: (-np.nan_to_num(score[k], nan=-1.0), k))
+    if top_n is not None:
+        order = order[:top_n]
+    return [FEATURE_NAMES[k] for k in order]
+
+
 def _draw_bars(ax, row: pd.Series, lim: float, *, show_labels: bool,
-               show_error_bars: bool, show_values: bool) -> None:
-    """1 つのセルの棒を ax に描く。row が None のときは呼ばない。"""
-    y = np.arange(len(FEATURE_NAMES))[::-1]          # 上から定義順に並べる
-    mean = np.array([row[f] for f in FEATURE_NAMES], dtype=float)
-    std = np.array([row.get(f + "_std", np.nan) for f in FEATURE_NAMES], dtype=float)
+               show_error_bars: bool, show_values: bool, label_fontsize: float = 8) -> None:
+    """1 つのセルの棒を ax に描く。row が None のときは呼ばない。
+
+    並べるのはそのセルの上位 PLOT_TOP_N 件で、順位の順に上から（§9.4.3。2026-10-18 改めた）。
+    """
+    names = top_features(row)
+    y = np.arange(len(names))[::-1]                  # 上から順位の順に並べる
+    mean = np.array([row[f] for f in names], dtype=float)
+    std = np.array([row.get(f + "_std", np.nan) for f in names], dtype=float)
     std = np.nan_to_num(std, nan=0.0)
     colors = [POS_COLOR if v >= 0 else NEG_COLOR for v in mean]
 
@@ -50,11 +69,11 @@ def _draw_bars(ax, row: pd.Series, lim: float, *, show_labels: bool,
             error_kw=dict(ecolor="#555555", elinewidth=0.8, capsize=2) if show_error_bars else None)
     ax.axvline(0, color="#333333", linewidth=0.8)
     ax.set_xlim(-lim, lim)
-    ax.set_ylim(-0.7, len(FEATURE_NAMES) - 0.3)
+    ax.set_ylim(-0.7, len(names) - 0.3)
 
     if show_labels:
         ax.set_yticks(y)
-        ax.set_yticklabels(FEATURE_NAMES, fontsize=8)
+        ax.set_yticklabels(names, fontsize=label_fontsize)
     else:
         ax.set_yticks([])
 
@@ -147,11 +166,11 @@ def plot_grid(stats, info, project, version, series, group, *, fixed: str, fixed
         ax = axes[i // cols][i % cols]
         d, p = (fixed_value, v) if fixed == "distance" else (v, fixed_value)
         row = _row(stats, d, p)
-        # 特徴量名は各行の左端パネルにのみ（§9.4.6）
+        # 特徴量名は ~~各行の左端パネルにのみ~~ すべてのパネルに書く（パネルごとに上位が違うため。§9.4.6。2026-10-18 改めた）
         if row is None:
             _empty_panel(ax)
         else:
-            _draw_bars(ax, row, lim, show_labels=(i % cols == 0),
+            _draw_bars(ax, row, lim, show_labels=True, label_fontsize=5,
                        show_error_bars=False, show_values=False)
             ax.tick_params(axis="x", labelsize=6)
         # パネル見出しは 2 行（§9.4.7）。セルの規模が不揃いなので、AUC だけだと

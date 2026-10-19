@@ -20,10 +20,12 @@ import torch
 import torch.nn as nn
 
 from src.analysis.preliminary_analysis.pretrained_encoders.dataset.set_builder import TSet
-from src.analysis.preliminary_analysis.pretrained_encoders.features.feature_builder import FEATURE_NAMES
+from src.analysis.preliminary_analysis.pretrained_encoders.features.feature_set import MODEL_FEATURES
 from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants
 
-FEATURE_DIM = len(FEATURE_NAMES)  # 15
+# モデルの入力の並び（相関で残した特徴量。design.md §12.5。2026-10-18 に FEATURE_NAMES（既存の 15 個）から改めた）
+FEATURE_NAMES = MODEL_FEATURES
+FEATURE_DIM = len(MODEL_FEATURES)
 
 
 # ── デバイス（MPS があれば MPS、無ければ CPU） ─────────────────────
@@ -36,6 +38,15 @@ def resolve_device() -> torch.device:
     return torch.device(want)
 
 
+def release_device_cache(device: torch.device) -> None:
+    """GPU（MPS）が抱えているキャッシュを手放す（design.md §4。2026-10-20）。数値には効かない。CPU では何もしない。
+
+    集合の大きさが日ごとに違うので、計算の後のメモリを PyTorch が再利用しきれずに抱え続け、上限に達してメモリ不足になった。
+    """
+    if torch.device(device).type == "mps":
+        torch.mps.empty_cache()
+
+
 # ── 特徴の標準化 ────────────────────────────────────
 class Scaler:
     """特徴を平均0・分散1に標準化する（事前学習データで統計量を fit）。"""
@@ -46,9 +57,11 @@ class Scaler:
 
     @classmethod
     def fit(cls, sets: list[TSet]) -> "Scaler":
-        feats = np.array([f for s in sets for f in s.feats], dtype=np.float64)
-        if feats.size == 0:
+        # 集合の特徴は list でも numpy の配列でもよい（表から作った集合は配列のまま。feature_table/design.md §2.9）
+        parts = [np.asarray(s.feats, dtype=np.float64).reshape(len(s), -1) for s in sets if len(s)]
+        if not parts:
             return cls(np.zeros(FEATURE_DIM), np.ones(FEATURE_DIM))
+        feats = np.concatenate(parts, axis=0)
         return cls(feats.mean(axis=0), feats.std(axis=0))
 
     def transform(self, feats: np.ndarray) -> np.ndarray:
@@ -170,10 +183,68 @@ def _iter_batches(sets: list[TSet], batch_sets: int):
 
 
 # ── 教師あり事前学習（design.md §4） ──────────────────────────
+_BCE_SUM = nn.BCEWithLogitsLoss(reduction="sum")
+
+
+def batch_backward(encoder: SetEncoder, head: Head, batch: list[TSet], scaler: Scaler, device: torch.device,
+                   micro_sets: int | None) -> float:
+    """1 バッチぶんの勾配を積む（更新はしない）。返り値はバッチ全体の平均の損失。
+
+    勾配累積（design.md §4。2026-10-19）：バッチを micro_sets 個の集合ずつに分けて順伝播・逆伝播し、勾配を足し合わせる。
+    各かたまりは「かたまりの損失の和 ÷ バッチ全体の有効な Change の数 N」を逆伝播するので、合計はバッチ全体の平均の損失の勾配と
+    数学的に同じになる（勾配は和について線形。集合どうしは互いに影響しないので、かたまりごとのパディングの違いも効かない）。
+    micro_sets が None ならバッチをまとめて 1 回で計算する。
+    """
+    n_total = sum(len(s) for s in batch)
+    if n_total == 0:
+        return float("nan")
+    size = len(batch) if micro_sets is None else max(1, int(micro_sets))
+    total = 0.0
+    for chunk in _iter_batches(batch, size):
+        feats, labels, valid = _pad_batch(chunk, scaler, device)
+        emb = encoder(feats, valid, _context_batch(chunk, feats.shape[1], device))
+        logits = head(emb)                    # (B, L)
+        m = valid.reshape(-1)
+        loss = _BCE_SUM(logits.reshape(-1)[m], labels.reshape(-1)[m]) / n_total
+        loss.backward()
+        total += float(loss.detach())
+        del feats, labels, valid, emb, logits, loss   # かたまりの中間の値を次のかたまりの前に手放す
+        release_device_cache(device)                  # 2026-10-20：キャッシュの積み上がりを防ぐ（§4）
+    return total
+
+
+class NonFiniteError(RuntimeError):
+    """事前学習の途中で損失・勾配・重みが非有限になった（design.md §4 の NaN の点検。2026-10-20）。info に位置を持つ。"""
+
+    def __init__(self, message: str, info: dict):
+        super().__init__(message)
+        self.info = info
+
+
+def _nonfinite_params(named) -> list[str]:
+    return [n for n, p in named if not torch.isfinite(p.detach()).all()]
+
+
+def _check_finite(encoder: SetEncoder, head: Head, batch: list[TSet], loss: float, epoch: int, batch_idx: int) -> None:
+    """損失・勾配・重みが有限かを確かめ、非有限なら NonFiniteError（design.md §4）。重みは更新の後に呼ぶ。"""
+    named = list(encoder.named_parameters()) + [("head." + n, p) for n, p in head.named_parameters()]
+    has_items = sum(len(s) for s in batch) > 0          # 空のバッチは損失が NaN を返すが、非有限とはみなさない
+    what = {"loss": has_items and not np.isfinite(loss),
+            "grad": [n for n, p in named if p.grad is not None and not torch.isfinite(p.grad.detach()).all()],
+            "weight": _nonfinite_params(named)}
+    if what["loss"] or what["grad"] or what["weight"]:
+        info = {"epoch": epoch, "batch": batch_idx, "loss": None if not np.isfinite(loss) else float(loss),
+                "nonfinite_loss": bool(what["loss"]), "nonfinite_grad": what["grad"], "nonfinite_weight": what["weight"],
+                "set_sizes": [len(s) for s in batch], "set_days": [str(s.t) for s in batch]}
+        raise NonFiniteError(f"事前学習の途中で非有限になりました（エポック {epoch}・バッチ {batch_idx}・損失 {loss}・"
+                             f"勾配 {len(what['grad'])} 個・重み {len(what['weight'])} 個）", info)
+
+
 def pretrain(pretrain_sets: list[TSet], scaler: Scaler, seed: int, device: torch.device):
     """エンコーダ＋仮ヘッドを「Δ以内レビュー(0/1)」予測で学習し、（凍結）エンコーダと仮ヘッドを返す。
 
     仮ヘッド（＝汎用ヘッド）は評価・保存に使うため破棄せず返す。
+    バッチごとに損失・勾配・更新後の重みが有限かを確かめ、非有限なら NonFiniteError で止める（design.md §4。2026-10-20）。
     """
     torch.manual_seed(seed)
     encoder = SetEncoder(constants.D_MODEL, constants.N_LAYERS, constants.N_HEADS,
@@ -181,21 +252,19 @@ def pretrain(pretrain_sets: list[TSet], scaler: Scaler, seed: int, device: torch
     head = _make_head().to(device)
     params = list(encoder.parameters()) + list(head.parameters())
     opt = torch.optim.Adam(params, lr=constants.PRETRAIN_LR)
-    loss_fn = nn.BCEWithLogitsLoss()
 
     encoder.train(); head.train()
     order = list(range(len(pretrain_sets)))
     rng = np.random.default_rng(seed)
-    for _ in range(constants.PRETRAIN_EPOCHS):
+    for epoch in range(1, constants.PRETRAIN_EPOCHS + 1):
         rng.shuffle(order)
         shuffled = [pretrain_sets[i] for i in order]
-        for batch in _iter_batches(shuffled, constants.PRETRAIN_BATCH_SETS):
-            feats, labels, valid = _pad_batch(batch, scaler, device)
-            emb = encoder(feats, valid, _context_batch(batch, feats.shape[1], device))
-            logits = head(emb)                    # (B, L)
-            m = valid.reshape(-1)
-            loss = loss_fn(logits.reshape(-1)[m], labels.reshape(-1)[m])
-            opt.zero_grad(); loss.backward(); opt.step()
+        for b, batch in enumerate(_iter_batches(shuffled, constants.PRETRAIN_BATCH_SETS), start=1):
+            # 2026-10-19 改めた：勾配累積（PRETRAIN_MICRO_SETS 個ずつ。design.md §4）。旧版はバッチをまとめて 1 回で計算していた
+            opt.zero_grad()
+            loss = batch_backward(encoder, head, batch, scaler, device, constants.PRETRAIN_MICRO_SETS)
+            opt.step()
+            _check_finite(encoder, head, batch, loss, epoch, b)   # 2026-10-20：NaN の点検（§4）
 
     # エンコーダを凍結（以降は推論のみ）
     encoder.eval()
@@ -208,13 +277,19 @@ def pretrain(pretrain_sets: list[TSet], scaler: Scaler, seed: int, device: torch
 # ── 埋め込みキャッシュ（下流が使う） ─────────────────────────────
 @torch.no_grad()
 def embed_sets(encoder: SetEncoder, scaler: Scaler, sets: list[TSet], device: torch.device) -> list[np.ndarray]:
-    """凍結エンコーダで各集合の per-item 埋め込みを計算（キャッシュ用）。集合ごとに (L, d_model) を返す。"""
+    """凍結エンコーダで各集合の per-item 埋め込みを計算（キャッシュ用）。集合ごとに (L, d_model) を返す。
+
+    2026-10-20 改めた：EMBED_CHUNK_SETS（4）個ずつ計算し、かたまりごとに GPU のキャッシュを空にする（design.md §6。メモリのため。
+    旧版は PRETRAIN_BATCH_SETS（16）個まとめていた。集合どうしは互いに影響しないので値は変わらない）。
+    """
     out: list[np.ndarray] = []
-    for batch in _iter_batches(sets, constants.PRETRAIN_BATCH_SETS):
+    for batch in _iter_batches(sets, constants.EMBED_CHUNK_SETS):
         feats, _labels, valid = _pad_batch(batch, scaler, device)
         emb = encoder(feats, valid, _context_batch(batch, feats.shape[1], device)).cpu().numpy()  # (B, Lmax, d_model)
         for i, s in enumerate(batch):
             out.append(emb[i, :len(s)])             # パディング除去
+        del feats, valid
+        release_device_cache(device)
     return out
 
 

@@ -29,12 +29,14 @@ def _alphas(steps: int, device) -> torch.Tensor:
 
 
 def item_attributions(encoder, head, feats_std: np.ndarray, steps: int, device,
-                      items=None, ctx_block: np.ndarray | None = None) -> np.ndarray:
+                      items=None, ctx_block: np.ndarray | None = None, step_chunk: int | None = None) -> np.ndarray:
     """その日の Change ごとの IG を (len(items), 15) で返す（items 省略時は全件）。
 
     feats_std : (L, 15) 標準化済みの特徴（`st.standardize_feats`）
     ctx_block : (L, L) の文脈のマスク（True=見えない。`st.context_block_mask(集合)`。pretrained_encoders/design.md §12.4）。
                 None なら全員が互いに見える。距離×時期行列の分析と同じ文脈でロジットを計算するために渡す。
+    step_chunk: 一度に計算する段階の数（design.md §2.4。2026-10-20）。段階を分けて勾配を足し、最後に steps で割るので値は変わらない。
+                None なら全段階をまとめて 1 回（旧版と同じ）。かたまりごとに GPU のキャッシュを空にする。
     """
     n_items = feats_std.shape[0]
     idx = list(range(n_items)) if items is None else list(items)
@@ -45,31 +47,40 @@ def item_attributions(encoder, head, feats_std: np.ndarray, steps: int, device,
     x = torch.from_numpy(feats_std).to(device)
     base = x.mean(dim=0)                                   # その日の集合の平均（§2.3）
     alphas = _alphas(steps, device)
-    valid = torch.ones(steps, n_items, dtype=torch.bool, device=device)
-    ctx = (None if ctx_block is None
-           else torch.from_numpy(np.asarray(ctx_block, dtype=bool)).to(device).unsqueeze(0).repeat(steps, 1, 1))
+    chunk = steps if step_chunk is None else max(1, min(int(step_chunk), steps))
+    ctx_one = None if ctx_block is None else torch.from_numpy(np.asarray(ctx_block, dtype=bool)).to(device).unsqueeze(0)
 
     for i, j in enumerate(idx):
         delta = x[j] - base                                 # (15,)
-        # 段階ごとに「対象 j だけ」基準点→実際の値へ動かした集合を steps 個作る
-        moved = (base.unsqueeze(0) + alphas * delta.unsqueeze(0)).requires_grad_(True)
-        batch = x.unsqueeze(0).repeat(steps, 1, 1)
-        batch = torch.cat([batch[:, :j, :], moved.unsqueeze(1), batch[:, j + 1:, :]], dim=1)
-        logits = st.item_logits(encoder, head, batch, valid, ctx)[:, j]   # 対象 j のロジットのみ
-        logits.sum().backward()
-        out[i] = (moved.grad.mean(dim=0) * delta).detach().cpu().numpy()
+        grad_sum = torch.zeros_like(delta)
+        # 段階ごとに「対象 j だけ」基準点→実際の値へ動かした集合を作る。chunk 個ずつ計算して勾配を足す（§2.4）
+        for a in range(0, steps, chunk):
+            al = alphas[a:a + chunk]
+            m = al.shape[0]
+            valid = torch.ones(m, n_items, dtype=torch.bool, device=device)
+            ctx = None if ctx_one is None else ctx_one.repeat(m, 1, 1)
+            moved = (base.unsqueeze(0) + al * delta.unsqueeze(0)).requires_grad_(True)
+            batch = x.unsqueeze(0).repeat(m, 1, 1)
+            batch = torch.cat([batch[:, :j, :], moved.unsqueeze(1), batch[:, j + 1:, :]], dim=1)
+            logits = st.item_logits(encoder, head, batch, valid, ctx)[:, j]   # 対象 j のロジットのみ
+            logits.sum().backward()
+            grad_sum += moved.grad.detach().sum(dim=0)
+            del valid, ctx, moved, batch, logits
+            if chunk < steps:
+                st.release_device_cache(device)
+        out[i] = ((grad_sum / steps) * delta).cpu().numpy()   # 経路上の勾配の平均 × (実際の値 − 基準点)
     return out
 
 
 def day_profiles(encoder, head, feats_std: np.ndarray, labels, steps: int, device,
-                 ctx_block: np.ndarray | None = None) -> dict:
+                 ctx_block: np.ndarray | None = None, step_chunk: int | None = None) -> dict:
     """1 評価日・1 モデルの {群 -> 15 次元プロファイル} と件数を返す（§3.1）。
 
     群分けは**正解ラベル**（モデルに依存しないので、別のモデル同士でも同じ Change 群を比べられる）。
     群の中は単純平均。
     """
     y = np.asarray(labels, dtype=float)
-    attrs = item_attributions(encoder, head, feats_std, steps, device, ctx_block=ctx_block)
+    attrs = item_attributions(encoder, head, feats_std, steps, device, ctx_block=ctx_block, step_chunk=step_chunk)
     pos = attrs[y == 1]
     neg = attrs[y == 0]
     return {

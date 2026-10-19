@@ -20,7 +20,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from src.analysis.background_problem.common.data_loader import load_changes, load_release_dates
+from src.analysis.background_problem.common.data_loader import load_release_dates
 from src.analysis.preliminary_analysis.lookback_window.evaluation import metrics as M
 from src.analysis.preliminary_analysis.lookback_window.evaluation import ranking
 from src.analysis.preliminary_analysis.lookback_window.io import rank_io, result_io
@@ -28,11 +28,9 @@ from src.analysis.preliminary_analysis.lookback_window.sweep import window_sweep
 from src.analysis.preliminary_analysis.lookback_window.utils import constants
 from src.analysis.preliminary_analysis.lookback_window.visualization import plotter, table
 from src.analysis.preliminary_analysis.pretrained_encoders import build_encoders
-from src.analysis.preliminary_analysis.pretrained_encoders.features import feature_builder
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
 from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre_constants
-from src.utils.bot_detection import BotDetector, host_of
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     stream=sys.stdout)
@@ -59,9 +57,9 @@ def _resolve_seeds(project: str, n_seeds: int | None) -> list[int]:
 def run(project: str, versions: list[str], n_seeds: int | None) -> None:
     """モデルを走らせて生予測・指標を保存し、表＋折れ線を描く。"""
     rel_df = load_release_dates()
-    changes = load_changes(project)
-    detector = BotDetector(host_of(project))
-    all_prs = feature_builder.build_all_prs_df(changes, detector)
+    # 特徴量は feature_table の評価期間の表から読む（2026-10-18 改めた。design.md §3。なければ作り、指紋が違えば止める）
+    from src.analysis.preliminary_analysis.feature_table.build import ensure_table
+    feat_table = ensure_table(project, "eval", rel_df=rel_df)
     device = st.resolve_device()
     logger.info(f"device = {device}")
 
@@ -80,8 +78,7 @@ def run(project: str, versions: list[str], n_seeds: int | None) -> None:
         span_start = window_sweep.span_start_for(cs_R)
         logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()} / "
                     f"学習データ開始 {span_start.date()}）---")
-        day_sets = window_sweep.build_day_sets(changes, project, span_start, ce_R,
-                                               detector, all_prs, rel_df)
+        day_sets = window_sweep.build_day_sets(feat_table, span_start, ce_R)
         eval_dates = [d for d in sorted(day_sets) if cs_R.date() <= d <= ce_R.date()]
         logger.info(f"評価日数: {len(eval_dates)} / 全日集合: {len(day_sets)}")
 

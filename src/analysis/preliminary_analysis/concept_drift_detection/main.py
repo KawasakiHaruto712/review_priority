@@ -9,7 +9,7 @@
   「各プロジェクトの最新版だけ先に確認する」なら `--version` で最新版を指定して 6 回回す。
 
 流れ（上から順に追える構成）:
-  1. データ読み込み（changes / release_dates / bot 名 / 特徴用 DataFrame）
+  1. データ読み込み（release_dates と、feature_table の評価期間の表。2026-10-18 改めた：Change の JSON からレコードを作らない）
   2. 事前学習エンコーダ＋汎用ヘッドを pretrained_encoders から load（不足 seed は自動作成。§6.1）
   3. 各対象リリースで:
        レコード生成（範囲は §4.4 で逆算）→ 日ごとの集合 → 位置（列）の割当（§4.3）
@@ -86,11 +86,14 @@ def _save_kind(res_by_metric: dict, base_dir: Path, meta: dict) -> None:
             plotter.plot_all(mr, out, constants.PLOT_DPI)
 
 
-def analyze(changes, rel_df, project, versions, out_root, detector=None):
-    """1 プロジェクトの全リリースを実行して出力する（テスト可能なコア）。"""
+def analyze(table, rel_df, project, versions, out_root):
+    """1 プロジェクトの全リリースを実行して出力する（テスト可能なコア）。
+
+    table：feature_table の評価期間の表（2026-10-18 改めた。design.md §3。各版の §4.4 の範囲を切り出して集合を作る）。
+    """
+    from src.analysis.preliminary_analysis.feature_table.build.sets import day_sets_from_table
+
     out_root = Path(out_root)
-    detector = BotDetector(host_of(project)) if detector is None else detector
-    all_prs = feature_builder.build_all_prs_df(changes, detector)
     device = st.resolve_device()
     logger.info(f"device = {device}")
     model_name = constants.MODEL_NAME[0]
@@ -121,9 +124,8 @@ def analyze(changes, rel_df, project, versions, out_root, detector=None):
                                          constants.BIN_DAY_ALIGNED)
         logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()} / "
                     f"レコード生成 {rec_start.date()} から）---")
-        records = record_builder.build_records(changes, project, rec_start, ce_R,
-                                               detector, all_prs, rel_df)
-        day_sets = {s.t.date(): s for s in set_builder.build_sets(records, constants.MAX_SET_SIZE)}
+        day_sets = {s.t.date(): s for s in day_sets_from_table(table, rec_start, ce_R,
+                                                                 max_set_size=constants.MAX_SET_SIZE)}
         positions = binning.position_of_days(ce_R, step, grid, constants.BIN_DAY_ALIGNED)
         eval_dates = [d for d in sorted(day_sets) if d in positions]
         logger.info(f"評価日数: {len(eval_dates)} / 全日集合: {len(day_sets)}")
@@ -191,8 +193,10 @@ def run(projects=None, versions=None) -> None:
                 logger.warning(f"スキップ（該当する版なし）: {project}")
                 continue
         logger.info(f"===== プロジェクト: {project}（版 {', '.join(vs)}）=====")
-        changes = load_changes(project)
-        analyze(changes, rel_df, project, vs, constants.OUTPUT_ROOT)
+        # 特徴量は feature_table の評価期間の表から読む（なければ作り、指紋が違えば止める。feature_table/design.md §2.6）
+        from src.analysis.preliminary_analysis.feature_table.build import ensure_table
+        table = ensure_table(project, "eval", rel_df=rel_df)
+        analyze(table, rel_df, project, vs, constants.OUTPUT_ROOT)
 
 
 def _parse_args():

@@ -73,6 +73,12 @@ PRETRAIN_METHOD = "supervised"
 PRETRAIN_EPOCHS = 20
 PRETRAIN_LR = 1e-3
 PRETRAIN_BATCH_SETS = 16     # 事前学習の 1 バッチに含める集合（T）の数
+# 勾配累積（design.md §4。2026-10-19）：1 バッチをこの数の集合ずつに分けて逆伝播し、勾配を足してから 1 回更新する
+# （16 日をまとめて計算したときと数学的に同じ更新。qtbase のメモリ不足への対処）。None なら分けない
+PRETRAIN_MICRO_SETS = 4
+# 2026-10-20：かたまりごとに GPU（MPS）のキャッシュを空にする（design.md §4。キャッシュの積み上がりでメモリ不足になったため。数値には効かない）
+# 埋め込み（embed_sets）を一度に計算する集合の数（design.md §6。2026-10-20。旧版は PRETRAIN_BATCH_SETS＝16 日まとめていた。値は変わらない）
+EMBED_CHUNK_SETS = 4
 
 # ── linear probing（下流が使う。model.train_probe 用） ──────────
 PROBE_EPOCHS = 100

@@ -1,10 +1,10 @@
 """事前学習エンコーダ＋汎用ヘッドの作成・保存（design.md）。
 
 流れ（上から順に追える構成）:
-  1. データ読み込み（changes / release_dates / bot 名 / 特徴用 DataFrame）
-  2. 締め切り（PROJECTS[project] の cutoff リリース日）を決める
-  3. プロジェクト開始 〜 締め切り の計測点で pretraining 集合を作る
-  4. N 個（seed 違い）のエンコーダ＋汎用ヘッドを事前学習して保存
+  1. 締め切り（PROJECTS[project] の cutoff リリース日）を決める
+  2. feature_table の事前学習の表（プロジェクト開始 〜 締め切り）から pretraining 集合を作る
+     （2026-10-18 改めた。表がなければ作り、作った条件の指紋が違えば止める。特徴量は MODEL_FEATURES）
+  3. N 個（seed 違い）のエンコーダ＋汎用ヘッドを事前学習して保存
 
 実行:
     python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders                    # PROJECTS の 6 件を順に、各 N_REPEATS 個
@@ -19,13 +19,11 @@ import sys
 
 import pandas as pd
 
-from src.analysis.background_problem.common.data_loader import load_changes, load_release_dates
-from src.analysis.preliminary_analysis.pretrained_encoders.dataset import record_builder, set_builder
-from src.analysis.preliminary_analysis.pretrained_encoders.features import feature_builder
+from src.analysis.background_problem.common.data_loader import load_release_dates
+from src.analysis.preliminary_analysis.pretrained_encoders.dataset import set_builder
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
 from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants
-from src.utils.bot_detection import BotDetector, host_of
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     stream=sys.stdout)
@@ -49,13 +47,14 @@ def _resolve_cutoff(rel_df: pd.DataFrame, project: str):
     return dt, label
 
 
-def build_and_save(project: str, n: int | None = None, seed_indices=None) -> None:
+def build_and_save(project: str, n: int | None = None, seed_indices=None) -> list[int]:
     """指定プロジェクトの共有エンコーダ＋汎用ヘッドを作って保存する。
 
     project: 対象プロジェクト（必須）。PROJECTS か OPENSTACK_PROJECTS に定義が必要。
              旧版の既定 constants.TARGET_PROJECT="nova" は廃止した（design.md §7）。
     seed_indices を渡すと、その index(k) だけを作る（不足分の追加ビルド用）。
     未指定なら 0..n-1（n 既定 N_REPEATS）。
+    返り値は、非有限で止まって保存しなかった seed の index（design.md §4。2026-10-20）。
     """
     if seed_indices is None:
         n = constants.N_REPEATS if n is None else n
@@ -63,35 +62,42 @@ def build_and_save(project: str, n: int | None = None, seed_indices=None) -> Non
     else:
         seed_indices = list(seed_indices)
 
-    # 1. データ読み込み
+    # 1. 締め切り
     rel_df = load_release_dates()
-    changes = load_changes(project)
-    detector = BotDetector(host_of(project))
-    all_prs = feature_builder.build_all_prs_df(changes, detector)
     device = st.resolve_device()
     logger.info(f"device = {device}")
-
-    # 2. 締め切り
     cutoff_dt, cutoff_label = _resolve_cutoff(rel_df, project)
-    data_start = all_prs["created"].min().to_pydatetime()
-    logger.info(f"事前学習データ: {data_start.date()} 〜 {cutoff_dt.date()}（cutoff={cutoff_label}）")
 
-    # 3. pretraining 集合
-    pre_records = record_builder.build_records(changes, project, data_start, cutoff_dt,
-                                               detector, all_prs, rel_df)
-    pre_sets = set_builder.build_sets(pre_records, constants.MAX_SET_SIZE)
-    logger.info(f"事前学習用 集合数: {len(pre_sets)}（総レコード {set_builder.count_records(pre_sets)}）")
+    # 2. pretraining 集合：feature_table の事前学習の表から作る（2026-10-18 改めた。design.md §2・feature_table/design.md §2.6・§2.9）。
+    #    表がなければ作り、作った条件の指紋が違えば止める。build_records で全レコードをオブジェクトにしない（メモリのため）
+    from src.analysis.preliminary_analysis.feature_table.build import ensure_table
+    from src.analysis.preliminary_analysis.feature_table.build.sets import day_sets_from_table
+
+    tab = ensure_table(project, "pretrain", rel_df=rel_df)
+    pre_sets = day_sets_from_table(tab, max_set_size=constants.MAX_SET_SIZE)
+    del tab
+    logger.info(f"事前学習データ: 〜 {cutoff_dt.date()}（cutoff={cutoff_label}）。集合数: {len(pre_sets)}"
+                f"（総レコード {set_builder.count_records(pre_sets)}、特徴量 {st.FEATURE_DIM} 個）")
     scaler = st.Scaler.fit(pre_sets)
 
     # 4. 指定 index のエンコーダ＋汎用ヘッドを事前学習して保存
+    #    2026-10-20：途中で非有限になった seed は保存せず記録して、次の seed へ進む（design.md §4 の NaN の点検）
+    failed: list[int] = []
     for i, k in enumerate(seed_indices):
         seed = constants.RANDOM_SEED + k
         logger.info(f"事前学習 {i + 1}/{len(seed_indices)}（seed{k}, torch_seed={seed}）")
-        enc, gh = st.pretrain(pre_sets, scaler, seed, device)
+        try:
+            enc, gh = st.pretrain(pre_sets, scaler, seed, device)
+        except st.NonFiniteError as e:
+            rec = store.save_nonfinite_record(project, cutoff_label, k, {"torch_seed": seed, **e.info})
+            logger.error(f"[{project}] seed{k} は保存しません：{e}（記録：{rec}）")
+            failed.append(k)
+            continue
         out = store.save_pretrained(project, cutoff_label, k, enc, gh, scaler, {"torch_seed": seed})
         logger.info(f"保存: {out}")
 
-    logger.info("完了")
+    logger.info("完了" if not failed else f"完了（非有限で保存しなかった seed：{failed}）")
+    return failed
 
 
 def main() -> None:
@@ -102,9 +108,15 @@ def main() -> None:
                     help="作るエンコーダ数（既定 constants.N_REPEATS）")
     args = ap.parse_args()
     projects = list(constants.PROJECTS) if args.project in (None, "all") else [args.project]
+    failed: dict[str, list[int]] = {}
     for project in projects:
         logger.info(f"===== プロジェクト: {project} =====")
-        build_and_save(project=project, n=args.n)
+        bad = build_and_save(project=project, n=args.n)
+        if bad:
+            failed[project] = bad
+    if failed:   # 止めずに全部回したうえで、飛ばしたものを最後にまとめて知らせる（design.md §4）
+        logger.error(f"非有限で保存しなかった seed：{failed}（記録は <OUTPUT>/<project>/cutoff_<cutoff>/seed<k>_nonfinite.json）")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
