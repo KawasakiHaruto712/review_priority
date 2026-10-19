@@ -99,11 +99,30 @@ def build_index(all_prs_df: pd.DataFrame) -> FastFeatureIndex:
 
 
 def build_features(change: dict, t: datetime, index: FastFeatureIndex,
-                   comp_releases_df: pd.DataFrame, project: str) -> list[float]:
-    """1 レコード (change, T) の 15 次元特徴ベクトルを返す（T 時点で観測可能な情報のみ）。"""
+                   comp_releases_df: pd.DataFrame, project: str,
+                   observation_end: datetime | None = None, filled: set | None = None) -> list[float]:
+    """1 レコード (change, T) の 15 次元特徴ベクトルを返す（T 時点で観測可能な情報のみ）。
+
+    observation_end: 観測の終わり。次の機能リリースが表にないとき days_to_feature_release をここまでの日数にする（§11.4）。
+    filled: 渡すと、値が出せずに代わりの値を入れた特徴量の名前を足す（§13.2。`merge_rate`・`recent_merge_rate`・
+            `days_to_feature_release`。feature_table の印に使う。モデルには入れない）。
+    """
     # 件名・説明文は T の時点で最新の版のもの（design.md §11.3。旧版は最新の版）
     subject, message = change_metrics.get_change_text_data(change, t)
     email = developer_metrics.get_owner_email(change)
+
+    days_to_release = project_metrics.calculate_days_to_feature_release(t, project, comp_releases_df)
+    if days_to_release < 0:
+        # 次のリリースが表にない（§11.4。今回の 6 件の期間では起きない）
+        days_to_release = project_metrics.calculate_days_to_feature_release(
+            t, project, comp_releases_df, observation_end=observation_end)
+        if filled is not None:
+            filled.add("days_to_feature_release")
+    if filled is not None:
+        if index.past_report_count(email, t) == 0:
+            filled.add("merge_rate")
+        if index.recent_report_count(email, t) == 0:
+            filled.add("recent_merge_rate")
 
     return [
         float(bug_metrics.calculate_bug_fix_confidence(subject, message)),
@@ -117,7 +136,7 @@ def build_features(change: dict, t: datetime, index: FastFeatureIndex,
         float(index.recent_report_count(email, t)),
         float(index.merge_rate(email, t)),
         float(index.recent_merge_rate(email, t)),
-        float(project_metrics.calculate_days_to_feature_release(t, project, comp_releases_df)),
+        float(days_to_release),
         float(index.open_ticket_count(t)),
         float(index.reviewed_lines_in_period(t)),
         float(refactoring_metrics.calculate_refactoring_confidence(subject, message)),

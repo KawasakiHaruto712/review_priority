@@ -123,8 +123,8 @@ def _resolve_encoders(project: str, device):
     return encoders, scaler
 
 
-def compute_version(project: str, version: str, spec: dict, *, changes, rel_df, encoders,
-                    scaler, device, detector, all_prs, run_id: str) -> int:
+def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_df, encoders,
+                    scaler, device, run_id: str) -> int:
     """1 版ぶんの IG を計算して保存する。返り値は書いた行数。"""
     window, step = detection.window_for(project), detection.step_for(project)
     # 格子サイズ N_v は版のサイクル長から決まる（距離×時期行列の分析 §4.2 と同じ式）
@@ -149,8 +149,10 @@ def compute_version(project: str, version: str, spec: dict, *, changes, rel_df, 
                                      detection.BIN_DAY_ALIGNED)
     logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()} / "
                 f"レコード生成 {rec_start.date()} から / 距離 {len(distances)} × 位置 {len(target_pos)}）---")
-    records = record_builder.build_records(changes, project, rec_start, ce_R, detector, all_prs, rel_df)
-    day_sets = {s.t.date(): s for s in set_builder.build_sets(records, detection.MAX_SET_SIZE)}
+    # 2026-10-18 改めた：feature_table の評価期間の表から、距離×時期行列の分析と同じ範囲を切り出す（design.md §0）
+    from src.analysis.preliminary_analysis.feature_table.build.sets import day_sets_from_table
+    day_sets = {s.t.date(): s for s in day_sets_from_table(feat_table, rec_start, ce_R,
+                                                             max_set_size=detection.MAX_SET_SIZE)}
     pos_of = binning.position_of_days(ce_R, step, grid, detection.BIN_DAY_ALIGNED)
 
     probes = {k: probe_store.load_probes(constants.DETECTION_ROOT, project, window, k)
@@ -179,13 +181,14 @@ def compute_version(project: str, version: str, spec: dict, *, changes, rel_df, 
             head = st.head_from_vector(vec, device)
             st.freeze_for_gradients(head)
             prof = ig.day_profiles(encoders[seed][0], head, feats_std, eval_set.labels,
-                                   constants.IG_STEPS, device, ctx_block=ctx_block)
+                                   constants.IG_STEPS, device, ctx_block=ctx_block, step_chunk=constants.IG_STEP_CHUNK)
             rows += _rows(run_id, X, p0, d, seed, "probe", prof)
             used_seeds.add(seed)
         # 汎用ヘッドは距離に依存しないので、その日に使われた seed の種類ぶんだけ（§5.5）
         for seed in sorted(used_seeds):
             prof = ig.day_profiles(encoders[seed][0], encoders[seed][1], feats_std,
-                                   eval_set.labels, constants.IG_STEPS, device, ctx_block=ctx_block)
+                                   eval_set.labels, constants.IG_STEPS, device, ctx_block=ctx_block,
+                                   step_chunk=constants.IG_STEP_CHUNK)
             rows += _rows(run_id, X, p0, "general", seed, "general", prof)
         if n % 10 == 0 or n == len(eval_days):
             logger.info(f"  {n}/{len(eval_days)} 日（{len(rows)} 行）")
@@ -240,13 +243,12 @@ def compute(projects=None, versions=None, all_versions: bool = False,
         logger.info(f"===== プロジェクト: {project}（版 {', '.join(spec_by_version)}）=====")
         device = st.resolve_device()
         encoders, scaler = _resolve_encoders(project, device)
-        changes = load_changes(project)
-        detector = BotDetector(host_of(project))
-        all_prs = feature_builder.build_all_prs_df(changes, detector)
+        # 特徴量は feature_table の評価期間の表から読む（なければ作り、指紋が違えば止める。feature_table/design.md §2.6）
+        from src.analysis.preliminary_analysis.feature_table.build import ensure_table
+        feat_table = ensure_table(project, "eval", rel_df=rel_df)
         for version, spec in spec_by_version.items():
-            compute_version(project, version, spec, changes=changes, rel_df=rel_df,
-                            encoders=encoders, scaler=scaler, device=device,
-                            detector=detector, all_prs=all_prs, run_id=run_id)
+            compute_version(project, version, spec, feat_table=feat_table, rel_df=rel_df,
+                            encoders=encoders, scaler=scaler, device=device, run_id=run_id)
 
 
 def extract(projects=None, versions=None, name: str = "default",

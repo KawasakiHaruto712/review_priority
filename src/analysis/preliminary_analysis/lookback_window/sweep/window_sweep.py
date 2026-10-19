@@ -39,11 +39,15 @@ def release_cycle(rel_df: pd.DataFrame, project: str, version: str):
     return earlier[-1].to_pydatetime(), ce.to_pydatetime()
 
 
-def build_day_sets(changes, project, span_start: datetime, ce_R: datetime,
-                   detector, all_prs, rel_df) -> dict:
-    """[span_start, ce_R] の (Change, T) レコードを日ごとの TSet にまとめる。{date -> TSet}。"""
-    recs = record_builder.build_records(changes, project, span_start, ce_R, detector, all_prs, rel_df)
-    sets = set_builder.build_sets(recs, pre.MAX_SET_SIZE)
+def build_day_sets(table: dict, span_start: datetime, ce_R: datetime) -> dict:
+    """[span_start, ce_R] の (Change, T) レコードを日ごとの TSet にまとめる。{date -> TSet}。
+
+    2026-10-18 改めた：build_records で作らず、feature_table の評価期間の表から同じ範囲を切り出す（design.md §3。
+    feature_table/design.md §2.9。build_records(span_start, ce_R) → build_sets と同じ集合になる）。特徴量は MODEL_FEATURES。
+    """
+    from src.analysis.preliminary_analysis.feature_table.build.sets import day_sets_from_table
+
+    sets = day_sets_from_table(table, span_start, ce_R, max_set_size=pre.MAX_SET_SIZE)
     return {s.t.date(): s for s in sets}
 
 

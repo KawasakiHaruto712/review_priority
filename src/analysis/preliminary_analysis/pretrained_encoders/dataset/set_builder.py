@@ -48,7 +48,9 @@ def build_sets(records: list[Record], max_set_size: int | None = None) -> list[T
 
     sets: list[TSet] = []
     for day in sorted(by_day):
-        recs = sorted(by_day[day], key=lambda r: r.t)   # 0 時のレコードが先、途中で Open になったものは時刻順
+        # 0 時のレコードが先、途中で Open になったものは時刻順。同じ時刻は番号の順（2026-10-18 改めた：表から作る集合と並びを
+        # そろえるため。feature_table/design.md §2.9。並びは自己注意の結果に効かず、浮動小数点の足し順だけが変わる）
+        recs = sorted(by_day[day], key=lambda r: (r.t, r.change_id))
         if max_set_size is not None and len(recs) > max_set_size:
             recs = recs[:max_set_size]
         sets.append(TSet(

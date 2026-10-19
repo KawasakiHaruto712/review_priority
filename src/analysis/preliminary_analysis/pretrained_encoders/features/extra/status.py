@@ -3,6 +3,8 @@
 リポジトリの全 Change の ChangeFacts から索引（StatusIndex）を 1 度だけ作り、各レコード（Change, 予測の時点 t）で引く。
 どの値も t までの記録だけで作る（§13.2）。期間は (t − 期間, t]（t ちょうどを含む）、「3 か月」「6 か月」は 90 日・180 日。
 人のコメントかどうかは MessageFact.is_human（bot_detection.is_auto_record）に任せる。
+値が出せないときは §13.2 の代わりの値を 1 回で確定させる（2026-10-18 改めた。旧版は −1）。features() に filled を渡すと、
+代わりの値を入れた特徴量の名前を足す（feature_table の印。モデルには入れない）。
 """
 from __future__ import annotations
 
@@ -19,7 +21,8 @@ from src.analysis.preliminary_analysis.pretrained_encoders.features.extra.common
     ChangeFacts, MessageFact, RevisionFact)
 from src.analysis.preliminary_analysis.pretrained_encoders.features.extra.index import CoreIndex
 
-MISSING = -1.0   # 値が出せないとき（§13.2）
+MISSING = -1.0   # 版がないなど、代わりの値も出せないとき（レコードでは起きない。§12.4・§13.2）
+MISSING_RATE = 0.5   # 割合の代わりの値（§13.2）
 
 STATUS_FEATURES = [
     "ref_other_changes", "is_in_series", "depends_on_count", "open_same_file_changes", "author_open_changes",
@@ -89,6 +92,8 @@ class StatusIndex:
         F = self.facts
         # 作成（D13・D21・D32）。中核かどうかは作成の時刻で判定（D32）
         created = np.array([_sec(f.created) for f in F])
+        self._created_k = created
+        self._data_start = float(created.min()) if len(created) else 0.0   # データの始まり（D25 の代わりの値）
         order = np.argsort(created, kind="stable")
         self._created_sorted = created[order]
         noncore = np.array([0.0 if self.core.is_core(f.owner_id, f.created) else 1.0 for f in F])
@@ -200,16 +205,29 @@ class StatusIndex:
 
         # 中核の開発者の最初の反応（D18）。中核かどうかは反応の時刻で判定。ボットが作った Change は除く
         resp = []
-        for f in F:
-            if f.owner_is_bot:
-                continue
+        core_first = np.full(len(F), np.inf)   # Change ごとの中核の最初の反応の時刻（代わりの値用。ボットが作ったものも持つ）
+        for k, f in enumerate(F):
             for m in f.messages:
                 if _is_response(m) and m.author_id is not None and self.core.is_core(m.author_id, m.date):
-                    resp.append((_sec(m.date), (m.date - f.created).total_seconds() / _DAY))
+                    core_first[k] = _sec(m.date)
+                    if not f.owner_is_bot:
+                        resp.append((_sec(m.date), (m.date - f.created).total_seconds() / _DAY))
                     break
         resp.sort()
         self._resp_t = np.array([r[0] for r in resp])
         self._resp_days = np.array([r[1] for r in resp])
+
+        # 反応までの日数の代わりの値（D18・D28。§13.2）：ボットが作っていない Change を作成時刻の順に並べ、
+        # 最初の反応の時刻（なければ inf）を持つ。D18 は中核の最初の反応、D28 はレビュアーの最初の動き
+        reviewer_first = np.array([ts[0] if ts else np.inf for ts in self._rev_msg_t])
+        self._core_first_k = core_first
+        self._reviewer_first_k = reviewer_first
+        nb = np.array([not f.owner_is_bot for f in F], dtype=bool)
+        nb_order = np.argsort(created[nb], kind="stable")
+        self._fb_c = created[nb][nb_order]
+        self._fb_core = core_first[nb][nb_order]
+        self._fb_rev = reviewer_first[nb][nb_order]
+        self._fb_cache: dict[tuple[str, datetime], float] = {}
 
         # 他人の Change への Code-Review の 0 でない投票（D31）：人ごとの時刻
         cr = defaultdict(list)
@@ -225,6 +243,40 @@ class StatusIndex:
     def _split_sorted(pairs: list[tuple]) -> tuple[list, list]:
         pairs.sort(key=lambda x: x[0])
         return [p[0] for p in pairs], [p[1] for p in pairs]
+
+    def _wait_median(self, kind: str, t: datetime, k_self: int, self_is_bot: bool) -> float:
+        """反応までの日数の代わりの値（§13.2。D18・D28）。
+
+        t までに作られた全 Change（ボットが作ったものは除き、自分は含める）の「作成から最初の反応までの日数」の中央値。
+        反応がまだないものは、作成から t までの日数で数える（本当の値の下限）。kind は "core"（D18）か "reviewer"（D28）。
+        """
+        key = (kind, t)
+        if not self_is_bot and key in self._fb_cache:
+            return self._fb_cache[key]
+        ts = _sec(t)
+        n = int(np.searchsorted(self._fb_c, ts, side="right"))
+        c = self._fb_c[:n]
+        r = (self._fb_core if kind == "core" else self._fb_rev)[:n]
+        if self_is_bot:                    # 自分はボットが作った Change でも含める
+            r_self = (self._core_first_k if kind == "core" else self._reviewer_first_k)[k_self]
+            c = np.append(c, self._created_k[k_self])
+            r = np.append(r, r_self)
+        if len(c) == 0:
+            return MISSING
+        days = (np.where(r <= ts, r, ts) - c) / _DAY
+        val = float(np.median(days))
+        if not self_is_bot:
+            if len(self._fb_cache) > 200_000:
+                self._fb_cache.clear()
+            self._fb_cache[key] = val
+        return val
+
+    def _open_age_mean(self, t: datetime) -> float:
+        """t に Open な Change の、作成から t までの日数の平均（D19・D20 の代わりの値。§13.2）。"""
+        ks = self._open_at(t)
+        if len(ks) == 0:
+            return MISSING
+        return float(np.mean((_sec(t) - self._created_k[ks]) / _DAY))
 
     # ── 引く ─────────────────────────────────────────
     def _open_at(self, t: datetime) -> np.ndarray:
@@ -245,13 +297,18 @@ class StatusIndex:
         if hit is not None:
             return hit
         ts = _sec(t)
-        out: dict[str, float] = {}
+        out: dict = {}
+        filled: set = set()     # 代わりの値を入れたもの（§13.2）
         c_hi = int(np.searchsorted(self._created_sorted, ts, side="right"))
         out["_created_le_t"] = float(c_hi)
         out["_created_7d"] = float(_count_window(self._created_sorted, _sec(t - timedelta(days=7)), ts))
         lo3 = int(np.searchsorted(self._created_sorted, _sec(t - DAYS_3M), side="right"))
         n3 = c_hi - lo3
-        out["non_core_change_ratio"] = (self._noncore_cum[c_hi] - self._noncore_cum[lo3]) / n3 if n3 else MISSING
+        if n3:
+            out["non_core_change_ratio"] = (self._noncore_cum[c_hi] - self._noncore_cum[lo3]) / n3
+        else:                    # 直近 3 か月に作られた Change がない → t までの全 Change での割合
+            out["non_core_change_ratio"] = self._noncore_cum[c_hi] / c_hi if c_hi else MISSING
+            filled.add("non_core_change_ratio")
         # D16・D17
         lo60 = _sec(t - timedelta(days=60))
         a = int(np.searchsorted(self._ev_t, lo60, side="right"))
@@ -260,19 +317,37 @@ class StatusIndex:
         closed60 = (b - a) - dup
         merged60 = self._ev_merge_cum[b] - self._ev_merge_cum[a]
         out["closed_per_week_60d"] = closed60 / (60 / 7)
-        out["merge_ratio_60d"] = merged60 / closed60 if closed60 else 0.5
-        # D19
+        if closed60:
+            out["merge_ratio_60d"] = merged60 / closed60
+        else:
+            out["merge_ratio_60d"] = MISSING_RATE      # 出典どおり（Islam 2022）
+            filled.add("merge_ratio_60d")
+        # D19（まだマージがなければ、t に Open な Change の作成からの日数の平均）
         mk = int(np.searchsorted(self._merge_t, ts, side="right"))
-        out["avg_days_to_merge"] = self._merge_dur_cum[mk] / mk if mk else MISSING
+        if mk:
+            out["avg_days_to_merge"] = self._merge_dur_cum[mk] / mk
+        else:
+            out["avg_days_to_merge"] = self._open_age_mean(t)
+            filled.add("avg_days_to_merge")
         # D20・D22：t の時点で閉じているもの
         ck = int(np.searchsorted(self._closed_t, ts, side="right"))
         n_closed = self._closed_n[ck]
-        out["avg_days_to_close"] = self._closed_dur[ck] / n_closed if n_closed > 0 else MISSING
-        out["merge_ratio_total"] = self._closed_merged[ck] / n_closed if n_closed > 0 else MISSING
-        # D18
+        if n_closed > 0:
+            out["avg_days_to_close"] = self._closed_dur[ck] / n_closed
+            out["merge_ratio_total"] = self._closed_merged[ck] / n_closed
+        else:
+            out["avg_days_to_close"] = self._open_age_mean(t)
+            out["merge_ratio_total"] = MISSING_RATE
+            filled.update(("avg_days_to_close", "merge_ratio_total"))
+        # D18（値が出なければ features() で代わりの値。自分がボットかで変わるので、ここでは印だけ）
         ra = int(np.searchsorted(self._resp_t, _sec(t - DAYS_3M), side="right"))
         rb = int(np.searchsorted(self._resp_t, ts, side="right"))
-        out["core_first_response_days"] = float(np.median(self._resp_days[ra:rb])) if rb > ra else MISSING
+        if rb > ra:
+            out["core_first_response_days"] = float(np.median(self._resp_days[ra:rb]))
+        else:
+            out["core_first_response_days"] = MISSING
+            filled.add("core_first_response_days")
+        out["_filled"] = frozenset(filled)
         # D31：中核かどうかは t で判定
         lo3s = _sec(t - DAYS_3M)
         out["active_core_count"] = float(sum(
@@ -301,13 +376,17 @@ class StatusIndex:
                 count += 1
         return float(count)
 
-    def features(self, facts: ChangeFacts, t: datetime) -> dict[str, float]:
-        """そのレコード（Change, t）の開発状況の 22 個。"""
+    def features(self, facts: ChangeFacts, t: datetime, filled: set | None = None) -> dict[str, float]:
+        """そのレコード（Change, t）の開発状況の 22 個。
+
+        filled を渡すと、値が出せずに §13.2 の代わりの値を入れた特徴量の名前を足す（feature_table の印）。
+        """
         k_self = self._pos.get(id(facts))
         if k_self is None:
             raise ValueError("索引に入っていない Change です（StatusIndex を作った一覧の ChangeFacts を渡してください）")
         ts = _sec(t)
         proj = self._project(t)
+        fill: set = set(proj["_filled"])
         own_c = _sec(facts.created)
         out: dict[str, float] = {
             "changes_created_7d": proj["_created_7d"] - (1 if _sec(t - timedelta(days=7)) < own_c <= ts else 0),
@@ -316,18 +395,24 @@ class StatusIndex:
         for key in ("closed_per_week_60d", "merge_ratio_60d", "core_first_response_days", "avg_days_to_merge",
                     "avg_days_to_close", "merge_ratio_total", "active_core_count", "non_core_change_ratio"):
             out[key] = proj[key]
+        if "core_first_response_days" in fill:       # D18 の代わりの値（§13.2）
+            out["core_first_response_days"] = self._wait_median("core", t, k_self, facts.owner_is_bot)
 
-        # D6：作者の Open な Change（ボットが作ったものは数えない。作者がボットなら −1）
+        # D6：作者の Open な Change（ボットが作ったものは数えない。作者がボットなら、そのボットの Open なほかの Change を数える）
         open_ks = self._open_at(t)
         if facts.owner_is_bot:
-            out["author_open_changes"] = MISSING
+            same = (self._owner_code[open_ks] == self._owner_code[k_self]) & (open_ks != k_self)
+            out["author_open_changes"] = float(np.sum(same))
+            fill.add("author_open_changes")
         else:
             same = (self._owner_code[open_ks] == self._owner_code[k_self]) & ~self._owner_bot[open_ks] & (open_ks != k_self)
             out["author_open_changes"] = float(np.sum(same))
 
         rev = facts.latest_revision(t)
-        if rev is None:
+        if rev is None:          # レコードでは起きない（§12.4。0 時のレコードも最初の版より前は作らない）
             out.update({k: MISSING for k in _NEED_REVISION})
+            if filled is not None:
+                filled.update(fill)
             return {k: float(out[k]) for k in STATUS_FEATURES}
 
         files = set(rev.files)
@@ -373,7 +458,11 @@ class StatusIndex:
             devs.update(do[:bisect.bisect_right(dt_, ts)])
         out["file_recent_merges"] = float(len(recent))
         out["file_developer_count"] = float(len(devs))
-        out["file_days_since_change"] = float(np.mean(gaps)) if gaps else MISSING
+        if gaps:
+            out["file_days_since_change"] = float(np.mean(gaps))
+        else:                    # どのファイルも過去にマージで変えられていない → データの始まりからの日数（§13.2）
+            out["file_days_since_change"] = (ts - self._data_start) / _DAY
+            fill.add("file_days_since_change")
         # D26〜D28：直近 180 日の、同じファイル・同じブランチの過去の Change（ボットが作ったものと自分を除く）
         lo6 = _sec(t - DAYS_6M)
         prior = set()
@@ -388,12 +477,20 @@ class StatusIndex:
                 r = f.latest_revision(t)
                 if r is not None and files & set(r.files):
                     prior.add(k)
+        firsts = []
         if prior:
             out["prior_reviewer_count"] = float(np.median([bisect.bisect_right(self._rev_first_t[k], ts) for k in prior]))
             out["prior_message_count"] = float(np.median([bisect.bisect_right(self._rev_msg_t[k], ts) for k in prior]))
             firsts = [(self._rev_msg_t[k][0] - _sec(self.facts[k].created)) / _DAY
                       for k in prior if self._rev_msg_t[k] and self._rev_msg_t[k][0] <= ts]
-            out["prior_first_response_days"] = float(np.median(firsts)) if firsts else MISSING
-        else:
-            out["prior_reviewer_count"] = out["prior_message_count"] = out["prior_first_response_days"] = MISSING
+        else:                    # 過去の Change がない → 件数は 0（§13.2）
+            out["prior_reviewer_count"] = out["prior_message_count"] = 0.0
+            fill.update(("prior_reviewer_count", "prior_message_count"))
+        if firsts:
+            out["prior_first_response_days"] = float(np.median(firsts))
+        else:                    # 過去の Change がない、またはどれもまだ反応がない → 代わりの値（§13.2）
+            out["prior_first_response_days"] = self._wait_median("reviewer", t, k_self, facts.owner_is_bot)
+            fill.add("prior_first_response_days")
+        if filled is not None:
+            filled.update(fill)
         return {k: float(out[k]) for k in STATUS_FEATURES}

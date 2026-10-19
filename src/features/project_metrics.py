@@ -85,6 +85,7 @@ def calculate_days_to_feature_release(
     analysis_time: datetime,
     component_name: str,
     all_releases_df: pd.DataFrame,
+    observation_end: datetime | None = None,
 ) -> float:
     """
     指定された分析時点から、対象コンポーネントの次の機能リリース（feature release）の日までの残り日数を計算
@@ -105,9 +106,13 @@ def calculate_days_to_feature_release(
         analysis_time (datetime): メトリクスを計算する基準となる分析時点の時刻
         component_name (str): 対象のコンポーネント名
         all_releases_df (pd.DataFrame): 'component', 'release_date'（datetime 型）カラムが必要
+        observation_end (datetime | None): 観測の終わり。次のリリースが表にないとき、分析時点からここまでの日数を返す
+            （次のリリースは少なくとも観測の終わりより後なので、本当の値の下限。2026-10-18 追加。
+            pretrained_encoders/design.md §11.4・§13.2）。None なら従来どおり -1.0
 
     Returns:
-        float: 次のリリース日までの残り日数。見つからない場合は -1.0
+        float: 次のリリース日までの残り日数。見つからない場合は、observation_end があればそこまでの日数（0 未満にはしない）、
+               なければ -1.0
                分析時点がリリース日の 0 時ちょうどのときは、そのリリースは済んだものとみなす（旧版と同じ）
     """
     dates = pd.to_datetime(
@@ -115,6 +120,9 @@ def calculate_days_to_feature_release(
     ).dropna()
     upcoming = dates[dates > pd.Timestamp(analysis_time)]
     if upcoming.empty:
+        if observation_end is not None:
+            rest = pd.Timestamp(observation_end) - pd.Timestamp(analysis_time)
+            return max(0.0, rest.total_seconds() / (24 * 3600))
         logger.warning(f"No upcoming release found for component '{component_name}' after {analysis_time}.")
         return -1.0
     time_difference = upcoming.min() - pd.Timestamp(analysis_time)

@@ -36,6 +36,7 @@
 
 ### 🏗️ プロジェクトメトリクス (`project_metrics.py`)
 - **`calculate_days_to_feature_release`**: 次の機能リリース（新しい機能を含む定期的なリリース）までの日数（旧名 `calculate_days_to_major_release`）
+  - 次のリリースが表にないとき、`observation_end`（観測の終わり）を渡せばそこまでの日数（下限）、渡さなければ -1（2026-10-18 追加）
 - **`calculate_predictive_target_ticket_count`**: 予測対象チケット数
 - **`calculate_reviewed_lines_in_period`**: 期間内レビュー行数
 - **`add_lines_info_to_dataframe`**: 行数情報の追加

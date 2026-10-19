@@ -33,6 +33,7 @@ class Record:
     t: 予測の時点。0 時のレコードは日の 0 時、日の途中で Open になったレコードはその時刻（design.md §12.4）。
        どの日の集合に入るかは t の日付（0 時に切り捨て）で決まる。
     open_until: t を含む Open の期間の終わり（閉じていなければ None）。文脈のマスクに使う（§12.4）。
+    filled: 既存の 15 個のうち、値が出せずに代わりの値を入れた特徴量の名前（§13.2。feature_table の印。モデルには入れない）。
     """
     change_id: object
     t: datetime
@@ -42,6 +43,7 @@ class Record:
     labels: dict
     bin: int | None = field(default=None)
     open_until: datetime | None = field(default=None)
+    filled: frozenset = field(default=frozenset())
 
 
 def decision_time(change: dict) -> datetime | None:
@@ -121,10 +123,24 @@ def build_records(changes: list[dict], project: str, pool_start: datetime, cycle
     """毎日 0 時グリッド × アクティブ集合から (Change, T) レコードを作る。
 
     ラベル = 「T から Δ 以内に人間レビューが付くか」の2値。窓が観測末尾を超えて未確定なものは除外。
+    中身は iter_records と同じ（それをリストにしたもの。2026-10-18 に分けた）。
+    """
+    records = [rec for _idx, rec in iter_records(changes, project, pool_start, cycle_end,
+                                                  detector, all_prs_df, releases_df)]
+    pos = sum(1 for r in records if r.labels[constants.TARGET] == 1.0)
+    logger.info(f"[{project}] レコード数: {len(records)}（正例 {pos} = "
+                f"{(pos / len(records) * 100 if records else 0):.1f}%, Δ={constants.REVIEW_HORIZON_DAYS}日）")
+    return records
+
+
+def iter_records(changes: list[dict], project: str, pool_start: datetime, cycle_end: datetime,
+                 detector: BotDetector, all_prs_df: pd.DataFrame, releases_df: pd.DataFrame):
+    """build_records と同じレコードを 1 件ずつ (changes の中の位置, Record) で返す（全件をメモリに溜めないため。
+    feature_table が使う。feature_table/design.md §2.3）。並びは Change の順（Change の中では 0 時のレコード、日の途中のレコードの順）。
     """
     grid = daily_grid(pool_start, cycle_end, constants.MEASUREMENT_STEP_DAYS)
     if not grid:
-        return []
+        return
     index = feature_builder.build_index(all_prs_df)
     comp = feature_builder.build_releases_df(releases_df, project)
     lookback = timedelta(days=constants.LOOKBACK_DAYS)
@@ -135,7 +151,6 @@ def build_records(changes: list[dict], project: str, pool_start: datetime, cycle
     data_end = cycle_end if pd.isna(data_end) else pd.Timestamp(data_end).to_pydatetime()
 
     grid_days = set(grid)
-    records: list[Record] = []
     for idx, change in enumerate(changes):
         created = parse_dt(change.get("created"))
         if created is None or created > cycle_end:
@@ -150,19 +165,24 @@ def build_records(changes: list[dict], project: str, pool_start: datetime, cycle
         review_times = review_utils.human_comment_times(change, detector)
         lo = bisect.bisect_left(grid, created)
         cid = change.get("change_number", idx)
+        first_rev = first_revision_time(change)
         for t in grid[lo:]:
             if t - created > lookback:
                 break  # LOOKBACK 超過（grid 昇順なので打ち切ってよい）
             if dec is not None and t >= dec:
                 break  # 最後に閉じた時刻以降は Open でない
+            if first_rev is not None and t < first_rev:
+                continue  # 最初の版がまだない（中身のない Change）。0 時のレコードも作らない（design.md §12.4。2026-10-18）
             if not review_utils.is_open_at(periods, t):
                 continue  # 放棄されてから復活するまでの間（design.md §11.1）
             label = label_builder.reviewed_within_delta(review_times, t, delta, data_end)
             if label is None:
                 continue  # 窓が観測末尾を超え未確定 → このレコードは作らない
-            feats = feature_builder.build_features(change, t, index, comp, project)
-            records.append(Record(cid, t, created, dec, feats, {constants.TARGET: label},
-                                  open_until=period_end_at(periods, t)))
+            filled: set = set()
+            feats = feature_builder.build_features(change, t, index, comp, project,
+                                                   observation_end=data_end, filled=filled)
+            yield idx, Record(cid, t, created, dec, feats, {constants.TARGET: label},
+                              open_until=period_end_at(periods, t), filled=frozenset(filled))
         # 日の途中で Open になった Change（作成・復活。design.md §12.4）。
         # ラベルの窓は (予測の時点, その日の終わり]。0 時のレコードの (T, T+Δ] と同じ終わり
         for t_i, end in midday_open_points(change, periods):
@@ -172,11 +192,10 @@ def build_records(changes: list[dict], project: str, pool_start: datetime, cycle
             label = label_builder.reviewed_within_delta(review_times, t_i, day + delta - t_i, data_end)
             if label is None:
                 continue
-            feats = feature_builder.build_features(change, t_i, index, comp, project)
-            records.append(Record(cid, t_i, created, dec, feats, {constants.TARGET: label},
-                                  open_until=end))
+            filled = set()
+            feats = feature_builder.build_features(change, t_i, index, comp, project,
+                                                   observation_end=data_end, filled=filled)
+            yield idx, Record(cid, t_i, created, dec, feats, {constants.TARGET: label},
+                              open_until=end, filled=frozenset(filled))
     review_utils.log_fallbacks()
-    pos = sum(1 for r in records if r.labels[constants.TARGET] == 1.0)
-    logger.info(f"[{project}] レコード数: {len(records)}（計測点 {len(grid)}, 正例 {pos} = "
-                f"{(pos / len(records) * 100 if records else 0):.1f}%, Δ={constants.REVIEW_HORIZON_DAYS}日）")
-    return records
+    logger.info(f"[{project}] 計測点 {len(grid)}")
