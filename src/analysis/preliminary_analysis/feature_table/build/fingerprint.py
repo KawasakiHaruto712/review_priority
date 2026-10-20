@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -138,8 +139,28 @@ def compute(project: str, period: str, rel_df: pd.DataFrame, root: Path = REPO_R
     return {"sha256": digest(parts), "parts": parts}
 
 
+def comparable(parts: dict) -> dict:
+    """照合に使う形の材料（§2.5。2026-10-21）：機械によって変わる 2 つをならす。
+
+    - Change の JSON のディレクトリの場所（path）は比べない（Mac は /Users/...、サーバのコンテナは /work/...）。
+    - 最新の更新時刻は秒の単位で比べる（秒より下を切り捨てる。Mac の rsync（openrsync）は時刻を秒までしか送らない）。
+    """
+    out = copy.deepcopy(parts or {})
+    changes = (out.get("inputs") or {}).get("changes")
+    if isinstance(changes, dict):
+        changes.pop("path", None)
+        mt = changes.get("latest_mtime")
+        if mt:
+            try:
+                changes["latest_mtime"] = datetime.fromisoformat(mt).replace(microsecond=0).isoformat()
+            except (TypeError, ValueError):
+                pass             # 時刻として読めない値はそのまま比べる（厳しい側に倒す）
+    return out
+
+
 def differences(old_parts: dict, new_parts: dict) -> list[str]:
-    """材料のどこが違うか（人が読む説明の列）。"""
+    """材料のどこが違うか（人が読む説明の列）。照合は comparable にならしてから行う（場所・秒より下の時刻は違いにしない）。"""
+    old_parts, new_parts = comparable(old_parts), comparable(new_parts)
     out = []
     os_, ns = old_parts.get("sources", {}), new_parts.get("sources", {})
     for rel in sorted(set(os_) | set(ns)):

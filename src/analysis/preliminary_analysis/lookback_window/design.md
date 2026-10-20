@@ -27,6 +27,7 @@
 - 計測点 T ＝ **毎日 0 時**（1 日 1 スナップショット）。各 T のアクティブな Change 群を 1 集合とする（定義・構築コードは `pretrained_encoders` から import）。
   - **2026-10-18 改めた**：レコードは `build_records` で作らず、**`feature_table` の評価期間の表から、使う範囲を切り出して集合を作る**
     （`ensure_table(project, "eval")`。表がなければ作り、作った条件の指紋が違えば止める。`feature_table/design.md` §2.6・§2.9。本人判断）。
+    （2026-10-21 改めた：指紋が違っても止めずに警告して続ける。`feature_table/design.md` §2.6）
     集合は今の `build_records` → `build_sets` と同じになる（テストで確かめる）。
 - **2026-10-15 から、集合・ラベル・文脈の作りは `pretrained_encoders/design.md` §12 に従う**（その日の途中に作られた・復活した Change も入れ、予測の時点・ラベルの窓・見える文脈を Change ごとに決める）。
 - 実測（30.0.0）：1 日あたり Open 約 260 Change・そのうち Δ以内レビュー（正例）約 4 件（≈1.5%）。**正例が薄いのは仕様**（狭い定義×放置 Change 込み全 Open×日次の帰結）。
