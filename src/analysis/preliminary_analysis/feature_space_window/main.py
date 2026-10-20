@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from src.analysis.background_problem.common.data_loader import load_release_dates
 from src.analysis.preliminary_analysis.feature_space_window.dataset import candidates
 from src.analysis.preliminary_analysis.feature_space_window.evaluation.runner import VersionRows, run_seed
 from src.analysis.preliminary_analysis.feature_space_window.io import result_writer
-from src.analysis.preliminary_analysis.feature_space_window.utils import constants
+from src.analysis.preliminary_analysis.feature_space_window.utils import constants, parallel
 from src.analysis.preliminary_analysis.feature_space_window.visualization import table
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre_constants
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
 
@@ -68,16 +70,52 @@ def run(project: str, versions: list[str], n_seeds: int | None, sizes: list[int]
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="feature_space_window：特徴空間で近い過去の日で probe を学習する（RQ2）")
-    ap.add_argument("--mode", choices=["run", "plot", "rank", "report"], default="run",
-                    help="rank は順位の集計（§5.1）、report は 6 件をまとめた報告用の表（run・rank の後。§5.2）")
+    ap.add_argument("--mode", choices=["run", "plot", "rank", "report", "matrix"], default="run",
+                    help="rank は順位の集計（§5.1）、report は 6 件をまとめた報告用の表（run・rank の後。§5.2）、"
+                         "matrix は特徴のずれ×評価時期の精度表（§9）")
     ap.add_argument("--project", default=None, help="対象（未指定・'all' なら PROJECTS の 6 件を順に）")
     ap.add_argument("--versions", nargs="*", default=None, help="対象の版（既定は PROJECTS の 5 版）")
     ap.add_argument("--n-seeds", type=int, default=constants.N_SEEDS, help="使う seed の数（既定は保存済み全部）")
     ap.add_argument("--sizes", type=int, nargs="*", default=None, help="大きさ k（日。既定 1 3 7 14 30 60）")
     ap.add_argument("--metric", default=constants.PLOT_METRIC_DEFAULT, help="要約表の指標（既定 auc）")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="リポジトリを並べて回す数（既定：CUDA なら --gpu-share から自動、Mac などは 1。pretrained_encoders/design.md §14.7）")
+    ap.add_argument("--gpu-share", type=float, default=parallel.DEFAULT_GPU_SHARE,
+                    help="並べたプロセス全体で使ってよい GPU のメモリの割合（既定 0.25 ＝ 1/4。誰も使っていなければ 1.0 まで）")
     args = ap.parse_args()
     projects = list(constants.PROJECTS) if args.project in (None, "all") else [args.project]
     sizes = sorted(args.sizes) if args.sizes else list(constants.SIZES_DAYS)
+    if args.mode in ("run", "matrix"):
+        if args.gpu_share > parallel.DEFAULT_GPU_SHARE:
+            logger.warning(f"GPU のメモリを全体の {args.gpu_share:.0%} まで使います（既定の 1/4 を超えています）")
+        w, frac = parallel.decide(len(projects), use_gpu=True, gpu_share=args.gpu_share, workers=args.workers)
+        if w > 1:               # リポジトリごとに別々のプロセスで並べる（§14.7）。子は --project 1 件・--workers 1 で同じ入口を呼ぶ
+            child = ["--mode", args.mode, "--metric", args.metric]
+            if args.versions:
+                child += ["--versions", *args.versions]
+            if args.n_seeds:
+                child += ["--n-seeds", str(args.n_seeds)]
+            if args.sizes:
+                child += ["--sizes", *map(str, args.sizes)]
+            failed = parallel.run_children("src.analysis.preliminary_analysis.feature_space_window.main", projects,
+                                           child, w, frac, f"feature_space_window_{args.mode}")
+            sys.exit(1 if failed else 0)
+        if frac is not None and not os.environ.get("RP_CUDA_MEMORY_FRACTION"):
+            pre_constants.CUDA_MEMORY_FRACTION = frac           # 1 つで回すときは --gpu-share をそのまま使う
+    if args.mode == "matrix":   # 特徴のずれ×評価時期の精度表（design.md §9。2026-10-21）
+        from src.analysis.preliminary_analysis.feature_space_window.matrix.run import run_project
+        failed = []
+        for project in projects:
+            versions = args.versions if args.versions else constants.versions_for(project)
+            try:
+                run_project(project, versions, args.n_seeds)
+            except Exception:
+                logger.exception(f"[{project}] 失敗しました（ほかは続けます）")
+                failed.append(project)
+        if failed:
+            logger.error(f"失敗したリポジトリ：{failed}")
+            sys.exit(1)
+        return
     if args.mode == "report":   # 6 件をまとめて 1 回（design.md §5.2。2026-10-21）
         from src.analysis.preliminary_analysis.feature_space_window.evaluation.ranking import size_labels_desc
         from src.analysis.preliminary_analysis.feature_space_window.visualization import report

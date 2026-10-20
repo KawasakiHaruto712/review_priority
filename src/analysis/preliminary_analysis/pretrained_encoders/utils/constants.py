@@ -4,6 +4,8 @@ design.md 参照。本ディレクトリは concept_drift_detection に依存し
 生データ読み込み（changes / release_dates）とボットの判定（src.utils.bot_detection）、
 src.features・src.config のみ共有インフラを使う。
 """
+import os
+
 from src.config.path import DEFAULT_DATA_DIR
 
 # ── 出力（保存先） ────────────────────────────────────
@@ -95,3 +97,6 @@ RANDOM_SEED = 42             # k 個目の torch seed = RANDOM_SEED + k
 # ── 計算環境 ─────────────────────────────────────
 DEVICE = "auto"              # "auto" で CUDA → MPS → CPU の順（2026-10-20 改めた。旧版は MPS → CPU。design.md §7・§14）
 CUDA_MEMORY_FRACTION = 0.25  # CUDA のときに使う GPU のメモリの上限（共有のサーバで全体の 1/4。design.md §14.4）
+# 並べて回すとき、親が子のプロセスごとの割合（＝ --gpu-share ÷ 並べる数）を環境変数で渡す（design.md §14.7。2026-10-21）
+if os.environ.get("RP_CUDA_MEMORY_FRACTION"):
+    CUDA_MEMORY_FRACTION = float(os.environ["RP_CUDA_MEMORY_FRACTION"])
