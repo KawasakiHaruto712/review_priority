@@ -68,7 +68,8 @@ def run(project: str, versions: list[str], n_seeds: int | None, sizes: list[int]
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="feature_space_window：特徴空間で近い過去の日で probe を学習する（RQ2）")
-    ap.add_argument("--mode", choices=["run", "plot"], default="run")
+    ap.add_argument("--mode", choices=["run", "plot", "rank", "report"], default="run",
+                    help="rank は順位の集計（§5.1）、report は 6 件をまとめた報告用の表（run・rank の後。§5.2）")
     ap.add_argument("--project", default=None, help="対象（未指定・'all' なら PROJECTS の 6 件を順に）")
     ap.add_argument("--versions", nargs="*", default=None, help="対象の版（既定は PROJECTS の 5 版）")
     ap.add_argument("--n-seeds", type=int, default=constants.N_SEEDS, help="使う seed の数（既定は保存済み全部）")
@@ -77,9 +78,26 @@ def main() -> None:
     args = ap.parse_args()
     projects = list(constants.PROJECTS) if args.project in (None, "all") else [args.project]
     sizes = sorted(args.sizes) if args.sizes else list(constants.SIZES_DAYS)
+    if args.mode == "report":   # 6 件をまとめて 1 回（design.md §5.2。2026-10-21）
+        from src.analysis.preliminary_analysis.feature_space_window.evaluation.ranking import size_labels_desc
+        from src.analysis.preliminary_analysis.feature_space_window.visualization import report
+        out = report.build_report(projects, args.metric, constants.OUTPUT_ROOT, size_labels_desc(),
+                                  index_col="size", row_name="大きさ")
+        logger.info(f"報告用の表: {out}" if out else "報告用の表：結果がありません（先に --mode run と --mode rank）")
+        return
     for project in projects:
         versions = args.versions if args.versions else constants.versions_for(project)
         logger.info(f"===== プロジェクト: {project}（{len(versions)} 版）=====")
+        if args.mode == "rank":     # 順位の集計（design.md §5.1。2026-10-21）
+            from src.analysis.preliminary_analysis.feature_space_window.evaluation.ranking import build_ranking
+            from src.analysis.preliminary_analysis.feature_space_window.io.rank_io import save_ranking
+            df, ndays = build_ranking(project, versions, args.metric)
+            if not ndays.get("全体"):
+                logger.warning(f"metrics がない・空のためスキップ（先に --mode run）: {project}")
+                continue
+            logger.info(f"順位の集計: {save_ranking(df, ndays, project, args.metric)}（対象日数 "
+                        + ", ".join(f"{k}={v}" for k, v in ndays.items()) + "）")
+            continue
         if args.mode == "run":
             run(project, versions, args.n_seeds, sizes)
         out = table.build_and_save(project, versions, args.metric, sizes)

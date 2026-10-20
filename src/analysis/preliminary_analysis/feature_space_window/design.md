@@ -82,6 +82,26 @@ for project:
   （1d・3d・1w・2w・1M・2M）。これで RQ1 と RQ2 の表を並べられる。
 - 検定はかけない（本人判断）。
 
+### 5.1 順位の集計（2026-10-21 追加。本人判断。RQ1 と同じ流れにするため）
+- RQ1 の流れ「窓長の調査 → 順位の集計 → 時期のずれ×評価時期の精度表 → 特徴量別の寄与度・分布」を RQ2 でも同じに踏む（本人判断）。その 2 段目。
+- **決まりは `lookback_window/design.md` §11.3 と同じ**：
+  - （版, 日, 大きさ）で **seed 中央値**の AUC を作る。
+  - **6 つの大きさ（1d〜2M）がすべてそろった日**だけを対象にする。
+  - 各対象日について、最高 AUC の大きさに「1 位 ＋1」、最低に「最下位 ＋1」。**同着は全部に足す**（1 位率の合計は 100% を超えうる）。
+  - 率 ＝ 回数 ÷ 対象日数。版ごとと「全体」（全版をまとめたもの）で出す。日次のまま（ビン集約はしない）。
+  - RQ2 には汎用ヘッドがないので、除く処理はない。
+- **表**：`summary/rank_<metric>.csv`（行＝大きさ 2M → 1d、列＝版ごと＋全体の `_1位 / _最下位 / _1位率 / _最下位率`、冒頭に対象日数のコメント行）。
+  `lookback_window` と同じ形なので並べられる。
+- **実行**：`--mode rank`（保存済みの `metrics.csv` を読むだけ。モデルは回さない）。
+- コードは `lookback_window` の順位の集計を**本ディレクトリに複製**する（各ディレクトリ自己完結。以前の決まり B2）。
+- RQ1 と RQ2 を直接比べる集計（日ごとにどちらが勝ったか等）は**作らない**（比べる予定がないため。本人判断）。
+
+### 5.2 6 件をまとめた報告用の表（2026-10-21 追加。本人判断）
+- `lookback_window/design.md` §11.4 と同じものを、大きさについて出す。`--mode report`（6 件の `summary_<metric>.csv` と `rank_<metric>.csv` を読むだけ）。
+- 出力（`data/analysis/preliminary_analysis/feature_space_window/report/`）：
+  `rank_<metric>_all.csv`・`.md`（行＝大きさ、列＝リポジトリ、「1 位率 / 最下位率」、各列の 1 位率の最大と最下位率の最小を太字、対象日数と同着の注記）、
+  `best_<metric>_all.csv`・`.md`（リポジトリごとに全評価日の平均が最良の大きさと、その値 ± 標準偏差）。
+
 ## 6. 出力（`data/analysis/preliminary_analysis/feature_space_window/<project>/`）
 | ファイル | 中身 |
 |---|---|
@@ -90,6 +110,8 @@ for project:
 | `<版>/selected_days.csv.gz` | 選ばれた日の一覧：`day, ~~size,~~ seed, rank, selected_day, days_before, distance, in_pretrain`（`days_before` ＝ 評価日の何日前か、`in_pretrain` ＝ 事前学習の区間の日か。近い日が時間でも近いのかを見る・考察用。本人判断。`size` 列は持たない：下の注） |
 | `summary/summary_auc.csv` | 版 × 大きさの AUC（§5） |
 | `summary/summary_auc_missing.csv` | 版 × 大きさの欠測の数 |
+| `summary/rank_auc.csv` | 順位の集計（§5.1。2026-10-21 追加） |
+| `../report/rank_auc_all.*`・`best_auc_all.*` | 6 件をまとめた報告用の表（§5.2。2026-10-21 追加） |
 | `run_meta.json` | 実行条件（大きさの一覧・距離の決まり・候補の範囲・seed・表の指紋・実行日時・git commit） |
 
 - `selected_days.csv.gz` は大きさ 60 のとき 1 評価日・1 seed で 60 行になるが、大きさごとの選び方は入れ子（近い 3 日は近い 7 日に含まれる）なので、
@@ -111,6 +133,9 @@ feature_space_window/
   evaluation/runner.py          # §4.1 のループ（probe の学習・評価・欠測）
   io/result_writer.py           # §6 の出力
   visualization/table.py        # 要約表（lookback_window と同じ形）
+  evaluation/ranking.py         # 順位の集計（§5.1。lookback_window の複製。2026-10-21 追加）
+  io/rank_io.py                 # rank_<metric>.csv の保存（同上）
+  visualization/report.py       # 6 件をまとめた報告用の表（§5.2。同上）
 ```
 
 ## 8. テスト（tests/ は git の対象外。新しいテストは `git add -f` が要る）
@@ -143,3 +168,5 @@ feature_space_window/
   k は RQ1 と同じ 1〜60 日を全部振る（大きさの比較を論文までに入れる）。標準化したユークリッド距離・標準化は評価日ごとに X − 1 までの全日から。
   候補は事前学習の区間＋評価期間の X より前の全日。seed ごとに近い日を選び、まとめ方は RQ1 と同じ。損失は BCE。欠測は報告する。検定はかけない。
   選ばれた日の一覧に評価日の何日前か・距離・事前学習の区間の日かの印を残す。距離版は間に合えば。
+- 2026-10-21：RQ2 も RQ1 と同じ流れ（大きさの分析 → 順位の集計 → 特徴のずれ×評価時期の精度表 → 特徴量別の寄与度・分布）を踏む。
+  順位の集計（§5.1。`lookback_window` §11.3 と同じ決まり・複製）と、6 件をまとめた報告用の表（§5.2）を足す。RQ1 と RQ2 を直接比べる集計は作らない。

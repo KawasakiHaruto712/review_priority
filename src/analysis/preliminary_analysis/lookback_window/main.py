@@ -144,7 +144,8 @@ def rank(project: str, versions: list[str], metric: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="lookback_window：チューニング窓長の調査")
-    ap.add_argument("--mode", choices=["run", "plot", "recompute", "rank"], default="run")
+    ap.add_argument("--mode", choices=["run", "plot", "recompute", "rank", "report"], default="run",
+                    help="report は 6 件をまとめた報告用の表（run・rank の後。design.md §11.4）")
     ap.add_argument("--metric", default=constants.PLOT_METRIC_DEFAULT, help="描画する指標（既定 auc）")
     ap.add_argument("--n-seeds", type=int, default=None, help="使う事前学習 seed 数（既定 全部）")
     ap.add_argument("--windows", type=int, nargs="*", default=None, help="描く窓長（日）")
@@ -160,6 +161,13 @@ def main() -> None:
         projects = list(constants.PROJECTS.keys())
     else:
         projects = [args.project]
+    if args.mode == "report":   # 6 件をまとめて 1 回（design.md §11.4。2026-10-21）
+        from src.analysis.preliminary_analysis.lookback_window.visualization import report
+        labels = [constants.WINDOW_LABELS.get(w, f"{w}d") for w in sorted(constants.WINDOWS_DAYS, reverse=True)]
+        out = report.build_report(projects, args.metric, constants.OUTPUT_ROOT, labels,
+                                  index_col="window", row_name="窓長")
+        logger.info(f"報告用の表: {out}" if out else "報告用の表：結果がありません（先に --mode run と --mode rank）")
+        return
     windows = args.windows if args.windows else None
     # 既定は constants.DRAW_GENERAL_DEFAULT に従う（None を渡すと plotter/table が定数を見る）。
     # --no-general が指定されたときだけ強制オフ。

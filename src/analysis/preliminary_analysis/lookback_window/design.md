@@ -133,6 +133,19 @@
   - 指標は既定 **AUC**（`--metric` で切替可、ファイル名は `rank_<metric>.csv`）。
 - **保存先**：`data/analysis/preliminary_analysis/lookback_window/<project>/summary/rank_<metric>.csv`（§11.1 の `summary_<metric>.csv` と並ぶ）。
 
+### 11.4 6 件をまとめた報告用の表（2026-10-21 追加。本人判断）
+- **狙い**：報告・論文に載せる 6 件の表を、手で組み立てずに出す（手で拾う手間と拾い間違いをなくす）。以前は Claude が各リポジトリの CSV から組み立てていた。
+- **実行**：`--mode report`。各リポジトリの `summary/summary_<metric>.csv`（§11.1）と `summary/rank_<metric>.csv`（§11.3）を読むだけ（モデルは回さない。数秒）。
+  `--mode run` と `--mode rank` の後に打つ。ほかの出力には触らない。
+- **出力**（`data/analysis/preliminary_analysis/lookback_window/report/`。CSV は数字そのまま、Markdown は報告にそのまま貼れる形）：
+
+  | ファイル | 中身 |
+  |---|---|
+  | `rank_<metric>_all.csv`・`.md` | 行＝窓長（2M → 1d）、列＝リポジトリ。各リポジトリの「全体」の 1 位率と最下位率（%）。Markdown はセルを「1 位率 / 最下位率」にし、**各列の 1 位率の最大と最下位率の最小を太字**。下に対象日数（リポジトリごとの「全体」）と、同着は全部に足すので 1 位率の合計が 100% を超えうる旨の注記 |
+  | `best_<metric>_all.csv`・`.md` | リポジトリごとに、全評価日の平均（§11.1 の Ave）が最良の窓長と、その値 ± 標準偏差 |
+
+- 指標は既定 AUC（`--metric` で切替）。リポジトリは `PROJECTS` の 6 件（`--project` で絞れる）。結果がないリポジトリは列を空にしてログで知らせる。
+
 ## 12. パラメータ（constants に集約）
 - 本ディレクトリ `constants.py` に：窓長 `WINDOWS_DAYS=[1,3,7,14,30,60]`、`REVIEW_HORIZON_DAYS=1`（＝Δ）、top-k の `K_LIST=[5,10,20]`（＋正例数）、欠測ガード、`PLOT_METRIC_DEFAULT="auc"`、seed・集約 等（参考の代表 `PROJECT="nova"` はどこからも使っていなかったので 2026-10-15 に廃止）。`pretrained_encoders` の保存先・load API を参照。
 - **`PROJECTS`（プロジェクト別設定）**：`project -> {"cutoff": <版ラベル>, "versions": [<5版>]}` の対応表を本ディレクトリにも保持する（`pretrained_encoders/constants.py` と**同じ内容を各ディレクトリが自己完結で持つ**。重複は許容）。
