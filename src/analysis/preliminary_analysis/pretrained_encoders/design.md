@@ -249,6 +249,7 @@ nova  マージ 31,463 件の 84.6%、放棄 11,719 件の 9.9% で updated が�
   直す場所の `review_utils.py`・`record_builder.py` は表の指紋の材料（`feature_table/design.md` §2.5）なので、直すと作り終わった 12 個の表がすべて
   「指紋が違う」で止まる。このログが出るのは表を作るときだけなので、表を作り直す機会に直す。
   あわせて、値に効かない違いを本人が認めて指紋を付け替える道も後回しにした（止まったら、そのときに作る）。）
+  （2026-10-21：指紋が違っても止めずに警告するようにした（`feature_table/design.md` §2.6）ので、この直しはできるようになった。急ぎではないので後回しのまま）
 - **Qt の Deferred（2026-10-16 追加）**：Qt の Gerrit には、放棄とは別の状態 DEFERRED（後回し）がある。
   状態を作ったときの要求（Qt の課題票 QTQAINFRA-598）は「表示と絞り込み以外は放棄と同じ」とし、Qt の wiki（Gerrit Auto Cleanup）は
   「作業中の一覧から外れ、作業を再開するときに Restore で戻す」と案内している。Qt のプラグインのソースでも、放棄と同じ権限・同じ入力の形で行い、
@@ -719,6 +720,8 @@ CI の結果を使うのは wikimedia_mediawiki_core・typo3_cms・go の 3 件�
 - `data/` は Mac の `data/` を**全部**（約 96 GB）rsync で送る（本人判断。研究室のネットワークの中から。抜けによる事故を避ける）。
   **更新時刻を保つ**（`rsync -a`）：表の指紋は Change の JSON のディレクトリのファイル数・大きさ・最新の更新時刻を見るので（`feature_table/design.md` §2.5）、
   時刻が変わると表が「指紋が違う」で止まる。
+  （2026-10-21 改めた：止めずに警告するようにし、照合では場所を比べず、更新時刻は秒の単位で比べるようにした。Mac の rsync は時刻を秒までしか
+  送らないため、`-a` でも秒より下は落ちる。`feature_table/design.md` §2.5・§2.6）
 
 ### 14.3 Docker（リポジトリにサーバ用の別ファイルとして入れる。本人判断）
 - `Dockerfile.server`・`docker-compose.server.yml`（Mac 用の `Dockerfile`・`docker-compose.yml` は変えない）。

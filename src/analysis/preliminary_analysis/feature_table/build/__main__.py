@@ -36,8 +36,9 @@ def main(argv=None) -> int:
                 continue
             path, _meta = table_paths(p, args.period)
             if path.exists() and not args.overwrite:
-                check_table(p, args.period)            # そろっていれば飛ばす。違えば TableError
-                done.append(f"{p}（すでにあり、指紋もそろっている）")
+                diffs = check_table(p, args.period)    # すでにあれば作らずに飛ばす（2026-10-21：指紋が違っても止めず、知らせるだけ）
+                done.append(f"{p}（すでにあり、指紋もそろっている）" if not diffs else
+                            f"{p}（すでにあり。指紋が違う：{', '.join(diffs)}。作り直すなら --overwrite）")
                 continue
             build_project(p, args.period, overwrite=args.overwrite)
             done.append(p)

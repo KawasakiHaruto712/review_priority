@@ -244,31 +244,57 @@ def build_project(project: str, period: str = C.PERIOD_PRETRAIN, root: Path = C.
     return path
 
 
+MISSING_FINGERPRINT = "指紋がない"
+
+
 def check_table(project: str, period: str = C.PERIOD_PRETRAIN, root: Path = C.TABLE_ROOT,
-                rel_df: pd.DataFrame | None = None) -> None:
-    """表の指紋が今のコード・データと同じかを確かめる。違えば TableError（§2.6）。"""
+                rel_df: pd.DataFrame | None = None, strict: bool = False) -> list[str]:
+    """表の指紋が今のコード・データと同じかを確かめ、違いの説明の列を返す（同じなら空。§2.5・§2.6）。
+
+    2026-10-21 改めた：違っても止めない（旧版は TableError）。strict=True のときだけ TableError にする。
+    照合は材料ごとに行い、場所（path）と秒より下の更新時刻は違いにしない（fingerprint.comparable）。
+    """
     _path, meta_path = table_paths(project, period, root)
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     old = meta.get("fingerprint")
     if not old:
-        raise TableError(f"[{project}] {period} の表に指紋がありません。値に効くファイルとデータを表を作った後に変えていなければ、"
-                         f"python3 -m src.analysis.preliminary_analysis.feature_table.build --add-fingerprint {project} で書き足してください")
-    cur = fingerprint.compute(project, period, load_release_dates() if rel_df is None else rel_df)
-    if cur["sha256"] != old["sha256"]:
-        diffs = fingerprint.differences(old.get("parts", {}), cur["parts"])
-        raise TableError(f"[{project}] {period} の表は今のコード・データと違う条件で作られています（違い：{', '.join(diffs)}）。"
-                         f"作り直すなら：python3 -m src.analysis.preliminary_analysis.feature_table.build {project} "
-                         f"--period {period} --overwrite（古い表は上書きされます）")
+        diffs = [MISSING_FINGERPRINT]
+    else:
+        cur = fingerprint.compute(project, period, load_release_dates() if rel_df is None else rel_df)
+        diffs = [] if cur["sha256"] == old["sha256"] else fingerprint.differences(old.get("parts", {}), cur["parts"])
+    if diffs and strict:
+        raise TableError(f"[{project}] {period} の表は今のコード・データと違う条件で作られています（違い：{', '.join(diffs)}）")
+    return diffs
+
+
+def _record_warning(project: str, period: str, root: Path, diffs: list[str]) -> Path:
+    """警告を表の隣の <期間>_fingerprint_warnings.jsonl に 1 行書き足す（§2.6）。"""
+    path = Path(root) / project / f"{period}_fingerprint_warnings.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {"time": datetime.now(timezone.utc).isoformat(), "host": platform.node(), "platform": platform.platform(),
+           "differences": diffs}
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return path
 
 
 def ensure_table(project: str, period: str = C.PERIOD_PRETRAIN, features: list[str] | None = None,
                  root: Path = C.TABLE_ROOT, rel_df: pd.DataFrame | None = None) -> dict[str, np.ndarray]:
-    """表を使う側の入口（§2.6）：なければ作る、指紋がない・違えば止める（上書きしない）、そろっていれば読む。"""
+    """表を使う側の入口（§2.6）：なければ作る、指紋がない・違えば警告して続ける（上書きしない）、表を読む。
+
+    2026-10-21 改めた：旧版は指紋がない・違えば止めた。
+    """
     path, _meta = table_paths(project, period, root)
     if not path.exists():
         logger.warning(f"[{project}] {period} の表がないので、今から作ります（数時間かかることがあります）")
         build_project(project, period, root)
-    check_table(project, period, root, rel_df)
+    diffs = check_table(project, period, root, rel_df)
+    if diffs:
+        rec = _record_warning(project, period, root, diffs)
+        bar = "!" * 70
+        logger.warning(f"\n{bar}\n[{project}] {period} の表は今のコード・データと違う条件で作られています（違い：{', '.join(diffs)}）。\n"
+                       f"止めずにこの表で続けます。作り直すなら：python3 -m src.analysis.preliminary_analysis.feature_table.build "
+                       f"{project} --period {period} --overwrite（古い表は上書きされます）\n記録：{rec}\n{bar}")
     return load_table(project, period, features, root)
 
 
