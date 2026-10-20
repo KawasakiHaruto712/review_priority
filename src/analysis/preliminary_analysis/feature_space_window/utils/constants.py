@@ -49,3 +49,17 @@ CLASSIFY_THRESHOLD = 0.5
 K_LIST = [5, 10, 20]           # top-k（＋その日の正例数 '@pos' も自動で出す）
 PLOT_METRIC_DEFAULT = "auc"
 PLOT_DPI = 150
+
+# ── 特徴のずれ×評価時期の精度表（design.md §9。2026-10-21 追加。値は concept_drift_detection と同じ設定の複製） ──
+# リポジトリごとの k（近い日の群の日数）と刻み（評価時期の列の幅＝RQ1 の窓長）。どちらも結果を見て本人が手で書く。
+# size_days：大きさの分析・順位の集計で選んだ k。step_days：RQ1 の時期のずれ×評価時期の精度表と同じ刻み（RQ1 の window_days）。
+MATRIX_SETTINGS = {p: {"size_days": None, "step_days": None} for p in PROJECTS}
+RANDOM_SEED = 42               # probe の seed（k 本目のエンコーダ ＝ RANDOM_SEED + k。RQ1 の精度表と同じ）
+REPEAT_AGG = "median"          # 評価日ごとの seed 方向の集約
+MIN_TRAIN = 30                 # 学習の k 日の最小レコード数（RQ1 と同じ）
+MIN_EVAL = 30                  # 評価日の最小レコード数（RQ1 と同じ）
+BIN_DAY_ALIGNED = True         # 評価時期の境界を 0 時にそろえる（RQ1 と同じ）
+PLOT_METRICS = ["auc"]         # ヒートマップを描く指標（CSV・json は全指標）
+HEATMAP_SHOW_CELL_VALUES = False
+HEATMAP_VALUE_FMT = "{:.2f}"
+SAVE_PER_REPEAT = True

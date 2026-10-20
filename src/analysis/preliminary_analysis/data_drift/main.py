@@ -24,7 +24,7 @@ from src.analysis.preliminary_analysis.data_drift.io import writer
 from src.analysis.preliminary_analysis.data_drift.pairing import time_distance
 from src.analysis.preliminary_analysis.data_drift.stats.aggregate import to_cells
 from src.analysis.preliminary_analysis.data_drift.stats.runner import run_version
-from src.analysis.preliminary_analysis.data_drift.utils import constants
+from src.analysis.preliminary_analysis.data_drift.utils import constants, parallel
 from src.analysis.preliminary_analysis.data_drift.visualization import plotter
 from src.analysis.preliminary_analysis.pretrained_encoders.features.feature_set import MODEL_FEATURES
 from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre
@@ -121,8 +121,21 @@ def main() -> None:
     ap.add_argument("--versions", nargs="*", default=None, help="対象の版（既定は 5 版）")
     ap.add_argument("--cells", nargs="*", default=None, help="個別セル図を描くセル（例 d0-p8 d20-p8）")
     ap.add_argument("--groups", nargs="*", default=list(constants.GROUPS), help="描く群（all pos neg）")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="リポジトリを並べて回す数（既定：CUDA が使える機械なら CPU の上限まで最大 6、Mac などは 1。§6）")
     args = ap.parse_args()
     projects = list(pre.PROJECTS) if args.project in (None, "all") else [args.project]
+    if args.mode == "run":      # GPU を使わないので CPU だけで並べる数を決める（design.md §6。2026-10-21）
+        w, _frac = parallel.decide(len(projects), use_gpu=False, workers=args.workers)
+        if w > 1:
+            child = ["--mode", "run", "--kind", args.kind, "--groups", *args.groups]
+            if args.versions:
+                child += ["--versions", *args.versions]
+            if args.cells:
+                child += ["--cells", *args.cells]
+            failed = parallel.run_children("src.analysis.preliminary_analysis.data_drift.main", projects, child, w, None,
+                                           f"data_drift_{args.kind}")
+            sys.exit(1 if failed else 0)
     for project in projects:
         versions = args.versions or list(pre.project_config(project)["versions"])
         logger.info(f"===== {args.kind} {project}（{len(versions)} 版）=====")

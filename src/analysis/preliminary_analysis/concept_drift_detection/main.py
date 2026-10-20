@@ -32,7 +32,7 @@ from src.analysis.preliminary_analysis.concept_drift_detection.evaluation import
     drift_detector, drift_matrix, metrics,
 )
 from src.analysis.preliminary_analysis.concept_drift_detection.io import probe_store, result_writer
-from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants
+from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants, parallel
 from src.analysis.preliminary_analysis.concept_drift_detection.visualization import plotter
 from src.analysis.preliminary_analysis.pretrained_encoders import build_encoders
 from src.analysis.preliminary_analysis.pretrained_encoders.dataset import record_builder, set_builder
@@ -205,9 +205,32 @@ def _parse_args():
                     help="対象プロジェクト（既定 constants.PROJECTS 全部）")
     ap.add_argument("--version", nargs="*", default=None,
                     help="対象の版ラベル（既定 その project の 5 版全部）")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="リポジトリを並べて回す数（既定：CUDA なら --gpu-share から自動、Mac などは 1。pretrained_encoders/design.md §14.7）")
+    ap.add_argument("--gpu-share", type=float, default=parallel.DEFAULT_GPU_SHARE,
+                    help="並べたプロセス全体で使ってよい GPU のメモリの割合（既定 0.25 ＝ 1/4。誰も使っていなければ 1.0 まで）")
     return ap.parse_args()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """2026-10-21：CUDA の機械ではリポジトリごとに別々のプロセスで並べて回す（pretrained_encoders/design.md §14.7）。"""
+    import os
+    from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre_constants
+
     args = _parse_args()
-    run(projects=args.project, versions=args.version)
+    projects = list(args.project) if args.project else list(constants.PROJECTS)
+    if args.gpu_share > parallel.DEFAULT_GPU_SHARE:
+        logger.warning(f"GPU のメモリを全体の {args.gpu_share:.0%} まで使います（既定の 1/4 を超えています）")
+    w, frac = parallel.decide(len(projects), use_gpu=True, gpu_share=args.gpu_share, workers=args.workers)
+    if w > 1:
+        child = ["--version", *args.version] if args.version else []
+        failed = parallel.run_children("src.analysis.preliminary_analysis.concept_drift_detection.main", projects,
+                                       child, w, frac, "concept_drift_detection")
+        sys.exit(1 if failed else 0)
+    if frac is not None and not os.environ.get("RP_CUDA_MEMORY_FRACTION"):
+        pre_constants.CUDA_MEMORY_FRACTION = frac
+    run(projects=projects, versions=args.version)
+
+
+if __name__ == "__main__":
+    main()
