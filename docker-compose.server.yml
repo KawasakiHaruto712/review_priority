@@ -20,6 +20,12 @@ services:
         target: /usr/local/lib/python3.12/site-packages
     cpus: ${SERVER_CPUS:?.env に SERVER_CPUS を書いてください}
     mem_limit: ${SERVER_MEM_LIMIT:?.env に SERVER_MEM_LIMIT を書いてください}
+    # スワップを使わない（メモリとスワップの合計をメモリの上限と同じにする。サーバのスワップは小さく共有なので、ほかの人の分を圧迫しない）
+    memswap_limit: ${SERVER_MEM_LIMIT:?.env に SERVER_MEM_LIMIT を書いてください}
+    # 計算用のスレッドの数を CPU の上限にそろえる（何も指定しないとサーバ全体のコア数ぶん作り、上限の中で無駄に取り合う）
+    environment:
+      OMP_NUM_THREADS: ${SERVER_CPUS:?.env に SERVER_CPUS を書いてください}
+      MKL_NUM_THREADS: ${SERVER_CPUS:?.env に SERVER_CPUS を書いてください}
     deploy:
       resources:
         reservations:

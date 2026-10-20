@@ -728,6 +728,13 @@ CI の結果を使うのは wikimedia_mediawiki_core・typo3_cms・go の 3 件�
   `docker-compose.server.yml` はそれを読む（サーバの仕様をリポジトリに残さないため。本人判断）。GPU は 1 枚を渡す。
   **GPU は Docker では 1/4 に分けられない**（分割の機能がない GPU のため）。メモリだけ PyTorch の側で 1/4 に制限する（§14.4）。
   計算の速さは分けられないので、ほかの人が同時に使うと時間を分け合う（夜間に回す・研究室で声をかける等、運用で調整する）。
+  今後 GPU の計算も絞りたくなったら、管理者に NVIDIA MPS（`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE`）を頼むか、コードの側でバッチの合間に間を空ける。
+- **2026-10-20 追加：スワップを使わない（本人判断）**。Docker はメモリの上限だけを付けると、さらに同じ量までスワップを使ってよい扱いにする。
+  サーバのスワップは小さく共有なので、`memswap_limit` をメモリの上限と同じ値（`SERVER_MEM_LIMIT`）にし、メモリが上限に達したらスワップに逃げずに止まるようにする。
+- **2026-10-20 追加：計算用のスレッドの数を CPU の上限にそろえる（本人判断）**。`OMP_NUM_THREADS`・`MKL_NUM_THREADS` を `SERVER_CPUS` にする
+  （何も指定しないとサーバ全体のコア数ぶんスレッドを作り、上限の中で無駄に取り合う）。`.env` に書くのは `SERVER_CPUS`・`SERVER_MEM_LIMIT` の 2 つだけのまま。
+- 確かめ方（サーバで）：`docker compose -f docker-compose.server.yml config` で読んだ値、`docker inspect` で立てたコンテナの上限
+  （`NanoCpus`・`Memory`。0 なら上限なしなのですぐ止める）、`docker stats` で使っている量、`nvidia-smi` で GPU のメモリ（自分のプロセスが 1/4 程度）。
 - PyTorch は、サーバのドライバが対応する CUDA の版に合うものを、PyTorch の公式の CUDA 版の置き場から入れる（新しい PyTorch をそのまま入れると
   新しい CUDA 向けになり GPU を使えないことがある）。版は Mac と同じ（torch 2.13.0）にそろえ、合う版がなければ、入れるときに確かめて決め直す
   （`Dockerfile.server` の `TORCH_VERSION`・`TORCH_CUDA`）。ほかの依存は `requirements.txt` のまま。
