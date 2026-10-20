@@ -140,7 +140,7 @@ def analyze(table, rel_df, project, versions, out_root):
 
         base = out_root / project / model_name / version
         meta = {"project": project, "version": version, "model": model_name,
-                "n_repeats": len(encoders)}
+                "n_repeats": len(encoders), "device": str(device)}   # 回した機械（pretrained_encoders/design.md §14.5）
         _save_kind(res["probe"], base / "probe", meta)
         _save_kind(res["general"], base / "general", meta)
         _save_kind(res["diff"], base / "diff", meta)

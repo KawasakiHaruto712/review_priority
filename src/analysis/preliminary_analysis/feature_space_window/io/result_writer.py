@@ -49,8 +49,8 @@ def _git_commit() -> str:
         return ""
 
 
-def save_run_meta(project: str, seeds: list[int], sizes: list[int], versions: list[str]) -> Path:
-    """実行条件（大きさ・距離の決まり・候補の範囲・seed・表の指紋・実行日時・git commit）を run_meta.json に書く。"""
+def save_run_meta(project: str, seeds: list[int], sizes: list[int], versions: list[str], device: str | None = None) -> Path:
+    """実行条件（大きさ・距離の決まり・候補の範囲・seed・表の指紋・回した機械・実行日時・git commit）を run_meta.json に書く。"""
     from src.analysis.preliminary_analysis.feature_table.build.table import table_paths
 
     prints = {}
@@ -67,6 +67,7 @@ def save_run_meta(project: str, seeds: list[int], sizes: list[int], versions: li
                    "distance": "各次元を標準化したユークリッド距離（日の代表＝埋め込みの平均。標準偏差は評価日ごとに X より前の全日から。"
                                f"{constants.STD_EPS} 未満は 1）",
                    "candidates": "評価日より前のすべての日（事前学習の表＋評価期間の表。重なりは評価期間の表）",
-                   "table_fingerprints": prints, "created_at": datetime.now(timezone.utc).isoformat(),
+                   "table_fingerprints": prints, "device": device,
+                   "created_at": datetime.now(timezone.utc).isoformat(),
                    "git_commit": _git_commit()}, f, ensure_ascii=False, indent=2)
     return path

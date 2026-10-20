@@ -1,0 +1,29 @@
+# 研究室のサーバ（NVIDIA の GPU）用（pretrained_encoders/design.md §14）。Mac 用の Dockerfile は別。
+FROM python:3.12.4
+
+WORKDIR /work
+
+RUN apt-get update &&\
+    apt-get -y install --no-install-recommends locales &&\
+    localedef -f UTF-8 -i ja_JP ja_JP.UTF-8 &&\
+    rm -rf /var/lib/apt/lists/*
+
+ENV LANG=ja_JP.UTF-8
+ENV LANGUAGE=ja_JP:ja
+ENV LC_ALL=ja_JP.UTF-8
+ENV TZ=JST-9
+ENV TERM=xterm
+
+RUN git config --system --add safe.directory '*'
+
+# PyTorch は、サーバのドライバが対応する CUDA の版に合うものを、PyTorch の公式の置き場から先に入れる
+# （そのまま入れると新しい CUDA 向けの版になり GPU を使えないことがある）。版は Mac と同じにそろえる。
+# この組み合わせが入らなければ、ビルドのときに TORCH_VERSION・TORCH_CUDA を変えて決め直す（design.md §14.3）。
+ARG TORCH_VERSION=2.13.0
+ARG TORCH_CUDA=cu126
+RUN pip install --no-cache-dir --upgrade pip &&\
+    pip install --no-cache-dir torch==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/${TORCH_CUDA}
+
+# ほかの依存は requirements.txt のまま（torch はすでに入っているので入れ直さない）
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt

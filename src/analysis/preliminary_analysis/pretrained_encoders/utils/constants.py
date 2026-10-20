@@ -93,4 +93,5 @@ N_REPEATS = 5                # 作るエンコーダ数
 RANDOM_SEED = 42             # k 個目の torch seed = RANDOM_SEED + k
 
 # ── 計算環境 ─────────────────────────────────────
-DEVICE = "auto"              # "auto" で MPS があれば MPS、無ければ CPU
+DEVICE = "auto"              # "auto" で CUDA → MPS → CPU の順（2026-10-20 改めた。旧版は MPS → CPU。design.md §7・§14）
+CUDA_MEMORY_FRACTION = 0.25  # CUDA のときに使う GPU のメモリの上限（共有のサーバで全体の 1/4。design.md §14.4）

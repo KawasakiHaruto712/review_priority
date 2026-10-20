@@ -199,7 +199,8 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
     ig_store.write_daily(rows, out_dir, run_id,
                          ig_store.run_conditions({"project": project, "version": version,
                                                   "distances": distances,
-                                                  "positions": sorted(target_pos)}))
+                                                  "positions": sorted(target_pos),
+                                                  "device": str(device)}))   # 回した機械（pretrained_encoders/design.md §14.5）
     return len(rows)
 
 

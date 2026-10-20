@@ -28,23 +28,46 @@ FEATURE_NAMES = MODEL_FEATURES
 FEATURE_DIM = len(MODEL_FEATURES)
 
 
-# ── デバイス（MPS があれば MPS、無ければ CPU） ─────────────────────
+# ── デバイス（CUDA → MPS → CPU。2026-10-20 改めた：旧版は MPS → CPU。design.md §14.4） ─────────────
+_CUDA_LIMITED = False
+
+
+def _limit_cuda_memory(device: torch.device) -> None:
+    """CUDA のとき、GPU のメモリの上限を CUDA_MEMORY_FRACTION にする（共有のサーバで 1/4。一度だけ）。"""
+    global _CUDA_LIMITED
+    if _CUDA_LIMITED or constants.CUDA_MEMORY_FRACTION is None:
+        return
+    torch.cuda.set_per_process_memory_fraction(float(constants.CUDA_MEMORY_FRACTION),
+                                               device.index if device.index is not None else 0)
+    _CUDA_LIMITED = True
+
+
 def resolve_device() -> torch.device:
     want = constants.DEVICE
     if want == "auto":
-        if torch.backends.mps.is_available():
-            return torch.device("mps")
-        return torch.device("cpu")
-    return torch.device(want)
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+    else:
+        device = torch.device(want)
+    if device.type == "cuda":
+        _limit_cuda_memory(device)
+    return device
 
 
 def release_device_cache(device: torch.device) -> None:
-    """GPU（MPS）が抱えているキャッシュを手放す（design.md §4。2026-10-20）。数値には効かない。CPU では何もしない。
+    """GPU が抱えているキャッシュを手放す（design.md §4。2026-10-20）。数値には効かない。CPU では何もしない。
 
     集合の大きさが日ごとに違うので、計算の後のメモリを PyTorch が再利用しきれずに抱え続け、上限に達してメモリ不足になった。
     """
-    if torch.device(device).type == "mps":
+    kind = torch.device(device).type
+    if kind == "mps":
         torch.mps.empty_cache()
+    elif kind == "cuda":
+        torch.cuda.empty_cache()
 
 
 # ── 特徴の標準化 ────────────────────────────────────

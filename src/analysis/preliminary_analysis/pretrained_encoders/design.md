@@ -167,6 +167,8 @@ list_seeds(project, cutoff) -> [seed, ...]      # 保存済み seed の列挙
 - **`TARGET_PROJECT`（既定の対象 1 件。旧 `"nova"`）は廃止**する（2026-10-15）。事前学習を単独で回すとき（`build_encoders`）に `--project` を付けなければ、
   `PROJECTS` の全件を順に作る（窓長の調査・距離×時期行列と同じ。下流がエンコーダを自動で作るときは、対象を名前で渡すので影響しない）。
 - 旧 `FIRST_TARGET_VERSION` / `PRETRAIN_CUTOFF`（cutoff を版から自動導出する仕組み）は**廃止**し、`PROJECTS` の cutoff ラベルに一本化する。
+- **2026-10-20 追記**：`DEVICE = "auto"` は ~~MPS があれば MPS、無ければ CPU~~ **CUDA があれば CUDA、次に MPS、無ければ CPU** にする（研究室のサーバで回すため。§14）。
+  CUDA のときに使う GPU のメモリの上限 `CUDA_MEMORY_FRACTION = 0.25` を足す。
 
 ## 8. ディレクトリ・コード構成（自己完結・基点／機能別フォルダ）
 `concept_drift_detection` と同じく機能ごとにフォルダ分けする（一貫性・流用元を 1:1 コピーしやすい）。
@@ -700,3 +702,58 @@ CI の結果を使うのは wikimedia_mediawiki_core・typo3_cms・go の 3 件�
    要点：事前学習の区間の全レコード・代わりの値で埋めた後の値・Spearman |ρ| ≥ 0.7・残す方は AutoSpearman（Jiarpakdee 2018）の 1 段目
    （組の外の特徴量との |ρ| の平均が小さい方を残す。VIF の段は使わない。前例 Khatoonabadi 2024）・6 件のまとめ方は過半数と |ρ| の平均の両方を出して後で選ぶ。
 4. 残ったものと §12.2・§12.3 の 2 つを一斉に `FEATURE_NAMES` に足し、事前学習から回す。
+
+## 14. 研究室のサーバで回す（2026-10-20 追加。本人判断）
+
+### 14.1 目的
+- 下流（窓長の調査・距離×時期行列・RQ2・寄与度分析）を研究室のサーバ（NVIDIA の GPU）でも回せるようにする。Mac より数倍速い見込みで、
+  Mac で事前学習を回している間に下流を先に進められる。寄与度分析の範囲にも効く。
+- サーバの仕様（機種・台数・メモリ・場所など）は、外に出してよい情報かわからないので、リポジトリには書かない（本人判断）。
+  研究室で共有しているので、**使う資源は全体の 1/4 程度まで**にする（本人判断）。
+
+### 14.2 置き場所（古い構成には触らない）
+- 古い構成のディレクトリの隣に、新しく **`review_priority_v2`** という名前で GitHub から clone する（本人判断）。古い構成には触らない
+  （以前の構成が入り組んでいて、古いファイル・古い結果・古い依存を黙って使う事故を避けるため。サーバにしかないデータもそこに残る）。
+  - 古い構成の中の入れ子のディレクトリ（古い `docker-compose.yml` のつなぎ先として Docker が作った root 所有の空のディレクトリ）は、
+    書き込めず、古いコンテナから入れ子で見えてしまうので使わない。
+- `data/` は Mac の `data/` を**全部**（約 96 GB）rsync で送る（本人判断。研究室のネットワークの中から。抜けによる事故を避ける）。
+  **更新時刻を保つ**（`rsync -a`）：表の指紋は Change の JSON のディレクトリのファイル数・大きさ・最新の更新時刻を見るので（`feature_table/design.md` §2.5）、
+  時刻が変わると表が「指紋が違う」で止まる。
+
+### 14.3 Docker（リポジトリにサーバ用の別ファイルとして入れる。本人判断）
+- `Dockerfile.server`・`docker-compose.server.yml`（Mac 用の `Dockerfile`・`docker-compose.yml` は変えない）。
+- コンテナ名 `review_priority_v2`（古いコンテナ `review_priority` とぶつけない）。つなぐのは新しいディレクトリだけ（`.` → `/work`）。
+  依存のボリュームも古いものと分ける。
+- 資源の制限：CPU とメモリは全体の 1/4 程度。値はサーバの上の `.env`（git の対象外）に `SERVER_CPUS`・`SERVER_MEM_LIMIT` として書き、
+  `docker-compose.server.yml` はそれを読む（サーバの仕様をリポジトリに残さないため。本人判断）。GPU は 1 枚を渡す。
+  **GPU は Docker では 1/4 に分けられない**（分割の機能がない GPU のため）。メモリだけ PyTorch の側で 1/4 に制限する（§14.4）。
+  計算の速さは分けられないので、ほかの人が同時に使うと時間を分け合う（夜間に回す・研究室で声をかける等、運用で調整する）。
+- PyTorch は、サーバのドライバが対応する CUDA の版に合うものを、PyTorch の公式の CUDA 版の置き場から入れる（新しい PyTorch をそのまま入れると
+  新しい CUDA 向けになり GPU を使えないことがある）。版は Mac と同じ（torch 2.13.0）にそろえ、合う版がなければ、入れるときに確かめて決め直す
+  （`Dockerfile.server` の `TORCH_VERSION`・`TORCH_CUDA`）。ほかの依存は `requirements.txt` のまま。
+- コンテナから GPU を使うには、サーバに NVIDIA Container Toolkit が入っている必要がある（立てるときに確かめる）。
+
+### 14.4 コードの変更
+- `resolve_device`：`DEVICE = "auto"` のとき **CUDA → MPS → CPU** の順に選ぶ。CUDA を選んだら
+  `torch.cuda.set_per_process_memory_fraction(CUDA_MEMORY_FRACTION)`（0.25）を一度だけ呼ぶ。
+  今日の測定の山（事前学習 3.10 GB・埋め込み 1.07 GB・IG 8 段階ずつ 2.07 GB。§4・§6・`concept_drift_cause/design.md` §2.4）は、この上限に収まる見込み。
+- `release_device_cache`：CUDA のときは `torch.cuda.empty_cache()`、MPS のときは `torch.mps.empty_cache()`、CPU では何もしない。数値には効かない。
+- 保存したエンコーダは `map_location` で読むので、Mac（MPS）で作ったものをサーバ（CUDA）で読める（`load_pretrained` はそのまま）。
+- MPS の環境変数（`PYTORCH_MPS_*_WATERMARK_RATIO`）はサーバでは要らない。
+- これらのファイル（`model/set_transformer.py`・`utils/constants.py`）は表の指紋の材料ではないので、作り終わった表はそのまま使える。
+
+### 14.5 Mac とサーバの違いの扱い
+- CUDA と MPS では浮動小数点の計算の順番が違うので、末尾の桁くらいの違いが出る。結果の読み方には効かない。
+  probe の学習（100 回の更新）を通して少し広がり、AUC が 0.001 前後ずれることはありうる。乱数による違いはない（probe の初期値は CPU 上で同じ seed から作る）。
+- ~~ただし、1 つの分析（窓長の調査・距離×時期行列・RQ2・寄与度分析のそれぞれ）は 6 件とも同じ機械で回す（分析の中で Mac とサーバの結果を混ぜない）。~~
+  （2026-10-20 改めた）**決まりにはしない**（本人判断）。都合のよい方で回し、**どちらで回したかを各分析の実行の記録に残す**：
+  事前学習は `config.json` の `device`、窓長の調査は `predictions_meta.json`、距離×時期行列は行列の `meta`、寄与度分析は `ig_daily_meta.json` の実行条件、
+  RQ2 は `run_meta.json`。
+
+### 14.6 手順
+1. 設計（本節）→ 実装（コードと Docker のファイル）→ 本人がコミット。
+2. サーバで、古い構成の隣に `review_priority_v2` として clone。
+3. Mac から `data/` を全部 rsync（`-a` で時刻を保つ）。
+4. サーバの上の `.env` に `SERVER_CPUS`・`SERVER_MEM_LIMIT` を書き、`docker compose -f docker-compose.server.yml up -d --build`。
+5. 確かめる：コンテナの中で `torch.cuda.is_available()`、GPU のメモリの上限、12 個の表の指紋の一致（`check_table`）、エンコーダが読めること。
+6. qtbase の窓長の調査を小さく試してから、本番。
