@@ -20,8 +20,8 @@ def version_dir(project: str, version: str) -> Path:
     return constants.OUTPUT_ROOT / project / version
 
 
-def save_predictions(rows: list[tuple], project: str, version: str) -> Path | None:
-    """生予測を predictions.csv.gz に保存。"""
+def save_predictions(rows: list[tuple], project: str, version: str, device: str | None = None) -> Path | None:
+    """生予測を predictions.csv.gz に保存。device は回した機械（predictions_meta.json に残す。pretrained_encoders/design.md §14.5）。"""
     d = version_dir(project, version)
     d.mkdir(parents=True, exist_ok=True)
     if not rows:
@@ -31,7 +31,7 @@ def save_predictions(rows: list[tuple], project: str, version: str) -> Path | No
     df.to_csv(path, index=False, compression="gzip")
     with open(d / "predictions_meta.json", "w", encoding="utf-8") as f:
         json.dump({"project": project, "version": version, "columns": _PRED_COLUMNS,
-                   "n_rows": len(df),
+                   "n_rows": len(df), "device": device,
                    "note": "y_true=Δ以内レビューの2値, score=正例確率。window='general'は汎用ヘッド。"
                            "再学習なしで指標を計算し直せる。"},
                   f, ensure_ascii=False, indent=2)

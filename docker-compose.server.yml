@@ -1,0 +1,32 @@
+# 研究室のサーバ用（pretrained_encoders/design.md §14）。Mac 用の docker-compose.yml は別。
+# 起動：docker compose -f docker-compose.server.yml up -d --build
+# 共有のサーバなので、資源は全体の 1/4 程度までにする。CPU とメモリの上限は、サーバの上の .env（git の対象外）に書く：
+#   SERVER_CPUS=<コア数>
+#   SERVER_MEM_LIMIT=<メモリ。例 32g>
+# GPU は Docker では分けられないので、メモリだけ PyTorch の側で 1/4 に制限する（pretrained_encoders の CUDA_MEMORY_FRACTION）。
+services:
+  review_priority_v2:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: review_priority_v2
+    tty: true
+    volumes:
+      - type: bind
+        source: .
+        target: /work
+      - type: volume
+        source: packages_v2
+        target: /usr/local/lib/python3.12/site-packages
+    cpus: ${SERVER_CPUS:?.env に SERVER_CPUS を書いてください}
+    mem_limit: ${SERVER_MEM_LIMIT:?.env に SERVER_MEM_LIMIT を書いてください}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  packages_v2:

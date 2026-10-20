@@ -63,7 +63,7 @@ def run(project: str, versions: list[str], n_seeds: int | None, sizes: list[int]
         del encoder
     for v, rows in merged.items():
         logger.info(f"保存: {result_writer.save_version(rows, project, v)}")
-    result_writer.save_run_meta(project, seeds, sizes, list(version_eval))
+    result_writer.save_run_meta(project, seeds, sizes, list(version_eval), device=str(device))
 
 
 def main() -> None:

@@ -89,7 +89,7 @@ def run(project: str, versions: list[str], n_seeds: int | None) -> None:
             pred_rows.extend(pr)
             metric_rows.extend(mr)
 
-        result_io.save_predictions(pred_rows, project, version)
+        result_io.save_predictions(pred_rows, project, version, device=str(device))
         result_io.save_metrics(metric_rows, project, version)
         logger.info(f"保存: {result_io.version_dir(project, version)}")
 

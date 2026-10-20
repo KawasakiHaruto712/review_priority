@@ -93,7 +93,8 @@ def build_and_save(project: str, n: int | None = None, seed_indices=None) -> lis
             logger.error(f"[{project}] seed{k} は保存しません：{e}（記録：{rec}）")
             failed.append(k)
             continue
-        out = store.save_pretrained(project, cutoff_label, k, enc, gh, scaler, {"torch_seed": seed})
+        out = store.save_pretrained(project, cutoff_label, k, enc, gh, scaler,
+                                    {"torch_seed": seed, "device": str(device)})   # 回した機械（design.md §14.5）
         logger.info(f"保存: {out}")
 
     logger.info("完了" if not failed else f"完了（非有限で保存しなかった seed：{failed}）")
