@@ -199,8 +199,32 @@ def run(projects=None, versions=None) -> None:
         analyze(table, rel_df, project, vs, constants.OUTPUT_ROOT)
 
 
+def redraw(projects=None, versions=None) -> int:
+    """保存済みの drift_matrix.json から図だけを描き直す（計算し直さない。design.md §10。2026-10-21）。描いた枚数のまとまりの数を返す。"""
+    targets = list(projects) if projects else list(constants.PROJECTS)
+    n = 0
+    for project in targets:
+        vs = constants.versions_for(project)
+        if versions:
+            vs = [v for v in vs if v in set(versions)]
+        for v in vs:
+            base = constants.OUTPUT_ROOT / project / constants.MODEL_NAME[0] / v
+            for kind in ("probe", "general", "diff"):
+                for m in constants.PLOT_METRICS:
+                    path = base / kind / m / "drift_matrix.json"
+                    if not path.exists():
+                        logger.warning(f"結果がないのでスキップ: {path}")
+                        continue
+                    plotter.plot_all(result_writer.load_matrix(path), path.parent, constants.PLOT_DPI)
+                    n += 1
+            logger.info(f"描き直し: {base}")
+    return n
+
+
 def _parse_args():
     ap = argparse.ArgumentParser(description="距離×時期行列の分析：距離×時期行列（日次スライド学習）")
+    ap.add_argument("--mode", choices=["run", "plot"], default="run",
+                    help="plot は保存済みの json から図だけを描き直す（計算し直さない。2026-10-21）")
     ap.add_argument("--project", nargs="*", default=None,
                     help="対象プロジェクト（既定 constants.PROJECTS 全部）")
     ap.add_argument("--version", nargs="*", default=None,
@@ -219,6 +243,9 @@ def main() -> None:
 
     args = _parse_args()
     projects = list(args.project) if args.project else list(constants.PROJECTS)
+    if args.mode == "plot":
+        logger.info(f"図を描き直しました: {redraw(projects, args.version)} まとまり")
+        return
     if args.gpu_share > parallel.DEFAULT_GPU_SHARE:
         logger.warning(f"GPU のメモリを全体の {args.gpu_share:.0%} まで使います（既定の 1/4 を超えています）")
     w, frac = parallel.decide(len(projects), use_gpu=True, gpu_share=args.gpu_share, workers=args.workers)

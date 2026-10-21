@@ -20,7 +20,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-PER_PROCESS_GB = 1.6       # 1 つのプロセスに確保したい GPU のメモリ（qtbase の埋め込みの山 1.07 GB に余裕を見た値）
+# 1 つのプロセスに確保したい GPU のメモリ。~~1.6~~ 2026-10-21 改めた：2.5（feature_space_window/design.md §9.4）。
+# RQ2 は事前学習の区間の日も埋め込むので、qtbase（集合が最大 2,073 件）の埋め込みの山が評価期間だけのとき（1.07 GB）の約 2 倍になり、
+# 1.64 GB の上限で CUDA out of memory になった。RQ1 の分析（concept_drift_detection・data_drift の複製）は 1.6 のまま。
+PER_PROCESS_GB = 2.5
 CPU_ONLY_MAX = 6           # GPU を使わない分析を並べる数の上限
 DEFAULT_GPU_SHARE = 0.25   # 全体の 1/4（研究室の決まり）
 

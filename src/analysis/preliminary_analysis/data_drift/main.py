@@ -35,21 +35,32 @@ logger = logging.getLogger(__name__)
 PAIRINGS = {time_distance.KIND: time_distance}      # RQ2（feature_distance）は距離版の設計が決まり次第足す（design.md §3.2）
 
 
+ACC_METRICS = ("recall@pos", "auc")   # 題の 2 行目に出す精度（この順。design.md §5。2026-10-21 改めた：旧版は AUC だけ）
+
+
 def _auc_lookup(project: str, version: str):
-    """同じセルの精度表の AUC（concept_drift_detection の出力）。なければ None を返す関数。"""
+    """同じセルの精度表の recall@pos と AUC（concept_drift_detection の出力）を返す関数 get(r, p) -> {指標: 値 or None}。
+    どちらの表もなければ None。"""
     from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants as det
-    path = det.OUTPUT_ROOT / project / det.MODEL_NAME[0] / version / "probe" / "auc" / "drift_matrix.csv"
-    if not path.exists():
-        logger.warning(f"[{project} {version}] 精度表の AUC がありません（{path}）。題は「—」にします")
+    tables = {}
+    for metric in ACC_METRICS:
+        path = det.OUTPUT_ROOT / project / det.MODEL_NAME[0] / version / "probe" / metric / "drift_matrix.csv"
+        if path.exists():
+            tables[metric] = pd.read_csv(path, index_col=0)
+        else:
+            logger.warning(f"[{project} {version}] 精度表の {metric} がありません（{path}）。題は「—」にします")
+    if not tables:
         return None
-    m = pd.read_csv(path, index_col=0)
 
     def get(r, p):
-        try:
-            v = m.loc[f"d{r}", f"p{p}"]
-            return float(v) if pd.notna(v) else None
-        except KeyError:
-            return None
+        out = {}
+        for metric, m in tables.items():
+            try:
+                v = m.loc[f"d{r}", f"p{p}"]
+                out[metric] = float(v) if pd.notna(v) else None
+            except KeyError:
+                out[metric] = None
+        return out
     return get
 
 
@@ -107,8 +118,8 @@ def draw(kind: str, project: str, versions: list[str], cells_arg: list[str] | No
                 plotter.plot_grid(cells, counts, aucs, project, v, row_label, g, fixed="position", fixed_value=p,
                                   panel_values=rows, out_path=fig_dir / "grid" / g / f"position{p}.png")
             for r, p in _parse_cells(cells_arg):
-                auc = aucs(r, p) if aucs else None
-                plotter.plot_cell(cells, project, v, row_label, r, p, g, plotter.cell_info(counts, r, p), auc,
+                accs = aucs(r, p) if aucs else None
+                plotter.plot_cell(cells, project, v, row_label, r, p, g, plotter.cell_info(counts, r, p), accs,
                                   fig_dir / "cell" / g / f"d{r}_p{p}.png")
         logger.info(f"図: {fig_dir}")
 

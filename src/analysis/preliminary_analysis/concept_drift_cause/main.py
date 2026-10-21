@@ -49,30 +49,29 @@ logger = logging.getLogger(__name__)
 
 
 # ──距離×時期行列の分析の結果から「そのセル値を出したモデル」を特定する（§4） ──────────────────
-def median_seed(sub: pd.DataFrame, metric: str) -> int | None:
-    """その (評価日, 距離) で metric が中央（5 個中 3 番目）だった seed。
+def median_seed(sub: pd.DataFrame, metrics) -> int | None:
+    """その (評価日, 行) で真ん中（5 個中 3 番目）の seed（design.md §4）。
 
-    `N_REPEATS` が奇数なので中央値は実在する 1 個のモデルの値になる。
-    同値のときは **seed 番号の小さい方**（`concept_drift_detection/design.md` §8.1 と同じ規則）。
+    ~~metric が中央の seed。同値のときは seed 番号の小さい方。~~
+    2026-10-21 改めた：metrics（既定 recall@pos → AUC）と seed 番号の順に、すべて小さい順に並べて 3 番目を選ぶ。
+    recall@pos は飛び飛びの値で真ん中の値を持つ seed が複数ありうる（精度表では値が同じなので困らないが、IG はモデルの中身で
+    値が変わるので 1 本に決める）。最初の指標で同じなら次の指標、それも同じなら番号で並びが決まる。metrics に文字列 1 つも渡せる。
     """
-    s = sub.dropna(subset=[metric])
+    metrics = [metrics] if isinstance(metrics, str) else list(metrics)
+    s = sub.dropna(subset=[metrics[0]])
     if s.empty:
         return None
-    med = s[metric].median()
-    tied = s[s[metric] == med]
-    if not tied.empty:
-        return int(tied["seed"].min())
-    # 偶数個などで中央値がどの行とも一致しない場合は、並べた真ん中の行を採る
-    return int(s.sort_values([metric, "seed"], kind="stable").iloc[len(s) // 2]["seed"])
+    s = s.sort_values(list(metrics) + ["seed"], kind="stable", na_position="last")
+    return int(s.iloc[(len(s) - 1) // 2]["seed"])
 
 
-def select_seeds(daily: pd.DataFrame, metric: str) -> dict:
-    """{(評価日(ISO), 距離(str)) -> seed}。欠測の行は使わない。"""
+def select_seeds(daily: pd.DataFrame, metrics=constants.SELECT_METRICS) -> dict:
+    """{(評価日(ISO), 行(str)) -> seed}。欠測の行は使わない。"""
     d = daily[daily["missing"] == 0].copy()
     d["distance"] = d["distance"].astype(str)
     out = {}
     for (day, dist), sub in d.groupby(["day", "distance"]):
-        seed = median_seed(sub, metric)
+        seed = median_seed(sub, metrics)
         if seed is not None:
             out[(str(day), str(dist))] = seed
     return out
@@ -123,22 +122,34 @@ def _resolve_encoders(project: str, device):
     return encoders, scaler
 
 
+def _load_feature_probes(project: str, seed_idx: int) -> dict:
+    """RQ2 の probe（feature_space_window の出力 probes/seed<k>.npz）→ {(評価日, 行 g): 129 個の重み}（design.md §11.5）。"""
+    path = constants.FSW_ROOT / project / "feature_distance" / "probes" / f"seed{seed_idx}.npz"
+    if not path.exists():
+        return {}
+    z = np.load(path)
+    from datetime import date as _date
+    return {(_date.fromisoformat(str(d)), int(g)): w for d, g, w in zip(z["days"], z["rows"], z["weights"])}
+
+
 def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_df, encoders,
-                    scaler, device, run_id: str) -> int:
-    """1 版ぶんの IG を計算して保存する。返り値は書いた行数。"""
+                    scaler, device, run_id: str, kind: str = "time_distance") -> int:
+    """1 版ぶんの IG を計算して保存する。返り値は書いた行数。
+
+    kind：time_distance（RQ1）／feature_distance（RQ2。2026-10-21 追加。design.md §11.5）。違うのは日ごとの指標と probe の読み先・引き方だけ。
+    """
     window, step = detection.window_for(project), detection.step_for(project)
-    # 格子サイズ N_v は版のサイクル長から決まる（距離×時期行列の分析 §4.2 と同じ式）
+    # 格子サイズ N_v は版のサイクル長から決まる（距離×時期行列の分析 §4.2 と同じ式。RQ2 も刻みは RQ1 の窓長と同じ）
     cs_R, ce_R, _prev = binning.target_cycles(rel_df, project, version)
     grid = detection.grid_for(project, binning.cycle_days(cs_R, ce_R, detection.BIN_DAY_ALIGNED))
-    base2 = constants.DETECTION_ROOT / project / constants.MODEL_NAME / version
-    dpath = base2 / "daily_metrics.csv.gz"
+    dpath = constants.metrics_path(project, version, kind)
     if not dpath.exists():
-        logger.warning(f"スキップ（距離×時期行列の分析の結果がありません）: {project} {version} → {dpath}")
+        logger.warning(f"スキップ（精度表の結果がありません）: {project} {version} {kind} → {dpath}")
         return 0
     daily = result_writer.load_daily_metrics(dpath)
     if not _seed_count_ok(daily, project, version):
         return 0
-    chosen = select_seeds(daily, constants.SELECT_METRIC)
+    chosen = select_seeds(daily, constants.SELECT_METRICS)
 
     distances = constants.resolve_axis(spec.get("distances"), grid)
     pspec = spec.get("positions")
@@ -155,10 +166,13 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
                                                              max_set_size=detection.MAX_SET_SIZE)}
     pos_of = binning.position_of_days(ce_R, step, grid, detection.BIN_DAY_ALIGNED)
 
-    probes = {k: probe_store.load_probes(constants.DETECTION_ROOT, project, window, k)
-              for k in range(len(encoders))}
+    if kind == "feature_distance":     # （評価日, 行 g）で引く（design.md §11.5）
+        probes = {k: _load_feature_probes(project, k) for k in range(len(encoders))}
+    else:                              # 学習の窓の末尾の日で引く
+        probes = {k: probe_store.load_probes(constants.DETECTION_ROOT, project, window, k)
+                  for k in range(len(encoders))}
     if not any(probes.values()):
-        logger.warning(f"スキップ（保存済み probe がありません）: {project} 窓長 {window} 日")
+        logger.warning(f"スキップ（保存済み probe がありません）: {project} {kind} 窓長 {window} 日")
         return 0
 
     eval_days = [d for d in sorted(day_sets) if d in pos_of and pos_of[d] in target_pos]
@@ -174,7 +188,8 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
             seed = chosen.get((X.isoformat(), str(d)))
             if seed is None:
                 continue                      # 距離×時期行列の分析で欠測だった日・距離
-            vec = probes.get(seed, {}).get(X - timedelta(days=1 + step * d))
+            key = (X, int(d)) if kind == "feature_distance" else X - timedelta(days=1 + step * d)
+            vec = probes.get(seed, {}).get(key)
             if vec is None:
                 missing_probe += 1
                 continue
@@ -195,9 +210,9 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
     if missing_probe:
         logger.warning(f"probe が見つからず飛ばした (日, 距離): {missing_probe} 件")
 
-    out_dir = constants.OUTPUT_ROOT / project / constants.MODEL_NAME / version
+    out_dir = constants.output_dir(project, version, kind)
     ig_store.write_daily(rows, out_dir, run_id,
-                         ig_store.run_conditions({"project": project, "version": version,
+                         ig_store.run_conditions({"project": project, "version": version, "kind": kind,
                                                   "distances": distances,
                                                   "positions": sorted(target_pos),
                                                   "device": str(device)}))   # 回した機械（pretrained_encoders/design.md §14.5）
@@ -230,7 +245,7 @@ def specs_for(project: str, versions=None, all_versions: bool = False,
 
 
 def compute(projects=None, versions=None, all_versions: bool = False,
-            older_versions: bool = False) -> None:
+            older_versions: bool = False, kind: str = "time_distance") -> None:
     """constants.IG_TARGETS（または引数で絞ったもの）について IG を計算する。"""
     rel_df = load_release_dates()
     run_id = ig_store.new_run_id()
@@ -249,21 +264,21 @@ def compute(projects=None, versions=None, all_versions: bool = False,
         feat_table = ensure_table(project, "eval", rel_df=rel_df)
         for version, spec in spec_by_version.items():
             compute_version(project, version, spec, feat_table=feat_table, rel_df=rel_df,
-                            encoders=encoders, scaler=scaler, device=device, run_id=run_id)
+                            encoders=encoders, scaler=scaler, device=device, run_id=run_id, kind=kind)
 
 
 def extract(projects=None, versions=None, name: str = "default",
-            all_versions: bool = False, older_versions: bool = False) -> None:
+            all_versions: bool = False, older_versions: bool = False, kind: str = "time_distance") -> None:
     """保存済みの ig_daily から セル×特徴量の表を書く（モデルは動かさない）。"""
     targets = list(projects) if projects else list(constants.IG_TARGETS)
     for project in targets:
         for version in specs_for(project, versions, all_versions, older_versions):
-            out_dir = constants.OUTPUT_ROOT / project / constants.MODEL_NAME / version
+            out_dir = constants.output_dir(project, version, kind)   # 2026-10-21：種類ごとに分ける（§11.5）
             daily = ig_store.load_daily(out_dir)
             if daily.empty:
-                logger.warning(f"スキップ（IG の結果がありません）: {project} {version}")
+                logger.warning(f"スキップ（IG の結果がありません）: {project} {version} {kind}")
                 continue
-            dpath = constants.DETECTION_ROOT / project / constants.MODEL_NAME / version / "daily_metrics.csv.gz"
+            dpath = constants.metrics_path(project, version, kind)
             metrics_df = result_writer.load_daily_metrics(dpath)
             paths = tables.write_tables(daily, metrics_df, out_dir / constants.EXTRACT_DIRNAME / name)
             logger.info(f"[{project} {version}] 表を書きました: {len(paths)} ファイル → "
@@ -271,7 +286,7 @@ def extract(projects=None, versions=None, name: str = "default",
 
 
 def plot(projects=None, versions=None, all_versions: bool = False,
-         older_versions: bool = False) -> None:
+         older_versions: bool = False, kind: str = "time_distance") -> None:
     """保存済みの ig_daily から図を書く（モデルは動かさない。design.md §9.4）。
 
     個別セル図と格子一覧を**ペアで**出す。入力は `ig_daily.csv.gz` と距離×時期行列の
@@ -281,13 +296,13 @@ def plot(projects=None, versions=None, all_versions: bool = False,
     targets = list(projects) if projects else list(constants.IG_TARGETS)
     for project in targets:
         for version in specs_for(project, versions, all_versions, older_versions):
-            daily = profiles.load_daily(project, version)
-            metrics = profiles.load_metrics(project, version)
+            daily = profiles.load_daily(project, version, kind)
+            metrics = profiles.load_metrics(project, version, kind)
             if daily is None or daily.empty or metrics is None:
-                logger.warning(f"スキップ: {project} {version}")
+                logger.warning(f"スキップ: {project} {version} {kind}")
                 continue
-            base = (constants.OUTPUT_ROOT / project / constants.MODEL_NAME / version
-                    / constants.FIGURE_DIRNAME)
+            base = constants.output_dir(project, version, kind) / constants.FIGURE_DIRNAME
+            row_label = constants.ROW_LABEL[kind]
 
             for series in constants.PLOT_SERIES:
                 # 軸はプロジェクト × 系列ごとに共通にするため、群をまたいで先に決める（§9.4.5）
@@ -309,19 +324,20 @@ def plot(projects=None, versions=None, all_versions: bool = False,
                         for p in poss:
                             if plotter.plot_cell(stats, info, project, version, series, group,
                                                  d, p, lim,
-                                                 base / "by_cell" / tag / f"d{d:02d}_p{p:02d}.png"):
+                                                 base / "by_cell" / tag / f"d{d:02d}_p{p:02d}.png",
+                                                 row_label=row_label):
                                 n_cell += 1
                     n_grid = 0
                     for d in dists:
                         if plotter.plot_grid(stats, info, project, version, series, group,
                                              fixed="distance", fixed_value=d, panel_values=poss,
-                                             lim=lim,
+                                             lim=lim, row_label=row_label,
                                              out_path=base / "by_distance" / tag / f"d{d:02d}.png"):
                             n_grid += 1
                     for p in poss:
                         if plotter.plot_grid(stats, info, project, version, series, group,
                                              fixed="position", fixed_value=p, panel_values=dists,
-                                             lim=lim,
+                                             lim=lim, row_label=row_label,
                                              out_path=base / "by_position" / tag / f"p{p:02d}.png"):
                             n_grid += 1
                     logger.info(f"[{project} {version}] {tag}: 個別 {n_cell} 枚 / 一覧 {n_grid} 枚"
@@ -338,6 +354,8 @@ def _parse_args():
     ap.add_argument("--older-versions", action="store_true",
                     help="**最新版を除く 4 版**を対象にする（最新版を回し終えたあとに足す用。約 173 時間）")
     ap.add_argument("--name", default="default", help="抽出の出力先サブディレクトリ名")
+    ap.add_argument("--kind", choices=list(constants.KINDS), default="time_distance",
+                    help="time_distance＝RQ1（時期のずれ）／feature_distance＝RQ2（特徴のずれ。design.md §11.5。2026-10-21）")
     return ap.parse_args()
 
 
@@ -345,10 +363,10 @@ if __name__ == "__main__":
     args = _parse_args()
     if args.mode == "compute":
         compute(projects=args.project, versions=args.version, all_versions=args.all_versions,
-                older_versions=args.older_versions)
+                older_versions=args.older_versions, kind=args.kind)
     elif args.mode == "plot":
         plot(projects=args.project, versions=args.version, all_versions=args.all_versions,
-             older_versions=args.older_versions)
+             older_versions=args.older_versions, kind=args.kind)
     else:
         extract(projects=args.project, versions=args.version, name=args.name,
-                all_versions=args.all_versions, older_versions=args.older_versions)
+                all_versions=args.all_versions, older_versions=args.older_versions, kind=args.kind)

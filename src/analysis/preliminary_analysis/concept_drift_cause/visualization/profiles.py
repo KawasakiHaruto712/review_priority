@@ -20,20 +20,18 @@ logger = logging.getLogger(__name__)
 GENERAL_TAG = "general"
 
 
-def load_daily(project: str, version: str) -> pd.DataFrame | None:
-    """`ig_daily.csv.gz` を読む。無ければ None。"""
-    path = (constants.OUTPUT_ROOT / project / constants.MODEL_NAME / version
-            / constants.IG_DAILY_NAME)
+def load_daily(project: str, version: str, kind: str = "time_distance") -> pd.DataFrame | None:
+    """`ig_daily.csv.gz` を読む。無ければ None。kind で RQ1／RQ2 の出力先を切り替える（design.md §11.5。2026-10-21）。"""
+    path = constants.output_dir(project, version, kind) / constants.IG_DAILY_NAME
     if not path.exists():
         logger.warning(f"[{project} {version}] {path} がありません（--mode compute が未実行）")
         return None
     return pd.read_csv(path)
 
 
-def load_metrics(project: str, version: str) -> pd.DataFrame | None:
-    """距離×時期行列の `daily_metrics.csv.gz` を読む（精度・件数の出どころ）。"""
-    path = (constants.DETECTION_ROOT / project / constants.MODEL_NAME / version
-            / "daily_metrics.csv.gz")
+def load_metrics(project: str, version: str, kind: str = "time_distance") -> pd.DataFrame | None:
+    """精度表の `daily_metrics.csv.gz` を読む（精度・件数の出どころ。RQ2 は feature_space_window の出力）。"""
+    path = constants.metrics_path(project, version, kind)
     if not path.exists():
         logger.warning(f"[{project} {version}] {path} がありません"
                        f"（距離×時期行列の分析が未実行）")
@@ -102,11 +100,16 @@ def cell_info(metrics: pd.DataFrame, rows: pd.DataFrame, group: str) -> pd.DataF
     m["distance"] = m["distance"].astype(str)
     r = rows[key + ["position"]].copy()
     r["distance"] = r["distance"].astype(str)
-    j = r.merge(m[key + ["auc", "n_pos_eval", "n_neg_eval"]], on=key, how="left")
+    # 2026-10-21：recall@pos も出す（題の 2 行目に recall@pos・AUC の順。design.md §9.4.7）
+    cols = [c for c in ("recall@pos", "auc") if c in m.columns]
+    j = r.merge(m[key + cols + ["n_pos_eval", "n_neg_eval"]], on=key, how="left")
     n_col = "n_pos_eval" if group == "pos" else "n_neg_eval"
-    out = (j.groupby(["distance", "position"], dropna=False)
-             .agg(auc=("auc", "mean"), n_changes=(n_col, "mean"))
-             .reset_index())
+    agg = {"n_changes": (n_col, "mean")}
+    if "auc" in cols:
+        agg["auc"] = ("auc", "mean")
+    if "recall@pos" in cols:
+        agg["recall_pos"] = ("recall@pos", "mean")
+    out = j.groupby(["distance", "position"], dropna=False).agg(**agg).reset_index()
     return out
 
 
