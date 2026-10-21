@@ -120,7 +120,8 @@ def main() -> None:
         from src.analysis.preliminary_analysis.feature_space_window.evaluation.ranking import size_labels_desc
         from src.analysis.preliminary_analysis.feature_space_window.visualization import report
         out = report.build_report(projects, args.metric, constants.OUTPUT_ROOT, size_labels_desc(),
-                                  index_col="size", row_name="大きさ")
+                                  index_col="size", row_name="大きさ",
+                                  lower_is_better=args.metric in constants.LOWER_IS_BETTER)
         logger.info(f"報告用の表: {out}" if out else "報告用の表：結果がありません（先に --mode run と --mode rank）")
         return
     for project in projects:

@@ -24,13 +24,15 @@ OUTPUT_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "concept_
 # 明確なのは 3d・1d が全プロジェクトで劣ること（1d は最良より 0.02〜0.07 低い）。
 # 2026-10-15：PROJECTS を今回の論文の 6 件に切り替えた（design.md §2）。window_days は窓長の調査を 6 件で回してから入れる
 # （それまでは WINDOW_DAYS = 7）。上の OpenStack の窓長の記録は OPENSTACK_PROJECTS に残す。
+# 2026-10-21：window_days を入れた。窓長の調査の recall@pos の要約表の Ave が最良の窓長（本人判断。design.md §4.2）。
+# 刻みは窓長と同じ（DISTANCE_STEP_DAYS = None）のままなので、qtbase・qtcreator は格子が 4×4 になる（承知のうえ。本人判断 (a)）。
 PROJECTS = {
-    "qtbase":                   {"cutoff": "6.5.0", "versions": ["6.6.0", "6.7.0", "6.8.0", "6.9.0", "6.10.0"]},
-    "qtcreator":                {"cutoff": "13.0.0", "versions": ["14.0.0", "15.0.0", "16.0.0", "17.0.0", "18.0.0"]},
-    "wikimedia_mediawiki_core": {"cutoff": "1.40.0", "versions": ["1.41.0", "1.42.0", "1.43.0", "1.44.0", "1.45.0"]},
-    "qtdeclarative":            {"cutoff": "6.5.0", "versions": ["6.6.0", "6.7.0", "6.8.0", "6.9.0", "6.10.0"]},
-    "go":                       {"cutoff": "go1.20", "versions": ["go1.21", "go1.22", "go1.23", "go1.24", "go1.25"]},
-    "typo3_cms":                {"cutoff": "13.0.0", "versions": ["13.1.0", "13.2.0", "13.3.0", "13.4.0", "14.0.0"]},
+    "qtbase":                   {"cutoff": "6.5.0", "versions": ["6.6.0", "6.7.0", "6.8.0", "6.9.0", "6.10.0"], "window_days": 60},
+    "qtcreator":                {"cutoff": "13.0.0", "versions": ["14.0.0", "15.0.0", "16.0.0", "17.0.0", "18.0.0"], "window_days": 30},
+    "wikimedia_mediawiki_core": {"cutoff": "1.40.0", "versions": ["1.41.0", "1.42.0", "1.43.0", "1.44.0", "1.45.0"], "window_days": 14},
+    "qtdeclarative":            {"cutoff": "6.5.0", "versions": ["6.6.0", "6.7.0", "6.8.0", "6.9.0", "6.10.0"], "window_days": 14},
+    "go":                       {"cutoff": "go1.20", "versions": ["go1.21", "go1.22", "go1.23", "go1.24", "go1.25"], "window_days": 7},
+    "typo3_cms":                {"cutoff": "13.0.0", "versions": ["13.1.0", "13.2.0", "13.3.0", "13.4.0", "14.0.0"], "window_days": 7},
 }
 
 # OpenStack 6 件（以前の対象）。今回の論文では分析しないが、設定は残す。名前を指定したときだけ引ける。
