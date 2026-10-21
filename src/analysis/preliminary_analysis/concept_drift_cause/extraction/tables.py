@@ -24,7 +24,7 @@ from src.analysis.preliminary_analysis.pretrained_encoders.model.set_transformer
 
 logger = logging.getLogger(__name__)
 
-ACC_COLS = ["auc"] + [f"recall@{k}" for k in constants.K_LIST]
+ACC_COLS = ["auc", "recall@pos"] + [f"recall@{k}" for k in constants.K_LIST]   # recall@pos は 2026-10-21 追加（design.md §4）
 
 
 def accuracy_by_cell(daily: pd.DataFrame, days_by_cell: dict) -> dict:

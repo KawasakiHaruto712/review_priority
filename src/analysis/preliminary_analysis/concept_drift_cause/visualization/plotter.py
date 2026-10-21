@@ -102,27 +102,35 @@ def _empty_panel(ax, note: str = "データなし") -> None:
         sp.set_color("#cccccc")
 
 
+def _acc_text(info) -> str:
+    """精度の表記：recall@pos を先に、AUC を後に（design.md §9.4.7。2026-10-21）。値がなければ「—」。"""
+    def f(key):
+        v = info.get(key, np.nan) if info is not None else np.nan
+        return "—" if v is None or not np.isfinite(v) else f"{v:.3f}"
+    return f"recall@pos={f('recall_pos')}  AUC={f('auc')}"
+
+
 def _title(project, version, series, group, distance=None, position=None,
-           info: pd.Series | None = None) -> str:
+           info: pd.Series | None = None, row_label: str = "時期のずれ") -> str:
+    """~~距離・位置~~ 2026-10-21 改めた：行は row_label（RQ1「時期のずれ」・RQ2「特徴のずれ」）、列は「評価時期」。"""
     cell = []
     if distance is not None:
-        cell.append(f"距離{distance}")
+        cell.append(f"{row_label}{distance}")
     if position is not None:
-        cell.append(f"位置{position}")
+        cell.append(f"評価時期{position}")
     head = (f"{project} {version}  {' × '.join(cell)}  "
             f"{SERIES_LABEL.get(series, series)} / {GROUP_LABEL.get(group, group)}")
     if info is None:
         return head
-    auc = info.get("auc", np.nan)
     nd = info.get("n_days", np.nan)
     nc = info.get("n_changes", np.nan)
     label = "正例" if group == "pos" else "負例"
-    return (f"{head}\nAUC={auc:.3f}  評価日数={nd:.0f}  "
+    return (f"{head}\n{_acc_text(info)}  評価日数={nd:.0f}  "
             f"1日あたり{label}Change数={nc:.1f}")
 
 
 def plot_cell(stats, info, project, version, series, group, distance, position,
-              lim: float, out_path: Path) -> bool:
+              lim: float, out_path: Path, row_label: str = "時期のずれ") -> bool:
     """個別セル図を 1 枚描く（§9.4.2）。描けたら True。"""
     row = _row(stats, distance, position)
     if row is None:
@@ -136,7 +144,7 @@ def plot_cell(stats, info, project, version, series, group, distance, position,
                show_values=constants.PLOT_SHOW_VALUES)
     merged = row if irow is None else pd.concat([row, irow.drop(labels=["distance", "position"],
                                                                errors="ignore")])
-    ax.set_title(_title(project, version, series, group, distance, position, merged), fontsize=9)
+    ax.set_title(_title(project, version, series, group, distance, position, merged, row_label), fontsize=9)
     ax.set_xlabel("平均 IG（左＝優先度を下げる / 右＝上げる）", fontsize=8)
     ax.tick_params(axis="x", labelsize=8)
     fig.tight_layout()
@@ -149,7 +157,7 @@ def plot_cell(stats, info, project, version, series, group, distance, position,
 
 
 def plot_grid(stats, info, project, version, series, group, *, fixed: str, fixed_value,
-              panel_values: list, lim: float, out_path: Path) -> bool:
+              panel_values: list, lim: float, out_path: Path, row_label: str = "時期のずれ") -> bool:
     """格子一覧を 1 枚描く（§9.4.6）。
 
     fixed が "distance" なら距離を固定して位置を並べ、"position" なら逆。
@@ -176,9 +184,9 @@ def plot_grid(stats, info, project, version, series, group, *, fixed: str, fixed
         # パネル見出しは 2 行（§9.4.7）。セルの規模が不揃いなので、AUC だけだと
         # 「1 日・正例 1 件のセル」と「7 日・14 件のセル」を同列に比べてしまう（glance で 14 倍の開き）。
         irow = _row(info, d, p)
-        head = f"{'位置' if fixed == 'distance' else '距離'}{v}"
-        if irow is not None and np.isfinite(irow.get("auc", np.nan)):
-            head += f"  AUC={irow['auc']:.3f}"
+        head = f"{'評価時期' if fixed == 'distance' else row_label}{v}"
+        if irow is not None:
+            head += f"  {_acc_text(irow)}"
         label = "正例" if group == "pos" else "負例"
         nd = row["n_days"] if row is not None and "n_days" in row else np.nan
         nc = irow.get("n_changes", np.nan) if irow is not None else np.nan
@@ -190,7 +198,7 @@ def plot_grid(stats, info, project, version, series, group, *, fixed: str, fixed
     for j in range(n, rows * cols):
         axes[j // cols][j % cols].axis("off")
 
-    label = "距離" if fixed == "distance" else "位置"
+    label = row_label if fixed == "distance" else "評価時期"
     fig.suptitle(f"{project} {version}  {label}{fixed_value} の一覧  "
                  f"{SERIES_LABEL.get(series, series)} / {GROUP_LABEL.get(group, group)}",
                  fontsize=11)

@@ -189,6 +189,9 @@ feature_space_window/
 | `<版>/train_days.csv.gz` | 各（評価日, 行 g, seed）で**学習に使った日の一覧**（特徴量別の分布の RQ2 版が読む。精度表と必ず同じ日を使うため。本人判断） |
 | `run_meta.json` | 実行条件（k・刻み・N_v・seed・表の指紋・回した機械・GPU の割合・並べた数・実行日時・git commit） |
 - 寄与度分析（④）は保存した probe を、特徴量別の分布（④）は `train_days.csv.gz` を読む（どちらも RQ2 対応はこの後に作る）。
+  （2026-10-21 追加）寄与度分析の RQ2 版は `concept_drift_cause/design.md` §11.5（`--kind feature_distance`。probe を（評価日, 行 g）で引く）。
+- （2026-10-21 追加）図を描く指標は **AUC と recall@pos**（`PLOT_METRICS = ["auc", "recall@pos"]`。RQ1 の精度表と同じ。`concept_drift_detection/design.md` §10）。
+  図の縦軸は「特徴のずれ g」、横軸は「評価時期 p」。図だけの描き直しは RQ1 と同じく保存済みの json から（`--mode plot` に matrix の図も含める）。
 
 ### 9.3 コード（本人判断）
 - 入口は本ディレクトリの `main.py` に `--mode matrix` を足す。学習に使う日を選ぶ部分は §3 の `selection/nearest_days.py` を使う。
@@ -199,6 +202,11 @@ feature_space_window/
 ### 9.4 回す時期と時間
 - 大きさの分析（と順位の集計）の後、`size_days` を書いてから回す。
 - probe を使い回せないので重い（サーバで 7〜20 時間の見込み。1 つのプロセスなら）。**リポジトリごとに並べて回す**（`pretrained_encoders/design.md` §14.7）。
+- **2026-10-21 追加：RQ2 で並べるときの 1 つのプロセスの GPU のメモリを約 2.5 GB にする（本人判断）**。大きさの分析を `--gpu-share 0.25` で 3 つ並べたら
+  （1 つ約 1.64 GB）、qtbase だけ `CUDA out of memory` で止まった。RQ2 は**事前学習の区間の日も埋め込む**ため（qtbase は集合が最大 2,073 件。評価期間は最大 1,465 件）、
+  埋め込みの山が評価期間だけのとき（1.07 GB）の約 2 倍になる。RQ1 の精度表は評価期間の日だけなので 1.6 GB で足りた。
+  → `feature_space_window` の並べて回す仕組みの「1 つあたり」の前提（`PER_PROCESS_GB`）を **2.5** にする（0.25 なら 1 つ、0.5 なら 3 つ、1.0 なら 6 つ）。
+  他の分析（RQ1 の精度表など）は 1.6 のまま。qtbase の大きさの分析は 1 つだけで回し直す（`--project qtbase --gpu-share 0.25` で上限約 4.9 GB）。
 
 ## 10. 実行の順番
 ~~1. 事前学習（6 件 × 5 本。実行中）→ 2. 窓長の調査（RQ1）→ 3. 本分析（大きさの表）→ 4. 距離×時期行列（RQ1）→ 5. 寄与度分析 →（間に合えば）6. 距離版（§9）。~~

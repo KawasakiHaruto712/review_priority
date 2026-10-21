@@ -132,7 +132,8 @@ SIGNIFICANCE = 0.05
 # N_v×N_v ヒートマップ（版ごとに大きさが違う。刻み 7 日・サイクル約半年なら約 26×26。色のみ）。数値表示は既定 False（後から切替可）。
 HEATMAP_SHOW_CELL_VALUES = False
 HEATMAP_VALUE_FMT = "{:.2f}"
-PLOT_METRICS = ["auc"]       # ヒートマップを描く指標（既定 AUC のみ）。CSV/json は全指標を保存。
+PLOT_METRICS = ["auc", "recall@pos"]   # ヒートマップを描く指標。CSV/json は全指標を保存。
+# （2026-10-21 改めた：旧版は AUC のみ。今回の 6 件は窓長を recall@pos で決めたので recall@pos も描く。design.md §10）
 
 # ── モデル名・出力（§10）──────────────────────────────
 MODEL_NAME = ["set_transformer"]

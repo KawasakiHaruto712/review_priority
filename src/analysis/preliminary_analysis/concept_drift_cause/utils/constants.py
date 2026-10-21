@@ -12,6 +12,25 @@ OUTPUT_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "concept_
 # 距離×時期行列の分析の出力（daily_metrics.csv.gz と probes/）を読む先
 DETECTION_ROOT = detection.OUTPUT_ROOT
 
+# ── 種類（design.md §11.5。2026-10-21） ──────────────────────
+# time_distance＝RQ1（時期のずれ×評価時期の精度表。concept_drift_detection の出力を読む）
+# feature_distance＝RQ2（特徴のずれ×評価時期の精度表。feature_space_window の出力ファイルを読む。コードは import しない）
+KINDS = ("time_distance", "feature_distance")
+ROW_LABEL = {"time_distance": "時期のずれ", "feature_distance": "特徴のずれ"}
+FSW_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "feature_space_window"
+
+
+def output_dir(project: str, version: str, kind: str):
+    """IG の出力先（種類ごとに分ける。RQ1 の旧い出力 <project>/set_transformer/<版>/ の場所は変えない）。"""
+    return OUTPUT_ROOT / project / MODEL_NAME / kind / version
+
+
+def metrics_path(project: str, version: str, kind: str):
+    """精度表の日ごとの指標（そのセル値を出したモデルの特定と、図の題の recall@pos・AUC に使う）。"""
+    if kind == "feature_distance":
+        return FSW_ROOT / project / "feature_distance" / version / "daily_metrics.csv.gz"
+    return DETECTION_ROOT / project / MODEL_NAME / version / "daily_metrics.csv.gz"
+
 # ── 対象セル（§6.1） ──────────────────────────────────
 # project -> version -> {"distances": [...] or "all", "positions": [...] or "all"}
 # 距離と位置をそれぞれ指定し、**その直積**を計算する。"all" でその軸すべて。
@@ -52,6 +71,9 @@ IG_STEP_CHUNK = 8        # 一度に計算する段階の数（メモリのた�
 # (評価日, 距離) ごとに、この指標が中央（5 個中 3 番目）だった seed を選ぶ。
 # AUC は連続値なので 5 個の順位が一意に決まる（recall@k は値が数段階しかなく決まらない）。
 SELECT_METRIC = "auc"
+# 2026-10-21 改めた（design.md §4）：recall@pos → AUC → seed 番号の順に、3 つとも小さい順に並べて 3 番目（真ん中）を選ぶ。
+# 精度表を recall@pos で主に読むので「recall@pos の表の値を出したモデル」を見る。recall@pos の同着は AUC で、それも同じなら番号で決める。
+SELECT_METRICS = ("recall@pos", "auc")
 # 同値のときは seed 番号の小さい方（再現性のため。`concept_drift_detection/design.md` §8.1 と同じ規則）。
 
 # ── 出力（§9） ───────────────────────────────────────

@@ -42,12 +42,20 @@ def cell_info(class_counts: pd.DataFrame, row: int, position: int) -> dict:
                                                "n_pos_eval", "n_pos_train", "n_neg_eval", "n_neg_train"]}}
 
 
-def title(project, version, row_label, row, position, group, info: dict, auc: float | None) -> str:
+def acc_text(accs: dict | None) -> str:
+    """精度の表記：recall@pos を先に、AUC を後に（design.md §5。2026-10-21 改めた：旧版は AUC だけ）。"""
+    def f(key):
+        v = (accs or {}).get(key)
+        return "—" if v is None or not np.isfinite(v) else f"{v:.3f}"
+    return f"recall@pos={f('recall@pos')}  AUC={f('auc')}"
+
+
+def title(project, version, row_label, row, position, group, info: dict, accs: dict | None) -> str:
+    """accs は {"recall@pos": 値, "auc": 値}（同じセルの精度表。なければ None）。"""
     head = f"{project} {version}  {row_label}{row} × 評価時期{position}  {constants.GROUP_LABEL.get(group, group)}"
-    auc_s = "—" if auc is None or not np.isfinite(auc) else f"{auc:.3f}"
     nd = info.get("n_days", np.nan)
     pp = info.get("pos_per_day", np.nan)
-    line2 = f"AUC={auc_s}  評価日数={nd:.0f}  1日あたり正例Change数={pp:.1f}" if info else f"AUC={auc_s}"
+    line2 = f"{acc_text(accs)}  評価日数={nd:.0f}  1日あたり正例Change数={pp:.1f}" if info else acc_text(accs)
     lines = [head, line2]
     if group in ("pos", "neg") and info:
         lab = constants.GROUP_LABEL[group]
@@ -80,14 +88,14 @@ def _draw(ax, cell: pd.DataFrame, *, show_err: bool, show_values: bool, label_fo
                     clip_on=False)
 
 
-def plot_cell(cells: pd.DataFrame, project, version, row_label, row, position, group, info, auc,
+def plot_cell(cells: pd.DataFrame, project, version, row_label, row, position, group, info, accs,
               out_path: Path) -> bool:
     cell = cells[(cells["row"] == row) & (cells["position"] == position) & (cells["group"] == group)]
     if cell.empty:
         return False
     fig, ax = plt.subplots(figsize=(9.2 if constants.SHOW_VALUES else 7.2, 4.8))
     _draw(ax, cell, show_err=constants.SHOW_ERROR_BARS, show_values=constants.SHOW_VALUES)
-    ax.set_title(title(project, version, row_label, row, position, group, info, auc), fontsize=9)
+    ax.set_title(title(project, version, row_label, row, position, group, info, accs), fontsize=9)
     ax.set_xlabel("平均 効果量 δ（左＝評価日の方が小さい / 右＝評価日の方が大きい）", fontsize=8)
     ax.tick_params(axis="x", labelsize=8)
     fig.tight_layout()
@@ -122,10 +130,10 @@ def plot_grid(cells: pd.DataFrame, class_counts: pd.DataFrame, aucs, project, ve
             _draw(ax, cell, show_err=False, show_values=False, label_fontsize=5)
             ax.tick_params(axis="x", labelsize=6)
         info = cell_info(class_counts, r, p)
-        auc = aucs(r, p) if aucs else None
+        accs = aucs(r, p) if aucs else None              # {"recall@pos": …, "auc": …}（2026-10-21）
         head = f"{'評価時期' if fixed == 'row' else row_label}{v}"
-        if auc is not None and np.isfinite(auc):
-            head += f"  AUC={auc:.3f}"
+        if accs:
+            head += f"  {acc_text(accs)}"
         scale = f"{info['n_days']}日 / 正例{info['pos_per_day']:.1f}件" if info else "—"
         ax.set_title(f"{head}\n{scale}", fontsize=7)
     for j in range(len(panel_values), nr * nc):

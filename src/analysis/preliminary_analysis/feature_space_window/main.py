@@ -141,6 +141,14 @@ def main() -> None:
             run(project, versions, args.n_seeds, sizes)
         out = table.build_and_save(project, versions, args.metric, sizes)
         logger.info(f"要約表: {out}")
+        if args.mode == "plot":     # 特徴のずれ×評価時期の精度表の図も、保存済みの json から描き直す（design.md §9.2。2026-10-21）
+            from src.analysis.preliminary_analysis.feature_space_window.matrix import plotter as mplot, run as mrun, writer as mwriter
+            for v in versions:
+                for kind in ("probe", "general", "diff"):
+                    for m in constants.PLOT_METRICS:
+                        path = mrun.out_root(project) / v / kind / m / "drift_matrix.json"
+                        if path.exists():
+                            mplot.plot_all(mwriter.load_matrix(path), path.parent, constants.PLOT_DPI)
 
 
 if __name__ == "__main__":

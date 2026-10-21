@@ -124,8 +124,8 @@ def plot_heatmap(result: MatrixResult, path: Path, dpi: int = 150) -> None:
                 lum = 0.299 * r + 0.587 * g + 0.114 * b
                 ax.text(p, d, constants.HEATMAP_VALUE_FMT.format(v), ha="center", va="center",
                         fontsize=6, color="black" if lum > 0.5 else "white")
-    ax.set_xlabel("位置 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
-    ax.set_ylabel("距離 d（学習期間を何段ずらすか。d0 ＝ 直近）")
+    ax.set_xlabel("評価時期 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
+    ax.set_ylabel("時期のずれ d（学習期間を何段ずらすか。d0 ＝ 直近）")
     _step = max(1, n // 13)  # ラベルが詰まらないよう間引く（26 なら 2 つおき）
     _ticks = list(range(0, n, _step))
     ax.set_xticks(_ticks); ax.set_xticklabels([f"p{t}" for t in _ticks], fontsize=7)
@@ -149,12 +149,12 @@ def plot_position_lines(result: MatrixResult, path: Path, dpi: int = 150) -> Non
         if np.isnan(row).all():
             continue
         ax.plot(positions, row, marker="o", label=f"d={d}")
-    ax.set_xlabel("位置 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
+    ax.set_xlabel("評価時期 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
     ax.set_ylabel(result.metric)
     ax.set_ylim(*_range_for(result.metric))  # 指標ごとに値域固定（_AXIS_RANGE。バージョン間で縦軸を比較可能に）
     ax.set_xticks(positions); ax.set_xticklabels([f"p{p}" for p in range(n)])
-    ax.set_title(f"{result.metric}（距離固定の位置別）")
-    ax.legend(title="距離 d", fontsize=8)
+    ax.set_title(f"{result.metric}（時期のずれ固定の評価時期別）")
+    ax.legend(title="時期のずれ d", fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
@@ -195,8 +195,8 @@ def plot_heatmap_relative(result: MatrixResult, path: Path, dpi: int = 150) -> N
                 lum = 0.299 * r + 0.587 * g + 0.114 * b
                 ax.text(p, d, constants.HEATMAP_VALUE_FMT.format(v), ha="center", va="center",
                         fontsize=6, color="black" if lum > 0.5 else "white")
-    ax.set_xlabel("位置 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
-    ax.set_ylabel("距離 d（学習期間を何段ずらすか。d0 ＝ 直近）")
+    ax.set_xlabel("評価時期 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
+    ax.set_ylabel("時期のずれ d（学習期間を何段ずらすか。d0 ＝ 直近）")
     _step = max(1, n // 13)  # ラベルが詰まらないよう間引く（26 なら 2 つおき）
     _ticks = list(range(0, n, _step))
     ax.set_xticks(_ticks); ax.set_xticklabels([f"p{t}" for t in _ticks], fontsize=7)
@@ -221,12 +221,12 @@ def plot_position_lines_relative(result: MatrixResult, path: Path, dpi: int = 15
         if np.isnan(row).all():
             continue
         ax.plot(positions, row, marker="o", label=f"d={d}")
-    ax.set_xlabel("位置 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
+    ax.set_xlabel("評価時期 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
     ax.set_ylabel(f"{result.metric} 相対（最良=1）")
     ax.set_ylim(0.0, 1.0)  # 下端は 0 固定（最良=1）
     ax.set_xticks(positions); ax.set_xticklabels([f"p{p}" for p in range(n)])
-    ax.set_title(f"{result.metric}（相対: 距離固定の位置別）")
-    ax.legend(title="距離 d", fontsize=8)
+    ax.set_title(f"{result.metric}（相対: 時期のずれ固定の評価時期別）")
+    ax.legend(title="時期のずれ d", fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
