@@ -165,7 +165,8 @@ def main() -> None:
         from src.analysis.preliminary_analysis.lookback_window.visualization import report
         labels = [constants.WINDOW_LABELS.get(w, f"{w}d") for w in sorted(constants.WINDOWS_DAYS, reverse=True)]
         out = report.build_report(projects, args.metric, constants.OUTPUT_ROOT, labels,
-                                  index_col="window", row_name="窓長")
+                                  index_col="window", row_name="窓長",
+                                  lower_is_better=args.metric in constants.LOWER_IS_BETTER)
         logger.info(f"報告用の表: {out}" if out else "報告用の表：結果がありません（先に --mode run と --mode rank）")
         return
     windows = args.windows if args.windows else None

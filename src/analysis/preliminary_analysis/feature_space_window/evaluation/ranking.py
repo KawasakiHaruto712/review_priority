@@ -38,15 +38,18 @@ def daily_table(project: str, versions: list[str], metric: str) -> pd.DataFrame:
     return out.dropna(subset=sizes)
 
 
-def count_first_last(piv: pd.DataFrame, labels: list[str]) -> tuple[pd.Series, pd.Series, int]:
-    """各大きさが 1 位／最下位になった日数（同着は全部に足す）と対象日数。"""
+def count_first_last(piv: pd.DataFrame, labels: list[str],
+                     lower_is_better: bool = False) -> tuple[pd.Series, pd.Series, int]:
+    """各大きさが 1 位／最下位になった日数（同着は全部に足す）と対象日数。lower_is_better なら最小を 1 位（2026-10-21）。"""
     n = len(piv)
     if n == 0:
         zero = pd.Series(0, index=labels, dtype=int)
         return zero, zero.copy(), 0
     vals = piv[labels]
-    first = vals.eq(vals.max(axis=1), axis=0).sum(axis=0).astype(int).reindex(labels)
-    last = vals.eq(vals.min(axis=1), axis=0).sum(axis=0).astype(int).reindex(labels)
+    hi, lo = vals.max(axis=1), vals.min(axis=1)
+    best, worst = (lo, hi) if lower_is_better else (hi, lo)
+    first = vals.eq(best, axis=0).sum(axis=0).astype(int).reindex(labels)
+    last = vals.eq(worst, axis=0).sum(axis=0).astype(int).reindex(labels)
     return first, last, n
 
 
@@ -62,7 +65,7 @@ def build_ranking(project: str, versions: list[str], metric: str) -> tuple[pd.Da
     groups = [(v, daily.xs(v, level="version") if v in present else empty) for v in versions]
     groups.append(("全体", daily if has else empty))
     for label, piv in groups:
-        first, last, n = count_first_last(piv, sizes)
+        first, last, n = count_first_last(piv, sizes, metric in constants.LOWER_IS_BETTER)
         ndays[label] = n
         df[f"{label}_1位"] = first
         df[f"{label}_最下位"] = last

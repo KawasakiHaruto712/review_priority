@@ -52,10 +52,12 @@ def _daily_table(project: str, versions: list[str], metric: str) -> pd.DataFrame
     return out.dropna(subset=windows)
 
 
-def _count_first_last(piv: pd.DataFrame, windows: list[str]) -> tuple[pd.Series, pd.Series, int]:
+def _count_first_last(piv: pd.DataFrame, windows: list[str],
+                      lower_is_better: bool = False) -> tuple[pd.Series, pd.Series, int]:
     """各窓が「1位/最下位」になった日数を数える。同着は両方加算。
 
     piv: index=日（or (版,日)）, columns=窓。返り値: (1位カウント, 最下位カウント, 対象日数)。
+    lower_is_better（norm_rank など）なら、最小を 1 位・最大を最下位にする（§16。2026-10-21）。
     """
     first = pd.Series(0, index=windows, dtype=int)
     last = pd.Series(0, index=windows, dtype=int)
@@ -65,9 +67,10 @@ def _count_first_last(piv: pd.DataFrame, windows: list[str]) -> tuple[pd.Series,
     vals = piv[windows]
     row_max = vals.max(axis=1)
     row_min = vals.min(axis=1)
+    best, worst = (row_min, row_max) if lower_is_better else (row_max, row_min)
     # 厳密一致で同着判定（同着は該当する全窓に加算）
-    first = (vals.eq(row_max, axis=0)).sum(axis=0).astype(int).reindex(windows)
-    last = (vals.eq(row_min, axis=0)).sum(axis=0).astype(int).reindex(windows)
+    first = (vals.eq(best, axis=0)).sum(axis=0).astype(int).reindex(windows)
+    last = (vals.eq(worst, axis=0)).sum(axis=0).astype(int).reindex(windows)
     return first, last, n
 
 
@@ -92,7 +95,7 @@ def build_ranking(project: str, versions: list[str], metric: str) -> tuple[pd.Da
     groups.append(("全体", daily if has_data else empty))  # 全版プール
 
     for label, piv in groups:
-        first, last, n = _count_first_last(piv, windows)
+        first, last, n = _count_first_last(piv, windows, metric in constants.LOWER_IS_BETTER)
         ndays[label] = n
         df[f"{label}_1位"] = first
         df[f"{label}_最下位"] = last

@@ -32,8 +32,11 @@ def _bold(s: str) -> str:
 
 
 def build_report(projects: list[str], metric: str, root: Path, labels_desc: list[str], *,
-                 index_col: str, row_name: str) -> Path | None:
-    """報告用の表を書いて、出力先を返す。どのリポジトリにも結果がなければ None。"""
+                 index_col: str, row_name: str, lower_is_better: bool = False) -> Path | None:
+    """報告用の表を書いて、出力先を返す。どのリポジトリにも結果がなければ None。
+
+    lower_is_better（norm_rank など）なら、平均が最も小さいものを「最良」にする（design.md §16。2026-10-21）。
+    """
     first, last, ndays, best = {}, {}, {}, {}
     for p in projects:
         s_path = root / p / "summary" / f"summary_{metric}.csv"
@@ -48,7 +51,7 @@ def build_report(projects: list[str], metric: str, root: Path, labels_desc: list
         if s_path.exists():
             sm = pd.read_csv(s_path, index_col=index_col).reindex(labels_desc)
             if sm["Ave"].notna().any():
-                b = sm["Ave"].idxmax()
+                b = sm["Ave"].idxmin() if lower_is_better else sm["Ave"].idxmax()
                 best[p] = (b, float(sm.loc[b, "Ave"]), float(sm.loc[b, "Ave_std"]))
         else:
             logger.warning(f"[{p}] 要約表がありません（{s_path}。先に --mode run）")

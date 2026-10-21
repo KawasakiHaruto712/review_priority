@@ -65,6 +65,8 @@ WINDOW_LABELS = {1: "1d", 3: "3d", 7: "1w", 14: "2w", 30: "1M", 60: "2M"}
 CLASSIFY_THRESHOLD = 0.5
 K_LIST = [5, 10, 20]           # top-k（＋その日の正例数 '@pos' も自動で出す）
 PLOT_METRIC_DEFAULT = "auc"    # 既定で先に描く指標
+# 小さいほど良い指標（順位の集計で最小を 1 位、報告用の表で最小を最良にする。design.md §11.3・§16。2026-10-21）
+LOWER_IS_BETTER = {"norm_rank"}
 
 # ── 出力・作図 ───────────────────────────────────────
 PLOT_DPI = 150
