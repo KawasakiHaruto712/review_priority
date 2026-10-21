@@ -60,7 +60,12 @@ MATRIX_SETTINGS = {p: {"size_days": None, "step_days": None} for p in PROJECTS}
 for _p, _w in {"qtbase": 60, "qtcreator": 30, "wikimedia_mediawiki_core": 14, "qtdeclarative": 14,
                "go": 7, "typo3_cms": 7}.items():
     MATRIX_SETTINGS[_p]["step_days"] = _w
-RANDOM_SEED = 42               # probe の seed（k 本目のエンコーダ ＝ RANDOM_SEED + k。RQ1 の精度表と同じ）
+# 2026-10-21：size_days（RQ2 の k）を書いた。報告用の表 best_recall@pos_all.md の最良（recall@pos の 5 版平均が最良の大きさ。
+# RQ1 の窓長と同じ決め方。本人判断）。最良と 2 番目の差は 0.0002〜0.005 と小さい。
+for _p, _k in {"qtbase": 60, "qtcreator": 14, "wikimedia_mediawiki_core": 30, "qtdeclarative": 14,
+               "go": 14, "typo3_cms": 14}.items():
+    MATRIX_SETTINGS[_p]["size_days"] = _k
+RANDOM_SEED = 42              # probe の seed（k 本目のエンコーダ ＝ RANDOM_SEED + k。RQ1 の精度表と同じ）
 REPEAT_AGG = "median"          # 評価日ごとの seed 方向の集約
 MIN_TRAIN = 30                 # 学習の k 日の最小レコード数（RQ1 と同じ）
 MIN_EVAL = 30                  # 評価日の最小レコード数（RQ1 と同じ）
