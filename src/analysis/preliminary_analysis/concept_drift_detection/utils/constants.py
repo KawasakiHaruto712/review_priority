@@ -146,6 +146,19 @@ SIGNIFICANCE = 0.05
 # N_v×N_v ヒートマップ（版ごとに大きさが違う。刻み 7 日・サイクル約半年なら約 26×26。色のみ）。数値表示は既定 False（後から切替可）。
 HEATMAP_SHOW_CELL_VALUES = False
 HEATMAP_VALUE_FMT = "{:.2f}"
+# 重みあり版の表の形（2026-10-22。design.md §15・pretrained_encoders/design.md §15.9）：周期を FRACTION_PARTS 等分した 3 × 3。
+FRACTION_PARTS = 3                 # 列（評価時期）と行（ずれ）の数。刻み ＝ 周期 ÷ 3
+MERGED_DIRNAME = "all_versions"    # 5 版をまとめた表の出力先（<project>/<model>/all_versions/）
+HEATMAP_SHOW_SPREAD = True         # 小さい表（3 × 3）のセルに「± 評価日の間の標準偏差」を書くか（本人判断：設定で外せる）
+SMALL_GRID_MAX = 6                 # この大きさ以下の表は、セルに数字を書く（HEATMAP_SHOW_CELL_VALUES によらず）
+
+
+def fraction_grid() -> bool:
+    """今の版の種類で 3 × 3 を使うか（重みあり版だけ。重みなし版は今までの N_v × N_v）。"""
+    from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre
+    return pre.ENCODER_VARIANT == "posw"
+
+
 PLOT_METRICS = ["auc", "recall@pos", "f1_plugin"]   # ヒートマップを描く指標。CSV/json は全指標を保存。
 # （2026-10-22 改めた：f1_plugin を足した。重みあり版は F1 で見るため。design.md §15。重みなし版の既存の結果には列がないので描き直しでは飛ばす）
 # （2026-10-21 改めた：旧版は AUC のみ。今回の 6 件は窓長を recall@pos で決めたので recall@pos も描く。design.md §10）

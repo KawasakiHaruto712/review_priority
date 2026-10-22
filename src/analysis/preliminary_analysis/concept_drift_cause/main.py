@@ -142,7 +142,13 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
     window, step = detection.window_for(project), detection.step_for(project)
     # 格子サイズ N_v は版のサイクル長から決まる（距離×時期行列の分析 §4.2 と同じ式。RQ2 も刻みは RQ1 の窓長と同じ）
     cs_R, ce_R, _prev = binning.target_cycles(rel_df, project, version)
-    grid = detection.grid_for(project, binning.cycle_days(cs_R, ce_R, detection.BIN_DAY_ALIGNED))
+    cycle = binning.cycle_days(cs_R, ce_R, detection.BIN_DAY_ALIGNED)
+    thirds = detection.fraction_grid()     # 重みあり版は 3 × 3（刻み ＝ 周期 ÷ 3。精度表と同じセル。design.md §11.6。2026-10-22）
+    if thirds:
+        grid = detection.FRACTION_PARTS
+        step = binning.fraction_step(cycle, grid)
+    else:
+        grid = detection.grid_for(project, cycle)
     dpath = constants.metrics_path(project, version, kind)
     if not dpath.exists():
         logger.warning(f"スキップ（精度表の結果がありません）: {project} {version} {kind} → {dpath}")
@@ -157,15 +163,18 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
     target_pos = set(constants.resolve_axis(pspec, grid))   # 位置も 0 始まり（p0 ＝ リリースの直前）
 
     # 距離×時期行列の分析と同じ手順で 日ごとの集合と位置を作る
-    rec_start = binning.record_start(ce_R, window, step, grid, detection.RECORD_MARGIN_DAYS,
-                                     detection.BIN_DAY_ALIGNED)
+    rec_start = (binning.record_start_fraction(ce_R, cycle, window, step, grid, detection.RECORD_MARGIN_DAYS,
+                                               detection.BIN_DAY_ALIGNED) if thirds
+                 else binning.record_start(ce_R, window, step, grid, detection.RECORD_MARGIN_DAYS,
+                                           detection.BIN_DAY_ALIGNED))
     logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()} / "
                 f"レコード生成 {rec_start.date()} から / 距離 {len(distances)} × 位置 {len(target_pos)}）---")
     # 2026-10-18 改めた：feature_table の評価期間の表から、距離×時期行列の分析と同じ範囲を切り出す（design.md §0）
     from src.analysis.preliminary_analysis.feature_table.build.sets import day_sets_from_table
     day_sets = {s.t.date(): s for s in day_sets_from_table(feat_table, rec_start, ce_R,
                                                              max_set_size=detection.MAX_SET_SIZE)}
-    pos_of = binning.position_of_days(ce_R, step, grid, detection.BIN_DAY_ALIGNED)
+    pos_of = (binning.position_by_fraction(ce_R, cycle, grid, detection.BIN_DAY_ALIGNED) if thirds
+              else binning.position_of_days(ce_R, step, grid, detection.BIN_DAY_ALIGNED))
 
     if kind == "feature_distance":     # （評価日, 行 g）で引く（design.md §11.5）
         probes = {k: _load_feature_probes(project, k) for k in range(len(encoders))}
