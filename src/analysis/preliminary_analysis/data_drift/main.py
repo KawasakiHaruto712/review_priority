@@ -3,6 +3,8 @@
 モード:
   --mode run（既定） : 評価期間の表を読み、評価日 × 行ごとに比べて保存し、図を描く
   --mode plot        : 保存済みの cells.csv・class_counts.csv から図だけ描き直す
+  --mode compare     : RQ1 と RQ2 を比べる折れ線（両方の cells.csv を読むだけ。2026-10-22）
+  --kind             : time_distance（RQ1・既定）／feature_distance（RQ2。精度表の train_days を読む。2026-10-22）
 
 図：格子一覧は全セル（行を固定したもの・評価時期を固定したもの）。個別セル図は --cells で指定したセルだけ（例 --cells d0-p8 d20-p8）。
 寄与度分析の範囲（IG_TARGETS）が決まったら、そのセルを既定にする（design.md §5）。
@@ -21,7 +23,7 @@ import pandas as pd
 
 from src.analysis.background_problem.common.data_loader import load_release_dates
 from src.analysis.preliminary_analysis.data_drift.io import writer
-from src.analysis.preliminary_analysis.data_drift.pairing import time_distance
+from src.analysis.preliminary_analysis.data_drift.pairing import feature_distance, time_distance
 from src.analysis.preliminary_analysis.data_drift.stats.aggregate import to_cells
 from src.analysis.preliminary_analysis.data_drift.stats.runner import run_version
 from src.analysis.preliminary_analysis.data_drift.utils import constants, parallel
@@ -32,19 +34,19 @@ from src.analysis.preliminary_analysis.pretrained_encoders.utils import constant
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
-PAIRINGS = {time_distance.KIND: time_distance}      # RQ2（feature_distance）は距離版の設計が決まり次第足す（design.md §3.2）
+PAIRINGS = {time_distance.KIND: time_distance,      # RQ1
+            feature_distance.KIND: feature_distance}  # RQ2（2026-10-22 追加。design.md §3.2）
 
 
 ACC_METRICS = ("recall@pos", "auc")   # 題の 2 行目に出す精度（この順。design.md §5。2026-10-21 改めた：旧版は AUC だけ）
 
 
-def _auc_lookup(project: str, version: str):
-    """同じセルの精度表の recall@pos と AUC（concept_drift_detection の出力）を返す関数 get(r, p) -> {指標: 値 or None}。
-    どちらの表もなければ None。"""
-    from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants as det
+def _auc_lookup(project: str, version: str, kind: str = time_distance.KIND):
+    """同じセルの精度表の recall@pos と AUC を返す関数 get(r, p) -> {指標: 値 or None}。どちらの表もなければ None。
+    RQ1 は concept_drift_detection、RQ2 は feature_space_window の精度表（2026-10-22：kind を足した。パスは各部品の accuracy_path）。"""
     tables = {}
     for metric in ACC_METRICS:
-        path = det.OUTPUT_ROOT / project / det.MODEL_NAME[0] / version / "probe" / metric / "drift_matrix.csv"
+        path = PAIRINGS[kind].accuracy_path(project, version, metric)
         if path.exists():
             tables[metric] = pd.read_csv(path, index_col=0)
         else:
@@ -68,6 +70,8 @@ def run(kind: str, project: str, versions: list[str]) -> None:
     from src.analysis.preliminary_analysis.feature_table.build import ensure_table
     from src.analysis.preliminary_analysis.feature_table.build.sets import day_sets_from_table
 
+    if kind == feature_distance.KIND:           # RQ2 は表のつなぎ方と部品の作り方が違う（2026-10-22）
+        return _run_feature_distance(project, versions)
     rel_df = load_release_dates()
     table = ensure_table(project, "eval", rel_df=rel_df)
     mod = PAIRINGS[kind]
@@ -88,6 +92,60 @@ def run(kind: str, project: str, versions: list[str]) -> None:
     writer.save_run_meta(kind, project, meta, constants.GROUPS)
 
 
+def _run_feature_distance(project: str, versions: list[str]) -> None:
+    """RQ2（design.md §3.2）：精度表の train_days・daily_metrics から部品を作り、事前学習の表と評価期間の表をつないで比べる。"""
+    from src.analysis.preliminary_analysis.data_drift.dataset.tables import load_day_sets
+
+    kind = feature_distance.KIND
+    pairings = {}
+    for v in versions:
+        try:
+            pairings[v] = feature_distance.for_version(project, v)
+        except (FileNotFoundError, ValueError) as e:
+            logger.warning(f"スキップ [{project} {v}]: {e}（先に feature_space_window の --mode matrix）")
+    if not pairings:
+        return
+    keep = set().union(*(p.needed_days() for p in pairings.values()))
+    day_sets, pretrain_days = load_day_sets(project, load_release_dates(), keep=keep)
+    meta = {}
+    for v, pairing in pairings.items():
+        pairing.pretrain_days = pretrain_days
+        n_pairs = len(pairing.positions) * pairing.rows
+        logger.info(f"--- {project} {v}：段数 {pairing.rows}・k {pairing.window}・刻み {pairing.step}・評価日 {len(pairing.positions)}"
+                    f"・seed を選べた（評価日, 行）{len(pairing.seeds)} / {n_pairs}")
+        daily, counts = run_version(day_sets, pairing, list(MODEL_FEATURES))
+        cells = to_cells(daily)
+        logger.info(f"保存: {writer.save(kind, project, v, daily, cells, counts)}（評価日ごと {len(daily)} 行）")
+        meta[v] = {"window": pairing.window, "step": pairing.step, "rows": pairing.rows}
+    writer.save_run_meta(kind, project, meta, constants.GROUPS)
+
+
+def compare(project: str, versions: list[str]) -> None:
+    """RQ1 と RQ2 を比べる折れ線（design.md §5。2026-10-22）。両方の cells.csv を読むだけ（計算し直さない）。"""
+    from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants as det
+    from src.analysis.preliminary_analysis.data_drift.visualization import compare as cmp
+    from src.analysis.preliminary_analysis.feature_space_window.utils import constants as fsw
+
+    plotter.configure()
+    k = (fsw.MATRIX_SETTINGS.get(project) or {}).get("size_days")
+    labels = {time_distance.KIND: f"RQ1：時期のずれ（直前 {det.window_for(project)} 日の窓）",
+              feature_distance.KIND: f"RQ2：特徴のずれ（近い {k} 日）"}
+    out_dir = writer.compare_dir(project)
+    for v in versions:
+        cells = {}
+        for kind in (time_distance.KIND, feature_distance.KIND):
+            try:
+                cells[kind] = writer.load(kind, project, v, "cells")
+            except FileNotFoundError:
+                logger.warning(f"[{project} {v}] {kind} の cells.csv がありません（その線は描かない）")
+        table = cmp.compare_table(cells)
+        if table.empty:
+            continue
+        out_dir.mkdir(parents=True, exist_ok=True)
+        table.to_csv(out_dir / f"{v}.csv", index=False)
+        logger.info(f"比べる折れ線: {cmp.plot_compare(table, project, v, labels, out_dir / f'{v}.png')}")
+
+
 def _parse_cells(cells: list[str] | None) -> list[tuple[int, int]]:
     out = []
     for c in cells or []:
@@ -106,7 +164,7 @@ def draw(kind: str, project: str, versions: list[str], cells_arg: list[str] | No
         except FileNotFoundError:
             logger.warning(f"結果がないのでスキップ: {project} {v}")
             continue
-        aucs = _auc_lookup(project, v)
+        aucs = _auc_lookup(project, v, kind)
         fig_dir = writer.version_dir(kind, project, v) / "figures"
         rows = sorted(cells["row"].unique().tolist())
         positions = sorted(cells["position"].unique().tolist())
@@ -126,7 +184,8 @@ def draw(kind: str, project: str, versions: list[str], cells_arg: list[str] | No
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="data_drift：特徴量別の分布（データのずれの確認）")
-    ap.add_argument("--mode", choices=["run", "plot"], default="run")
+    ap.add_argument("--mode", choices=["run", "plot", "compare"], default="run",
+                    help="compare は RQ1 と RQ2 を比べる折れ線（両方の run の後。cells.csv を読むだけ。design.md §5）")
     ap.add_argument("--kind", choices=list(PAIRINGS), default=time_distance.KIND)
     ap.add_argument("--project", default=None, help="対象（未指定・'all' なら PROJECTS の 6 件を順に）")
     ap.add_argument("--versions", nargs="*", default=None, help="対象の版（既定は 5 版）")
@@ -149,6 +208,10 @@ def main() -> None:
             sys.exit(1 if failed else 0)
     for project in projects:
         versions = args.versions or list(pre.project_config(project)["versions"])
+        if args.mode == "compare":
+            logger.info(f"===== 比べる折れ線 {project}（{len(versions)} 版）=====")
+            compare(project, versions)
+            continue
         logger.info(f"===== {args.kind} {project}（{len(versions)} 版）=====")
         if args.mode == "run":
             run(args.kind, project, versions)

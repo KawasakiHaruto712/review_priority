@@ -18,6 +18,11 @@ KIND = "time_distance"
 ROW_LABEL = "時期のずれ"
 
 
+def accuracy_path(project: str, version: str, metric: str):
+    """同じセルの精度表（RQ1）。図の題の recall@pos・AUC に使う（2026-10-22：main.py から移した。RQ2 と同じ形にするため）。"""
+    return det.OUTPUT_ROOT / project / det.MODEL_NAME[0] / version / "probe" / metric / "drift_matrix.csv"
+
+
 @dataclass
 class TimeDistancePairing:
     """1 版分の設定。rows ＝ 段数（時期のずれ d は 0..rows−1）、positions ＝ {評価日 -> 評価時期 p}。"""
