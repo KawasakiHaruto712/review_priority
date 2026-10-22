@@ -6,15 +6,16 @@
      （2026-10-18 改めた。表がなければ作り、作った条件の指紋が違えば止める。特徴量は MODEL_FEATURES）
   3. N 個（seed 違い）のエンコーダ＋汎用ヘッドを事前学習して保存
 
-実行:
-    python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders                    # PROJECTS の 6 件を順に、各 N_REPEATS 個
-    python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders --project qtbase   # 対象プロジェクト指定（OpenStack も名前で指定可）
-    python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders --n 3              # 個数を指定
+実行（2026-10-22：--variant が必須になった。posw ＝ 重みあり版、base ＝ 重みなし版。design.md §15.2）:
+    python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders --variant posw                    # PROJECTS の 6 件、各 N_REPEATS 個
+    python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders --variant posw --project qtbase   # 対象プロジェクト指定
+    python -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders --variant posw --gpu-share 1.0     # GPU を全部使って並べる（サーバ）
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 import pandas as pd
@@ -23,7 +24,7 @@ from src.analysis.background_problem.common.data_loader import load_release_date
 from src.analysis.preliminary_analysis.pretrained_encoders.dataset import set_builder
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
-from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants, parallel, variant
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     stream=sys.stdout)
@@ -80,6 +81,13 @@ def build_and_save(project: str, n: int | None = None, seed_indices=None) -> lis
                 f"（総レコード {set_builder.count_records(pre_sets)}、特徴量 {st.FEATURE_DIM} 個）")
     scaler = st.Scaler.fit(pre_sets)
 
+    # 3. 版の種類（2026-10-22。design.md §15.2・§15.3）：重みあり版は正例の重み w ＝ 負例 ÷ 正例（事前学習の区間の Change × 日）
+    v = constants.ENCODER_VARIANT
+    pos_weight = st.class_balance_weight(pre_sets) if v == variant.POSW else 1.0
+    logger.info(f"版の種類：{v}（{variant.LABEL[v]}）・正例の重み w = {pos_weight:.4f}")
+    if store.list_seeds(project, cutoff_label):
+        variant.warn_if_exists(store._cutoff_dir(project, cutoff_label), "事前学習エンコーダ")
+
     # 4. 指定 index のエンコーダ＋汎用ヘッドを事前学習して保存
     #    2026-10-20：途中で非有限になった seed は保存せず記録して、次の seed へ進む（design.md §4 の NaN の点検）
     failed: list[int] = []
@@ -87,14 +95,15 @@ def build_and_save(project: str, n: int | None = None, seed_indices=None) -> lis
         seed = constants.RANDOM_SEED + k
         logger.info(f"事前学習 {i + 1}/{len(seed_indices)}（seed{k}, torch_seed={seed}）")
         try:
-            enc, gh = st.pretrain(pre_sets, scaler, seed, device)
+            enc, gh = st.pretrain(pre_sets, scaler, seed, device, pos_weight=pos_weight)
         except st.NonFiniteError as e:
             rec = store.save_nonfinite_record(project, cutoff_label, k, {"torch_seed": seed, **e.info})
             logger.error(f"[{project}] seed{k} は保存しません：{e}（記録：{rec}）")
             failed.append(k)
             continue
         out = store.save_pretrained(project, cutoff_label, k, enc, gh, scaler,
-                                    {"torch_seed": seed, "device": str(device)})   # 回した機械（design.md §14.5）
+                                    {"torch_seed": seed, "device": str(device),    # 回した機械（design.md §14.5）
+                                     "variant": v, "pos_weight": pos_weight})      # 版の種類と正例の重み（§15.3。2026-10-22）
         logger.info(f"保存: {out}")
 
     logger.info("完了" if not failed else f"完了（非有限で保存しなかった seed：{failed}）")
@@ -107,8 +116,24 @@ def main() -> None:
                     help="対象プロジェクト（未指定なら constants.PROJECTS の全プロジェクトを順に。'all' も同義）")
     ap.add_argument("--n", type=int, default=None,
                     help="作るエンコーダ数（既定 constants.N_REPEATS）")
+    variant.add_argument(ap)
+    ap.add_argument("--workers", type=int, default=None,
+                    help="リポジトリを並べて回す数（既定：CUDA なら --gpu-share から自動、Mac などは 1。design.md §14.7・§15.6）")
+    ap.add_argument("--gpu-share", type=float, default=parallel.DEFAULT_GPU_SHARE,
+                    help="並べたプロセス全体で使ってよい GPU のメモリの割合（既定 0.25 ＝ 1/4。誰も使っていなければ 1.0 まで）")
     args = ap.parse_args()
+    v = variant.apply(variant.resolve(args.variant, writing=True))      # 事前学習は書き込みをするので --variant 必須（§15.2）
     projects = list(constants.PROJECTS) if args.project in (None, "all") else [args.project]
+    if args.gpu_share > parallel.DEFAULT_GPU_SHARE:
+        logger.warning(f"GPU のメモリを全体の {args.gpu_share:.0%} まで使います（既定の 1/4 を超えています）")
+    w, frac = parallel.decide(len(projects), use_gpu=True, gpu_share=args.gpu_share, workers=args.workers)
+    if w > 1:                   # リポジトリごとに別々のプロセスで並べる（§15.6）。子は --project 1 件・--workers 1 で同じ入口を呼ぶ
+        child = ["--variant", v] + (["--n", str(args.n)] if args.n else [])
+        bad = parallel.run_children("src.analysis.preliminary_analysis.pretrained_encoders.build_encoders", projects,
+                                    child, w, frac, variant.log_name("pretrained_encoders", v))
+        sys.exit(1 if bad else 0)
+    if frac is not None and not os.environ.get("RP_CUDA_MEMORY_FRACTION"):
+        constants.CUDA_MEMORY_FRACTION = frac                   # 1 つで回すときは --gpu-share をそのまま使う
     failed: dict[str, list[int]] = {}
     for project in projects:
         logger.info(f"===== プロジェクト: {project} =====")

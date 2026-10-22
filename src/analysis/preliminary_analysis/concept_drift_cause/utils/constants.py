@@ -20,6 +20,19 @@ ROW_LABEL = {"time_distance": "時期のずれ", "feature_distance": "特徴の�
 FSW_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "feature_space_window"
 
 
+def set_variant_roots(variant_name: str) -> None:
+    """読み先（RQ1・RQ2 の精度表の出力）を版の種類に合わせる（2026-10-22。design.md §11.6）。
+    重みなし版は今のまま、重みあり版は各出力先の下の posw/。出力先 OUTPUT_ROOT は utils/variant.apply で切り替える。"""
+    from src.analysis.preliminary_analysis.pretrained_encoders.utils import variant
+    global DETECTION_ROOT, FSW_ROOT
+    DETECTION_ROOT = variant.subdir(BASE_DETECTION_ROOT, variant_name)
+    FSW_ROOT = variant.subdir(BASE_FSW_ROOT, variant_name)
+
+
+BASE_DETECTION_ROOT = DETECTION_ROOT      # 重みなし版の読み先（set_variant_roots の元）
+BASE_FSW_ROOT = FSW_ROOT
+
+
 def output_dir(project: str, version: str, kind: str):
     """IG の出力先（種類ごとに分ける。RQ1 の旧い出力 <project>/set_transformer/<版>/ の場所は変えない）。"""
     return OUTPUT_ROOT / project / MODEL_NAME / kind / version
@@ -75,6 +88,19 @@ SELECT_METRIC = "auc"
 # 精度表を recall@pos で主に読むので「recall@pos の表の値を出したモデル」を見る。recall@pos の同着は AUC で、それも同じなら番号で決める。
 SELECT_METRICS = ("recall@pos", "auc")
 # 同値のときは seed 番号の小さい方（再現性のため。`concept_drift_detection/design.md` §8.1 と同じ規則）。
+# 2026-10-22（design.md §11.6）：版の種類で並べる指標を変える。重みあり版は F1（plug-in）→ AUC → seed 番号（窓長・精度表を F1 で見るため）。
+SELECT_METRICS_BY_VARIANT = {"base": SELECT_METRICS, "posw": ("f1_plugin", "auc")}
+
+
+def pre_variant() -> str:
+    """今の版の種類（pretrained_encoders の ENCODER_VARIANT）。"""
+    from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre
+    return pre.ENCODER_VARIANT
+
+
+def select_metrics() -> tuple:
+    """今の版の種類に合う並べる指標。"""
+    return SELECT_METRICS_BY_VARIANT[pre_variant()]
 
 # ── 出力（§9） ───────────────────────────────────────
 IG_DAILY_NAME = "ig_daily.csv.gz"

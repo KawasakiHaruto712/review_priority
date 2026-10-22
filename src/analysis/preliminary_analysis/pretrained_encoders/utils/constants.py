@@ -11,6 +11,11 @@ from src.config.path import DEFAULT_DATA_DIR
 # ── 出力（保存先） ────────────────────────────────────
 OUTPUT_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "pretrained_encoders"
 
+# ── エンコーダの版の種類（design.md §15.2。2026-10-22 追加） ────────────────
+# "base"（重みなし版）／"posw"（重みあり版）。既定は重みあり版。各分析の main が --variant を読んで utils/variant.apply で切り替える
+# （書き込みをするモードでは --variant 必須）。io/store.py はこの値でエンコーダのフォルダ（cutoff_<版> か cutoff_<版>_posw）を選ぶ。
+ENCODER_VARIANT = "posw"
+
 # ── 事前学習の対象・締め切り（design.md §1, §7） ─────────────
 # 事前学習データ = プロジェクト開始 〜 そのプロジェクトの cutoff リリース日まで。
 # プロジェクトごとに独立の共有モデルを作る（per-release では作らない）。

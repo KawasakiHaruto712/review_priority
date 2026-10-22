@@ -48,7 +48,7 @@ def run_conditions(extra: dict = None) -> dict:
     return {"ig_steps": constants.IG_STEPS,
             "baseline": "その評価日の集合の平均（対象 Change のみ移動）",
             "target_output": "logit",
-            "select_metric": " → ".join(constants.SELECT_METRICS) + " → seed 番号",   # 2026-10-21 改めた（design.md §4）
+            "select_metric": " → ".join(constants.select_metrics()) + " → seed 番号",   # 2026-10-21 改めた（design.md §4）。2026-10-22：版の種類で変わる（§11.6）
             "git": _git_commit(),
             **(extra or {})}
 

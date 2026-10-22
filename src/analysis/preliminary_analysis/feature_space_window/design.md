@@ -216,6 +216,20 @@ feature_space_window/
 - 6 件の報告用の表（§5.2）は、大きさの分析と順位の集計の後。
 - RQ1 との比較は窓長の調査の出力（`lookback_window/<project>/summary/summary_auc.csv`）と本分析の要約表を並べる。
 
+## 10.1 重みあり版（2026-10-22 追加。本人判断。`pretrained_encoders/design.md` §15）
+- **版の種類**：`--variant base`（重みなし版。~~既定。~~今までどおり）／`posw`（重みあり版。`pretrained_encoders` の `cutoff_<版>_posw/` のエンコーダを読む。
+  2026-10-22 改めた：**既定**）。`run`・`matrix` は `--variant` 必須・上書きの警告・ログのファイル名に版の種類（`pretrained_encoders/design.md` §15.2）。
+  `plot`・`rank`・`report` は付けなければ重みあり版。
+  埋め込みが変わるので、近い日の選び方（§3）も重みあり版のエンコーダの埋め込みで決まる。
+- **出力先**：重みなし版は今のまま。重みあり版は `data/analysis/preliminary_analysis/feature_space_window/posw/` の下に、今と同じ並び
+  （大きさの分析の `<project>/<版>/`・`<project>/summary/`・`report/`、精度表の `<project>/feature_distance/`）で出す。
+- **指標**：指標一式に plug-in の `precision_plugin`・`recall_plugin`・`f1_plugin`・`k_plugin`・`thr_plugin` を足す（`pretrained_encoders/design.md` §15.4）。
+  大きさの分析と精度表の両方で出す。精度表の図を描く指標（`PLOT_METRICS`）に `f1_plugin` を足す。
+- **大きさ k と刻み（重みあり版）**：`MATRIX_SETTINGS` を版の種類ごとに持つ。重みあり版の k は**大きさの分析（重みあり版）の F1（plug-in）の最良**、
+  刻みは**重みあり版の RQ1 の窓長**（`concept_drift_detection` の重みあり版の窓長）を、本人が結果を見て書く。重みなし版は今の値（§9.1）のまま。
+- 順位の集計（§5.1）と報告用の表（§5.2）は `--metric f1_plugin` で出す。
+- 並べて回す仕組み（`--gpu-share 1.0`。本人判断）はそのまま使う。
+
 ## 11. 限界として書くもの
 - 事前学習の区間の日が候補に入る（§2.1）。
 - 日の代表を平均だけで取る（ばらつき・形は見ていない）。
@@ -233,3 +247,4 @@ feature_space_window/
 - 2026-10-21（続き）：特徴のずれ×評価時期の精度表（§9）を本格化。行は近い順に連続した k 日ずつの群・N_v 行（(a)）、k は `size_days` に手で書く、
   汎用ヘッドと差分も出す、欠測は RQ1 と同じ、検定は作らない、probe と学習に使った日の一覧をすべて保存、コードは複製（整理は論文の後）。
   大きさの分析と精度表はリポジトリごとに並べて回す（`pretrained_encoders/design.md` §14.7）。
+- 2026-10-22（本人判断）：重みあり版（§10.1）。`--variant` で読むエンコーダと出力先を切り替え、plug-in の F1 を指標に足し、重みあり版の k は F1 の最良で選ぶ。

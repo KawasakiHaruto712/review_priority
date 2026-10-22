@@ -200,3 +200,18 @@ lookback_window/
     順位が正しくなればそのままでよい。要約表（§11.1）と図は向きを使わないので変えない。
   - `norm_rank` 以外の指標の結果は変わらない（テストで確かめる：AUC の結果が今と同じこと、`norm_rank` で向きが逆になること）。
   - `feature_space_window` の順位の集計・報告用の表（複製）も同じに直す（`feature_space_window/design.md` §5.1・§5.2）。
+
+## 17. 重みあり版（2026-10-22 追加。本人判断。`pretrained_encoders/design.md` §15）
+- **版の種類**：`--variant base`（重みなし版。~~既定。~~今までどおり）／`posw`（重みあり版。2026-10-22 改めた：**既定**）。
+  `run`・`recompute` は `--variant` 必須・上書きの警告・ログのファイル名に版の種類（`pretrained_encoders/design.md` §15.2）。`plot`・`rank`・`report` は付けなければ重みあり版。読むエンコーダは版の種類で選ぶ（`pretrained_encoders` の `cutoff_<版>_posw/`）。
+- **出力先**：重みなし版は今のまま。重みあり版は `data/analysis/preliminary_analysis/lookback_window/posw/` の下に、今と同じ並び（`<project>/<版>/`・`<project>/summary/`・`report/`）で出す。
+- **指標**：指標一式（§7）に plug-in の `precision_plugin`・`recall_plugin`・`f1_plugin`・`k_plugin`・`thr_plugin` を足す（定義は `pretrained_encoders/design.md` §15.4）。
+  0.5 の指標・recall@pos などは今までどおり。汎用ヘッドの基準線にも同じ指標を出す。
+- **窓長の決め方（重みあり版）**：要約表・順位の集計（§11.3）・報告用の表（§11.4）を `--metric f1_plugin` で出し、**F1（plug-in）の平均が最良の窓長**を本人が選ぶ
+  （`concept_drift_detection` の重みあり版の窓長に書く）。重みなし版は recall@pos で選んだまま（§16）。
+- **並べて回す**：リポジトリごとに別々のプロセスで並べる仕組み（`pretrained_encoders/design.md` §14.7 の複製。`--workers`・`--gpu-share`。1 つあたり 1.6 GB）を入れる。
+  §16 の実行は 1 つのプロセスで約 6 時間だったので、並べれば最も重いリポジトリの時間（2 時間前後の見込み）で済む。
+- 重みなし版の結果は回し直さない（plug-in の F1 も出し直さない。`--mode recompute` で保存済みの予測から後で出せる）。
+- （2026-10-22 追加。本人判断）エンコーダが足りないときは、**重みあり版でも今までどおりその場で事前学習して続ける**（その版の種類のまま作る）。
+  並べて回している最中は 1 つあたりの GPU のメモリの前提（1.6 GB）が事前学習（3 GB 前後）より小さいので、足りなければメモリ不足で止まる。
+  運用は「先に事前学習（`build_encoders --variant posw`）を回してから窓長の調査を回す」（本人の予定）。

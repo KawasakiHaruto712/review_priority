@@ -11,6 +11,7 @@ import pandas as pd
 
 from src.analysis.preliminary_analysis.data_drift.stats.aggregate import summarize_cells
 from src.analysis.preliminary_analysis.data_drift.utils import constants
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import variant
 
 
 def version_dir(kind: str, project: str, version: str) -> Path:
@@ -20,6 +21,7 @@ def version_dir(kind: str, project: str, version: str) -> Path:
 def save(kind: str, project: str, version: str, daily: pd.DataFrame, cells: pd.DataFrame,
          class_counts: pd.DataFrame) -> Path:
     d = version_dir(kind, project, version)
+    variant.warn_if_exists(d, f"{kind} {project} {version}")          # 上書きの警告（design.md §10.1。2026-10-22）
     d.mkdir(parents=True, exist_ok=True)
     daily.to_csv(d / "daily.csv.gz", index=False, compression="gzip")
     cells.to_csv(d / "cells.csv", index=False)

@@ -84,7 +84,9 @@ def eval_range(rel_df: pd.DataFrame, project: str) -> dict:
     from src.analysis.preliminary_analysis.lookback_window.utils import constants as lw
 
     versions = pre.project_config(project)["versions"]
-    windows = sorted(set(lw.WINDOWS_DAYS) | {det.window_for(project)})
+    # 2026-10-22：重みなし版の窓長で固定する（版の種類で表の範囲・指紋を変えないため。重みあり版の窓長は窓長の調査の候補 lw.WINDOWS_DAYS の
+    # どれかなので、この範囲に必ず入る。pretrained_encoders/design.md §15）
+    windows = sorted(set(lw.WINDOWS_DAYS) | {det.window_for(project, "base")})
     starts, ends = [], []
     for v in versions:
         cs_lw, ce_lw = window_sweep.release_cycle(rel_df, project, v)

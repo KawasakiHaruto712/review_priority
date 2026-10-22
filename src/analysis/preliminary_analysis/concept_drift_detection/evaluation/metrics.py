@@ -6,7 +6,8 @@
 セル値は「評価日ごとに compute_day_metrics → 位置（列）の日数で平均」で作る（design.md §8.1）。
 その集約は drift_matrix 側で行うため、本モジュールは日次指標の算出までを担う。
 
-指標：AUC / precision・recall・f1(0.5) / precision@k・recall@k・f1@k / MAP / 正規化順位 / MRR。
+指標：AUC / precision・recall・f1(0.5) / precision@k・recall@k・f1@k / MAP / 正規化順位 / MRR /
+plug-in の precision・recall・f1（＋k・しきい値。2026-10-22。pretrained_encoders/design.md §15.4）。
 """
 from __future__ import annotations
 
@@ -28,6 +29,29 @@ def _topk(y_sorted: np.ndarray, k: int, n_pos: int) -> tuple[float, float, float
     rec = hits / n_pos
     f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
     return prec, rec, f1
+
+
+def _plugin(y_sorted: np.ndarray, p_sorted: np.ndarray, n_pos: int) -> dict:
+    """plug-in の判定（pretrained_encoders/design.md §15.4。2026-10-22。lookback_window と同じもの）。
+
+    確率の大きい順に並べ、2 × 上位 k 件の確率の和 ÷ (k ＋ 全件の確率の和) が最大の k（k ≥ 1）を選び、上位 k 件を正例と判定する
+    （F1 の期待値の近似。Lewis 1995 式 (17)、Dembczyński ら 2017 §4.1）。正解ラベルは k を選ぶのに使わない。
+    """
+    n = len(p_sorted)
+    if n == 0:
+        return {k: NAN for k in PLUGIN_COLUMNS}
+    s = np.cumsum(p_sorted)
+    g = 2.0 * s / (np.arange(1, n + 1) + s[-1])
+    k = int(np.argmax(g)) + 1
+    hits = float(y_sorted[:k].sum())
+    return {"precision_plugin": hits / k,
+            "recall_plugin": hits / n_pos if n_pos > 0 else NAN,
+            "f1_plugin": 2.0 * hits / (k + n_pos) if (k + n_pos) > 0 else NAN,
+            "k_plugin": float(k),
+            "thr_plugin": float(p_sorted[k - 1])}
+
+
+PLUGIN_COLUMNS = ["precision_plugin", "recall_plugin", "f1_plugin", "k_plugin", "thr_plugin"]
 
 
 def compute_day_metrics(y_true, score, k_list, threshold: float = 0.5) -> dict:
@@ -54,6 +78,7 @@ def compute_day_metrics(y_true, score, k_list, threshold: float = 0.5) -> dict:
         out[f"precision@{label}"] = prec
         out[f"recall@{label}"] = rec
         out[f"f1@{label}"] = f1
+    out.update(_plugin(y_sorted, yp[order], n_pos))     # plug-in の F1（2026-10-22）
 
     if n_pos > 0 and n > 1:
         ranks = np.empty(n, dtype=int)
@@ -73,4 +98,5 @@ def metric_columns(k_list) -> list[str]:
     for label in [str(k) for k in k_list] + ["pos"]:
         cols += [f"precision@{label}", f"recall@{label}", f"f1@{label}"]
     cols += ["norm_rank", "mrr"]
+    cols += PLUGIN_COLUMNS                              # plug-in の F1（2026-10-22。後ろに足し、今までの列の並びは変えない）
     return cols

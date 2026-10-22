@@ -81,8 +81,22 @@ MAX_SET_SIZE = None          # 1 集合の最大 Change 数（pretrained_encoder
 RECORD_MARGIN_DAYS = 7       # レコード生成範囲の余裕（§4.4）
 
 
-def window_for(project: str) -> int:
-    """その project の学習窓長（日）。PROJECTS の window_days（無ければ WINDOW_DAYS）。"""
+# 重みあり版（posw）の窓長（2026-10-22 追加。design.md §15）：窓長の調査（重みあり版）の F1（plug-in）の最良を、本人が結果を見て書く。
+# None のままなら止める（重みなし版の窓長で黙って回さないため）。重みなし版は PROJECTS の window_days のまま。
+WINDOW_DAYS_POSW = {"qtbase": None, "qtcreator": None, "wikimedia_mediawiki_core": None,
+                    "qtdeclarative": None, "go": None, "typo3_cms": None}
+
+
+def window_for(project: str, variant_name: str | None = None) -> int:
+    """その project の学習窓長（日）。重みなし版は PROJECTS の window_days（無ければ WINDOW_DAYS）、
+    重みあり版は WINDOW_DAYS_POSW（2026-10-22。variant_name を省くと pretrained_encoders の ENCODER_VARIANT。未記入なら止める）。"""
+    from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre
+    if (variant_name or pre.ENCODER_VARIANT) == "posw":
+        w = WINDOW_DAYS_POSW.get(project)
+        if not w:
+            raise ValueError(f"[{project}] 重みあり版の窓長が未記入です。窓長の調査（重みあり版）の F1（plug-in）の最良を "
+                             f"concept_drift_detection/utils/constants.py の WINDOW_DAYS_POSW に書いてください（design.md §15）")
+        return int(w)
     return int(project_config(project).get("window_days", WINDOW_DAYS))
 
 
@@ -132,7 +146,8 @@ SIGNIFICANCE = 0.05
 # N_v×N_v ヒートマップ（版ごとに大きさが違う。刻み 7 日・サイクル約半年なら約 26×26。色のみ）。数値表示は既定 False（後から切替可）。
 HEATMAP_SHOW_CELL_VALUES = False
 HEATMAP_VALUE_FMT = "{:.2f}"
-PLOT_METRICS = ["auc", "recall@pos"]   # ヒートマップを描く指標。CSV/json は全指標を保存。
+PLOT_METRICS = ["auc", "recall@pos", "f1_plugin"]   # ヒートマップを描く指標。CSV/json は全指標を保存。
+# （2026-10-22 改めた：f1_plugin を足した。重みあり版は F1 で見るため。design.md §15。重みなし版の既存の結果には列がないので描き直しでは飛ばす）
 # （2026-10-21 改めた：旧版は AUC のみ。今回の 6 件は窓長を recall@pos で決めたので recall@pos も描く。design.md §10）
 
 # ── モデル名・出力（§10）──────────────────────────────

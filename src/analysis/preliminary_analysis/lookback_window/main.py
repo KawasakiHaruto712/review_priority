@@ -7,14 +7,16 @@
 
 描画指標は --metric で選択（既定 auc）。--windows で描く窓長を選択。--no-general で基準線を外す。
 
-実行:
-    python -m src.analysis.preliminary_analysis.lookback_window.main --mode run
-    python -m src.analysis.preliminary_analysis.lookback_window.main --mode plot --metric recall@10
+実行（2026-10-22：run・recompute は --variant 必須。posw ＝ 重みあり版の出力は lookback_window/posw/ の下。design.md §17）:
+    python -m src.analysis.preliminary_analysis.lookback_window.main --mode run --variant posw --gpu-share 1.0
+    python -m src.analysis.preliminary_analysis.lookback_window.main --mode rank --metric f1_plugin          # 省略時は重みあり版
+    python -m src.analysis.preliminary_analysis.lookback_window.main --mode plot --metric recall@10 --variant base
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 import numpy as np
@@ -25,12 +27,13 @@ from src.analysis.preliminary_analysis.lookback_window.evaluation import metrics
 from src.analysis.preliminary_analysis.lookback_window.evaluation import ranking
 from src.analysis.preliminary_analysis.lookback_window.io import rank_io, result_io
 from src.analysis.preliminary_analysis.lookback_window.sweep import window_sweep
-from src.analysis.preliminary_analysis.lookback_window.utils import constants
+from src.analysis.preliminary_analysis.lookback_window.utils import constants, parallel
 from src.analysis.preliminary_analysis.lookback_window.visualization import plotter, table
 from src.analysis.preliminary_analysis.pretrained_encoders import build_encoders
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
 from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre_constants
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import variant
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     stream=sys.stdout)
@@ -44,6 +47,8 @@ def _resolve_seeds(project: str, n_seeds: int | None) -> list[int]:
     saved = store.list_seeds(project, cutoff)
     target = n_seeds if n_seeds else pre_constants.N_REPEATS
     missing = [k for k in range(target) if k not in saved]
+    # 2026-10-22：重みあり版でも足りなければその場で作る（本人判断。今の版の種類のまま build_and_save が作る。
+    # 並べて回している最中は GPU のメモリの前提が小さいので、足りなければ CUDA のメモリ不足で止まる。design.md §17）
     if missing:
         logger.info(f"事前学習モデルが不足（保存 {len(saved)} / 要求 {target}、{project} cutoff={cutoff}）。"
                     f"不足分 seed{missing} を作成します…")
@@ -82,6 +87,7 @@ def run(project: str, versions: list[str], n_seeds: int | None) -> None:
         eval_dates = [d for d in sorted(day_sets) if cs_R.date() <= d <= ce_R.date()]
         logger.info(f"評価日数: {len(eval_dates)} / 全日集合: {len(day_sets)}")
 
+        variant.warn_if_exists(result_io.version_dir(project, version), f"{project} {version}")   # 上書きの警告（§17）
         pred_rows, metric_rows = [], []
         for seed_idx, (encoder, general_head, scaler, _cfg) in zip(seeds, loaded):
             pr, mr = window_sweep.run_sweep(day_sets, eval_dates, encoder, general_head, scaler,
@@ -154,13 +160,35 @@ def main() -> None:
                     help="対象プロジェクト（未指定なら constants.PROJECTS の全プロジェクト。'all' も同義）")
     ap.add_argument("--versions", nargs="*", default=None,
                     help="対象バージョン（既定は PROJECTS の5版を使用。例 30.0.0）")
+    variant.add_argument(ap)
+    ap.add_argument("--workers", type=int, default=None,
+                    help="リポジトリを並べて回す数（既定：CUDA なら --gpu-share から自動、Mac などは 1。design.md §17）")
+    ap.add_argument("--gpu-share", type=float, default=parallel.DEFAULT_GPU_SHARE,
+                    help="並べたプロセス全体で使ってよい GPU のメモリの割合（既定 0.25 ＝ 1/4。誰も使っていなければ 1.0 まで）")
     args = ap.parse_args()
+    writing = args.mode in ("run", "recompute")                  # 書き込みをするモードは --variant 必須（design.md §17）
+    v = variant.apply(variant.resolve(args.variant, writing), constants)
 
     # --project 未指定（または 'all'）なら constants.PROJECTS の全プロジェクトを順に回す
     if args.project in (None, "all"):
         projects = list(constants.PROJECTS.keys())
     else:
         projects = [args.project]
+    if args.mode == "run":      # リポジトリごとに別々のプロセスで並べる（design.md §17。2026-10-22）
+        if args.gpu_share > parallel.DEFAULT_GPU_SHARE:
+            logger.warning(f"GPU のメモリを全体の {args.gpu_share:.0%} まで使います（既定の 1/4 を超えています）")
+        w, frac = parallel.decide(len(projects), use_gpu=True, gpu_share=args.gpu_share, workers=args.workers)
+        if w > 1:
+            child = ["--mode", "run", "--variant", v, "--metric", args.metric]
+            if args.versions:
+                child += ["--versions", *args.versions]
+            if args.n_seeds:
+                child += ["--n-seeds", str(args.n_seeds)]
+            failed = parallel.run_children("src.analysis.preliminary_analysis.lookback_window.main", projects, child, w,
+                                           frac, variant.log_name("lookback_window", v))
+            sys.exit(1 if failed else 0)
+        if frac is not None and not os.environ.get("RP_CUDA_MEMORY_FRACTION"):
+            pre_constants.CUDA_MEMORY_FRACTION = frac           # 1 つで回すときは --gpu-share をそのまま使う
     if args.mode == "report":   # 6 件をまとめて 1 回（design.md §11.4。2026-10-21）
         from src.analysis.preliminary_analysis.lookback_window.visualization import report
         labels = [constants.WINDOW_LABELS.get(w, f"{w}d") for w in sorted(constants.WINDOWS_DAYS, reverse=True)]

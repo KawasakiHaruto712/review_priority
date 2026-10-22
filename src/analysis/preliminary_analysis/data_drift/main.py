@@ -9,8 +9,10 @@
 図：格子一覧は全セル（行を固定したもの・評価時期を固定したもの）。個別セル図は --cells で指定したセルだけ（例 --cells d0-p8 d20-p8）。
 寄与度分析の範囲（IG_TARGETS）が決まったら、そのセルを既定にする（design.md §5）。
 
-実行:
-    python3 -m src.analysis.preliminary_analysis.data_drift.main --project qtbase
+実行（2026-10-22：run は --variant 必須。posw ＝ 重みあり版の出力は data_drift/posw/ の下。design.md §10.1）:
+    python3 -m src.analysis.preliminary_analysis.data_drift.main --variant posw
+    python3 -m src.analysis.preliminary_analysis.data_drift.main --variant posw --kind feature_distance
+    python3 -m src.analysis.preliminary_analysis.data_drift.main --mode compare          # 省略時は重みあり版
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ from src.analysis.preliminary_analysis.data_drift.utils import constants, parall
 from src.analysis.preliminary_analysis.data_drift.visualization import plotter
 from src.analysis.preliminary_analysis.pretrained_encoders.features.feature_set import MODEL_FEATURES
 from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import variant
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
@@ -38,7 +41,8 @@ PAIRINGS = {time_distance.KIND: time_distance,      # RQ1
             feature_distance.KIND: feature_distance}  # RQ2（2026-10-22 追加。design.md §3.2）
 
 
-ACC_METRICS = ("recall@pos", "auc")   # 題の 2 行目に出す精度（この順。design.md §5。2026-10-21 改めた：旧版は AUC だけ）
+ACC_METRICS = ("recall@pos", "auc", "f1_plugin")   # 題の 2 行目に出す精度（この順。design.md §5。2026-10-21 改めた：旧版は AUC だけ）
+# （2026-10-22：f1_plugin を足した。表がなければ題から外れ、表はあるのにセルがなければ「—」。design.md §10.1）
 
 
 def _auc_lookup(project: str, version: str, kind: str = time_distance.KIND):
@@ -127,7 +131,7 @@ def compare(project: str, versions: list[str]) -> None:
     from src.analysis.preliminary_analysis.feature_space_window.utils import constants as fsw
 
     plotter.configure()
-    k = (fsw.MATRIX_SETTINGS.get(project) or {}).get("size_days")
+    k = (fsw.matrix_settings().get(project) or {}).get("size_days")   # 版の種類に合う k（2026-10-22）
     labels = {time_distance.KIND: f"RQ1：時期のずれ（直前 {det.window_for(project)} 日の窓）",
               feature_distance.KIND: f"RQ2：特徴のずれ（近い {k} 日）"}
     out_dir = writer.compare_dir(project)
@@ -193,18 +197,24 @@ def main() -> None:
     ap.add_argument("--groups", nargs="*", default=list(constants.GROUPS), help="描く群（all pos neg）")
     ap.add_argument("--workers", type=int, default=None,
                     help="リポジトリを並べて回す数（既定：CUDA が使える機械なら CPU の上限まで最大 6、Mac などは 1。§6）")
+    variant.add_argument(ap)
     args = ap.parse_args()
+    # 2026-10-22：run は --variant 必須（上書きを防ぐ）。plot・compare は省略すると重みあり版（design.md §10.1）。
+    # 読み先（RQ1 の精度表・RQ2 の精度表）と出力先を、版の種類に合わせて切り替える
+    from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants as det
+    from src.analysis.preliminary_analysis.feature_space_window.utils import constants as fsw
+    v = variant.apply(variant.resolve(args.variant, writing=(args.mode == "run")), constants, det, fsw)
     projects = list(pre.PROJECTS) if args.project in (None, "all") else [args.project]
     if args.mode == "run":      # GPU を使わないので CPU だけで並べる数を決める（design.md §6。2026-10-21）
         w, _frac = parallel.decide(len(projects), use_gpu=False, workers=args.workers)
         if w > 1:
-            child = ["--mode", "run", "--kind", args.kind, "--groups", *args.groups]
+            child = ["--mode", "run", "--kind", args.kind, "--variant", v, "--groups", *args.groups]
             if args.versions:
                 child += ["--versions", *args.versions]
             if args.cells:
                 child += ["--cells", *args.cells]
             failed = parallel.run_children("src.analysis.preliminary_analysis.data_drift.main", projects, child, w, None,
-                                           f"data_drift_{args.kind}")
+                                           variant.log_name(f"data_drift_{args.kind}", v))
             sys.exit(1 if failed else 0)
     for project in projects:
         versions = args.versions or list(pre.project_config(project)["versions"])

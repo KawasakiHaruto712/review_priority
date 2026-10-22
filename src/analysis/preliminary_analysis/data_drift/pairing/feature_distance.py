@@ -17,6 +17,7 @@ import pandas as pd
 
 from src.analysis.preliminary_analysis.data_drift.pairing import seed_rule
 from src.analysis.preliminary_analysis.feature_space_window.utils import constants as fsw
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre
 
 KIND = "feature_distance"
 ROW_LABEL = "特徴のずれ"
@@ -74,7 +75,7 @@ def for_version(project: str, version: str) -> FeatureDistancePairing:
     rows = int(meta["versions"][version])
     daily = pd.read_csv(root / version / "daily_metrics.csv.gz", low_memory=False)   # missing_reason が空と文字の混在のため
     daily = daily[daily["distance"].astype(str) != "general"]           # 汎用ヘッドの行は使わない
-    seeds = seed_rule.select_seeds(daily)
+    seeds = seed_rule.select_seeds(daily, seed_rule.metrics_for(pre.ENCODER_VARIANT))   # 版の種類で並べる指標を変える（2026-10-22）
     pos = daily[["day", "position"]].drop_duplicates("day")
     positions = dict(zip(_to_date(pos["day"]), pos["position"].astype(int)))
 

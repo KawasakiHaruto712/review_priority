@@ -41,6 +41,7 @@ from src.analysis.preliminary_analysis.pretrained_encoders.features import featu
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
 from src.analysis.preliminary_analysis.pretrained_encoders.model.set_transformer import FEATURE_NAMES
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import variant
 from src.utils.bot_detection import BotDetector, host_of
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
@@ -149,7 +150,7 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
     daily = result_writer.load_daily_metrics(dpath)
     if not _seed_count_ok(daily, project, version):
         return 0
-    chosen = select_seeds(daily, constants.SELECT_METRICS)
+    chosen = select_seeds(daily, constants.select_metrics())     # 2026-10-22：版の種類で並べる指標を変える（design.md §11.6）
 
     distances = constants.resolve_axis(spec.get("distances"), grid)
     pspec = spec.get("positions")
@@ -211,11 +212,14 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
         logger.warning(f"probe が見つからず飛ばした (日, 距離): {missing_probe} 件")
 
     out_dir = constants.output_dir(project, version, kind)
+    if out_dir.exists() and any(out_dir.iterdir()):     # IG の出力は追記式（run ごとに別の記録）なので、上書きではなく追記を知らせる（§11.6）
+        logger.warning(f"既存の結果に追記します（版の種類 {variant.LABEL.get(constants.pre_variant(), '')}）：{out_dir}")
     ig_store.write_daily(rows, out_dir, run_id,
                          ig_store.run_conditions({"project": project, "version": version, "kind": kind,
                                                   "distances": distances,
                                                   "positions": sorted(target_pos),
-                                                  "device": str(device)}))   # 回した機械（pretrained_encoders/design.md §14.5）
+                                                  "device": str(device),     # 回した機械（pretrained_encoders/design.md §14.5）
+                                                  "variant": constants.pre_variant()}))   # 版の種類（2026-10-22）
     return len(rows)
 
 
@@ -354,6 +358,7 @@ def _parse_args():
     ap.add_argument("--older-versions", action="store_true",
                     help="**最新版を除く 4 版**を対象にする（最新版を回し終えたあとに足す用。約 173 時間）")
     ap.add_argument("--name", default="default", help="抽出の出力先サブディレクトリ名")
+    variant.add_argument(ap)          # 2026-10-22：compute は必須、extract・plot は省略すると重みあり版（design.md §11.6）
     ap.add_argument("--kind", choices=list(constants.KINDS), default="time_distance",
                     help="time_distance＝RQ1（時期のずれ）／feature_distance＝RQ2（特徴のずれ。design.md §11.5。2026-10-21）")
     return ap.parse_args()
@@ -361,6 +366,8 @@ def _parse_args():
 
 if __name__ == "__main__":
     args = _parse_args()
+    _v = variant.apply(variant.resolve(args.variant, writing=(args.mode == "compute")), constants)
+    constants.set_variant_roots(_v)   # 精度表の probe・daily_metrics の読み先も版の種類に合わせる（design.md §11.6）
     if args.mode == "compute":
         compute(projects=args.project, versions=args.version, all_versions=args.all_versions,
                 older_versions=args.older_versions, kind=args.kind)
