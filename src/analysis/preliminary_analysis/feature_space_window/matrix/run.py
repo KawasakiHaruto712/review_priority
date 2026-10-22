@@ -36,13 +36,22 @@ def out_root(project: str) -> Path:
     return constants.OUTPUT_ROOT / project / KIND
 
 
+def _selected_size_posw() -> dict:
+    """大きさの分析（重みあり版）の --mode select が書いた {リポジトリ -> k}（feature_space_window/posw/report/selected_size.json。2026-10-22）。"""
+    from src.analysis.preliminary_analysis.feature_space_window.evaluation import select_best
+    base = getattr(constants, "BASE_OUTPUT_ROOT", constants.OUTPUT_ROOT)
+    return select_best.load_selected(variant.subdir(base, "posw"))
+
+
 def settings_for(project: str) -> tuple[int, int]:
     """(k, 刻み)。どちらも本人が結果を見て constants.MATRIX_SETTINGS に書く（§9.1）。未記入なら止める。"""
     s = constants.matrix_settings().get(project) or {}        # 2026-10-22：版の種類で切り替える（重みあり版は MATRIX_SETTINGS_POSW）
     k, step = s.get("size_days"), s.get("step_days")
     if constants.fraction_grid():                              # 重みあり版の 3 × 3：刻みは版ごとに周期 ÷ 3 で決めるので k だけ要る（§10.1）
+        k = k or _selected_size_posw().get(project)            # 手で書いた値が優先、なければ --mode select の結果（2026-10-22）
         if not k:
-            raise ValueError(f"[{project}] constants.MATRIX_SETTINGS_POSW に size_days（大きさの分析（重みあり版）で選んだ k）を書いてください")
+            raise ValueError(f"[{project}] 重みあり版の k が決まっていません。大きさの分析（重みあり版）の後に --mode select を回すか、"
+                             f"constants.MATRIX_SETTINGS_POSW に size_days を書いてください")
         return int(k), None
     if not k or not step:
         raise ValueError(f"[{project}] constants.MATRIX_SETTINGS（重みあり版は MATRIX_SETTINGS_POSW）に size_days（大きさの分析で選んだ k）と "

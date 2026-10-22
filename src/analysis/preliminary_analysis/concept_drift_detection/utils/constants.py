@@ -87,14 +87,23 @@ WINDOW_DAYS_POSW = {"qtbase": None, "qtcreator": None, "wikimedia_mediawiki_core
                     "qtdeclarative": None, "go": None, "typo3_cms": None}
 
 
+def selected_window_posw() -> dict:
+    """窓長の調査（重みあり版）の --mode select が書いた {リポジトリ -> 窓長}（lookback_window/posw/report/selected_window.json。2026-10-22）。"""
+    from src.analysis.preliminary_analysis.lookback_window.evaluation import select_best
+    from src.analysis.preliminary_analysis.lookback_window.utils import constants as lw
+    from src.analysis.preliminary_analysis.pretrained_encoders.utils import variant
+    base = getattr(lw, "BASE_OUTPUT_ROOT", lw.OUTPUT_ROOT)          # 同じプロセスで lookback_window の出力先が切り替わっていても元から辿る
+    return select_best.load_selected(variant.subdir(base, "posw"))
+
+
 def window_for(project: str, variant_name: str | None = None) -> int:
     """その project の学習窓長（日）。重みなし版は PROJECTS の window_days（無ければ WINDOW_DAYS）、
     重みあり版は WINDOW_DAYS_POSW（2026-10-22。variant_name を省くと pretrained_encoders の ENCODER_VARIANT。未記入なら止める）。"""
     from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre
     if (variant_name or pre.ENCODER_VARIANT) == "posw":
-        w = WINDOW_DAYS_POSW.get(project)
+        w = WINDOW_DAYS_POSW.get(project) or selected_window_posw().get(project)   # 手で書いた値が優先（2026-10-22。design.md §15）
         if not w:
-            raise ValueError(f"[{project}] 重みあり版の窓長が未記入です。窓長の調査（重みあり版）の F1（plug-in）の最良を "
+            raise ValueError(f"[{project}] 重みあり版の窓長が決まっていません。窓長の調査（重みあり版）の後に --mode select を回すか、"
                              f"concept_drift_detection/utils/constants.py の WINDOW_DAYS_POSW に書いてください（design.md §15）")
         return int(w)
     return int(project_config(project).get("window_days", WINDOW_DAYS))

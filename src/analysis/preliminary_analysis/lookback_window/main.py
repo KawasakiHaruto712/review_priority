@@ -150,8 +150,9 @@ def rank(project: str, versions: list[str], metric: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="lookback_window：チューニング窓長の調査")
-    ap.add_argument("--mode", choices=["run", "plot", "recompute", "rank", "report"], default="run",
-                    help="report は 6 件をまとめた報告用の表（run・rank の後。design.md §11.4）")
+    ap.add_argument("--mode", choices=["run", "plot", "recompute", "rank", "report", "select"], default="run",
+                    help="report は 6 件をまとめた報告用の表（run・rank の後。design.md §11.4）。"
+                         "select は --metric の要約表の平均が最良の窓長を report/selected_window.json に書く（plot の後。§17。2026-10-22）")
     ap.add_argument("--metric", default=constants.PLOT_METRIC_DEFAULT, help="描画する指標（既定 auc）")
     ap.add_argument("--n-seeds", type=int, default=None, help="使う事前学習 seed 数（既定 全部）")
     ap.add_argument("--windows", type=int, nargs="*", default=None, help="描く窓長（日）")
@@ -189,6 +190,12 @@ def main() -> None:
             sys.exit(1 if failed else 0)
         if frac is not None and not os.environ.get("RP_CUDA_MEMORY_FRACTION"):
             pre_constants.CUDA_MEMORY_FRACTION = frac           # 1 つで回すときは --gpu-share をそのまま使う
+    if args.mode == "select":   # 重みあり版の窓長を自動で選ぶ（design.md §17。2026-10-22）
+        from src.analysis.preliminary_analysis.lookback_window.evaluation import select_best
+        out = select_best.select(projects, args.metric, constants.OUTPUT_ROOT, constants.WINDOW_LABELS,
+                                 lower_is_better=args.metric in constants.LOWER_IS_BETTER)
+        logger.info(f"選んだ窓長: {out}" if out else "選べたリポジトリがありません（先に --mode run と --mode plot）")
+        return
     if args.mode == "report":   # 6 件をまとめて 1 回（design.md §11.4。2026-10-21）
         from src.analysis.preliminary_analysis.lookback_window.visualization import report
         labels = [constants.WINDOW_LABELS.get(w, f"{w}d") for w in sorted(constants.WINDOWS_DAYS, reverse=True)]
