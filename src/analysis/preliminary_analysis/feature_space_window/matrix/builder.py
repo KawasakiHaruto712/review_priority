@@ -47,8 +47,12 @@ def head_vector(head) -> np.ndarray:
 
 
 def run_seed(res: SeedResults, day_sets: dict, eval_rows: dict, encoder, general_head, scaler, seed_idx: int,
-             k: int, device, metric_names=None) -> None:
-    """1 seed 分を res に足す。eval_rows は {評価日 X -> その X を含む版の中で最大の行数 N_v}。"""
+             k: int, device, metric_names=None, row_offsets: dict | None = None) -> None:
+    """1 seed 分を res に足す。eval_rows は {評価日 X -> その X を含む版の中で最大の行数 N_v}。
+
+    row_offsets（2026-10-22。重みあり版の 3 × 3。design.md §10.1）：{評価日 X -> [行 g の始まりの順位（0 始まり）, ...]}。
+    渡すと、行 g の学習の日は近い順で「始まり ＋ 1 〜 始まり ＋ k 番目」になる（始まり ＝ 刻み × g）。省くと今までどおり g × k。
+    """
     metric_names = metric_names or metrics.metric_columns(constants.K_LIST)
     seed = constants.RANDOM_SEED + seed_idx
     thr = constants.CLASSIFY_THRESHOLD
@@ -71,9 +75,10 @@ def run_seed(res: SeedResults, day_sets: dict, eval_rows: dict, encoder, general
             res.general.setdefault(x, {})[seed_idx] = (gm, "", (npe, nne, -1, -1))
         else:
             res.general.setdefault(x, {})[seed_idx] = (None, "eval_guard", (npe, nne, -1, -1))
-        near, _dist, _before = index.nearest(x, index.means[pos_of[x]], rows * k)
+        offsets = row_offsets[x] if row_offsets is not None else [g * k for g in range(rows)]
+        near, _dist, _before = index.nearest(x, index.means[pos_of[x]], max(offsets[:rows]) + k)
         for g in range(rows):
-            tdays = near[g * k:(g + 1) * k]
+            tdays = near[offsets[g]:offsets[g] + k]
             tsets = [day_sets[d] for d in tdays]
             npt, nnt = _counts(tsets) if tsets else (0, 0)
             reason = ""

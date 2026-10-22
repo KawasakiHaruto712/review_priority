@@ -82,6 +82,18 @@ def position_of_days(ce_R: datetime, step_days: int, grid: int, day_aligned: boo
     return out
 
 
+def fraction_step(cycle_len_days: int, parts: int) -> int:
+    """重みあり版の 3 × 3 の刻み ＝ 周期 ÷ parts を四捨五入した日数（1 以上。concept_drift_detection の binning と同じ。2026-10-22）。"""
+    return max(1, int(round(cycle_len_days / parts)))
+
+
+def position_by_fraction(ce_R: datetime, cycle_len_days: int, parts: int, day_aligned: bool) -> dict:
+    """周期を parts 等分して {日付 -> 位置 p（0..parts−1）}（p ＝ 0 がリリース直前。concept_drift_detection の binning と同じ。2026-10-22）。"""
+    ce = _day_of(ce_R, day_aligned)
+    n = max(1, int(cycle_len_days))
+    return {ce - timedelta(days=back): min(parts - 1, (back - 1) * parts // n) for back in range(1, n + 1)}
+
+
 def record_start(ce_R: datetime, window_days: int, step_days: int, grid: int,
                  margin_days: int = 0, day_aligned: bool = True) -> datetime:
     """レコード生成の開始日を逆算する（design.md §4.4）。

@@ -82,6 +82,30 @@ def position_of_days(ce_R: datetime, step_days: int, grid: int, day_aligned: boo
     return out
 
 
+def fraction_step(cycle_len_days: int, parts: int) -> int:
+    """重みあり版の 3 × 3（design.md §15。pretrained_encoders/design.md §15.9。2026-10-22）の刻み ＝ 周期 ÷ parts を四捨五入した日数（1 以上）。"""
+    return max(1, int(round(cycle_len_days / parts)))
+
+
+def position_by_fraction(ce_R: datetime, cycle_len_days: int, parts: int, day_aligned: bool) -> dict:
+    """周期を parts 等分して {日付 -> 位置 p（0..parts−1）} を返す（2026-10-22。重みあり版の 3 × 3）。
+
+    評価日は [ce − 周期, ce − 1] の周期ぶんの日。p ＝ ⌊(ce − 1 − x の日数) ÷ 周期 × parts⌋ で、p ＝ 0 がリリース直前の 1/parts。
+    割り切れないときは列によって 1 日ほど長さが違う。
+    """
+    ce = _day_of(ce_R, day_aligned)
+    n = max(1, int(cycle_len_days))
+    return {ce - timedelta(days=back): min(parts - 1, (back - 1) * parts // n) for back in range(1, n + 1)}
+
+
+def record_start_fraction(ce_R: datetime, cycle_len_days: int, window_days: int, step_days: int, parts: int,
+                          margin_days: int = 0, day_aligned: bool = True) -> datetime:
+    """3 × 3 のレコード生成の開始日（2026-10-22）：最初の評価日（ce − 周期）− 窓長 − 刻み ×（parts − 1）− 余裕。"""
+    ce = _day_of(ce_R, day_aligned)
+    start = ce - timedelta(days=cycle_len_days + window_days + step_days * (parts - 1) + margin_days)
+    return datetime(start.year, start.month, start.day)
+
+
 def record_start(ce_R: datetime, window_days: int, step_days: int, grid: int,
                  margin_days: int = 0, day_aligned: bool = True) -> datetime:
     """レコード生成の開始日を逆算する（design.md §4.4）。

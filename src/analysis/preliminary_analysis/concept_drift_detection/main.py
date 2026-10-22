@@ -110,6 +110,8 @@ def analyze(table, rel_df, project, versions, out_root):
     # 窓長・刻みは project ごと（§4.2。窓長の調査で選んだ最良窓に基づく）。格子サイズは版ごと
     window = constants.window_for(project)
     step = constants.step_for(project)
+    thirds = constants.fraction_grid()          # 重みあり版は 3 × 3（§15。刻みは版ごとに周期 ÷ 3 で決め直す）
+    merged_daily: list = []                     # 5 版をまとめた表の材料（重みあり版。§15）
     # probe は版に依存しないので、プロジェクト単位で集めて最後に 1 回書く（§6.7）
     probes = probe_store.ProbeStore(out_root, project, window) if constants.SAVE_PROBES else None
     for version in versions:
@@ -120,17 +122,24 @@ def analyze(table, rel_df, project, versions, out_root):
             continue
         # 格子サイズ N_v ＝ ⌈サイクル長 ÷ 刻み⌉（列の幅は刻みで固定。§4.2）
         cycle_len = binning.cycle_days(cs_R, ce_R, constants.BIN_DAY_ALIGNED)
-        grid = constants.grid_for(project, cycle_len)
+        if thirds:      # 重みあり版：周期を 3 等分した 3 × 3、刻み ＝ 周期 ÷ 3（版ごと。§15。2026-10-22）
+            grid = constants.FRACTION_PARTS
+            step = binning.fraction_step(cycle_len, grid)
+            rec_start = binning.record_start_fraction(ce_R, cycle_len, window, step, grid,
+                                                      constants.RECORD_MARGIN_DAYS, constants.BIN_DAY_ALIGNED)
+        else:
+            grid = constants.grid_for(project, cycle_len)
+            # 3. レコード生成（範囲は §4.4 で逆算）→ 日ごとの集合 → 位置（列）の割当
+            rec_start = binning.record_start(ce_R, window, step, grid, constants.RECORD_MARGIN_DAYS,
+                                             constants.BIN_DAY_ALIGNED)
         logger.info(f"格子: {grid}×{grid}（サイクル {cycle_len} 日・窓長 {window} 日・刻み {step} 日・"
-                    f"評価 {step * grid} 日）")
-        # 3. レコード生成（範囲は §4.4 で逆算）→ 日ごとの集合 → 位置（列）の割当
-        rec_start = binning.record_start(ce_R, window, step, grid, constants.RECORD_MARGIN_DAYS,
-                                         constants.BIN_DAY_ALIGNED)
+                    f"評価 {cycle_len if thirds else step * grid} 日）")
         logger.info(f"--- {project} {version}（サイクル {cs_R.date()}〜{ce_R.date()} / "
                     f"レコード生成 {rec_start.date()} から）---")
         day_sets = {s.t.date(): s for s in day_sets_from_table(table, rec_start, ce_R,
                                                                  max_set_size=constants.MAX_SET_SIZE)}
-        positions = binning.position_of_days(ce_R, step, grid, constants.BIN_DAY_ALIGNED)
+        positions = (binning.position_by_fraction(ce_R, cycle_len, grid, constants.BIN_DAY_ALIGNED) if thirds
+                     else binning.position_of_days(ce_R, step, grid, constants.BIN_DAY_ALIGNED))
         eval_dates = [d for d in sorted(day_sets) if d in positions]
         logger.info(f"評価日数: {len(eval_dates)} / 全日集合: {len(day_sets)}")
 
@@ -151,8 +160,8 @@ def analyze(table, rel_df, project, versions, out_root):
         _save_kind(res["general"], base / "general", meta)
         _save_kind(res["diff"], base / "diff", meta)
 
-        # ドリフト検定は主指標（PLOT_METRICS）の probe 行列に対して実施（§8.2）
-        for m in constants.PLOT_METRICS:
+        # ドリフト検定は主指標（PLOT_METRICS）の probe 行列に対して実施（§8.2）。重みあり版の 3 × 3 ではかけない（§15。2026-10-22）
+        for m in ([] if thirds else constants.PLOT_METRICS):
             mr = res["probe"].get(m)
             if mr is None:
                 continue
@@ -167,6 +176,20 @@ def analyze(table, rel_df, project, versions, out_root):
                                                                   "window_days": window,
                                                                   "step_days": step}, base)
             logger.info(f"日次指標を保存: {path}（{len(daily_sink)} 行）")
+            if thirds:
+                merged_daily.extend(daily_sink)
+
+    # 5 版をまとめた 3 × 3（重みあり版。全評価日の平均 ± 標準偏差。§15。2026-10-22）
+    if thirds and merged_daily:
+        import pandas as pd
+        from src.analysis.preliminary_analysis.concept_drift_detection.evaluation.merge_versions import merge_versions
+        merged = merge_versions(pd.DataFrame(merged_daily), constants.FRACTION_PARTS, metric_names)
+        mbase = out_root / project / model_name / constants.MERGED_DIRNAME
+        mmeta = {"project": project, "version": "all_versions", "versions": list(versions), "model": model_name,
+                 "n_repeats": len(encoders), "device": str(device), "variant": pre_constants.ENCODER_VARIANT}
+        for kind in ("probe", "general", "diff"):
+            _save_kind(merged[kind], mbase / kind, mmeta)
+        logger.info(f"5 版をまとめた表: {mbase}")
 
     # probe を保存（特徴量の寄与度分析用。版をまたいで集めたものを 1 回で書く。§6.7）
     if probes is not None:
@@ -213,6 +236,8 @@ def redraw(projects=None, versions=None) -> int:
         vs = constants.versions_for(project)
         if versions:
             vs = [v for v in vs if v in set(versions)]
+        if constants.fraction_grid() and not versions:
+            vs = vs + [constants.MERGED_DIRNAME]          # 重みあり版は 5 版をまとめた表も描き直す（§15。2026-10-22）
         for v in vs:
             base = constants.OUTPUT_ROOT / project / constants.MODEL_NAME[0] / v
             for kind in ("probe", "general", "diff"):

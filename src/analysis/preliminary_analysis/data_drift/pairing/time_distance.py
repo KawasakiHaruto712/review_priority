@@ -46,9 +46,16 @@ def for_version(rel_df: pd.DataFrame, project: str, version: str, window: int | 
                 step: int | None = None) -> TimeDistancePairing:
     """その版の部品を作る（窓長・刻みは既定で concept_drift_detection の設定）。"""
     window = det.window_for(project) if window is None else int(window)
-    step = (det.step_for(project) if step is None else int(step))
     cs_R, ce_R, _prev = binning.target_cycles(rel_df, project, version)
     cycle_len = binning.cycle_days(cs_R, ce_R, det.BIN_DAY_ALIGNED)
+    if det.fraction_grid():     # 重みあり版の 3 × 3（design.md §10.1。2026-10-22）：精度表と同じ決まりで、同じ評価日・同じ窓になる
+        parts = det.FRACTION_PARTS
+        step = binning.fraction_step(cycle_len, parts) if step is None else int(step)
+        start = binning.record_start_fraction(ce_R, cycle_len, window, step, parts, det.RECORD_MARGIN_DAYS,
+                                              det.BIN_DAY_ALIGNED)
+        positions = binning.position_by_fraction(ce_R, cycle_len, parts, det.BIN_DAY_ALIGNED)
+        return TimeDistancePairing(window, step, parts, ce_R, start, positions)
+    step = (det.step_for(project) if step is None else int(step))
     rows = max(1, -(-cycle_len // step))                       # ⌈サイクル長 ÷ 刻み⌉（det.grid_for と同じ）
     start = binning.record_start(ce_R, window, step, rows, det.RECORD_MARGIN_DAYS, det.BIN_DAY_ALIGNED)
     positions = binning.position_of_days(ce_R, step, rows, det.BIN_DAY_ALIGNED)

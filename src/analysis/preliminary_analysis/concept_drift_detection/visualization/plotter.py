@@ -114,7 +114,9 @@ def plot_heatmap(result: MatrixResult, path: Path, dpi: int = 150) -> None:
     im = ax.imshow(result.value, origin="lower", aspect="auto",
                    cmap=_cmap_for(result.metric), vmin=vmin, vmax=vmax)
     # 各セルの数値表示は既定オフ（26×26 では詰まって読みにくい）。constants で切替可。
-    if constants.HEATMAP_SHOW_CELL_VALUES:
+    # 2026-10-22：小さい表（重みあり版の 3 × 3）は常に数値を書き、「± 評価日の間の標準偏差」も添える（HEATMAP_SHOW_SPREAD で外せる。§15）
+    small = n <= constants.SMALL_GRID_MAX
+    if constants.HEATMAP_SHOW_CELL_VALUES or small:
         for d in range(n):
             for p in range(n):
                 v = result.value[d, p]
@@ -122,8 +124,12 @@ def plot_heatmap(result: MatrixResult, path: Path, dpi: int = 150) -> None:
                     continue
                 r, g, b, _ = im.cmap(im.norm(v))  # 表示色に一致
                 lum = 0.299 * r + 0.587 * g + 0.114 * b
-                ax.text(p, d, constants.HEATMAP_VALUE_FMT.format(v), ha="center", va="center",
-                        fontsize=6, color="black" if lum > 0.5 else "white")
+                text = constants.HEATMAP_VALUE_FMT.format(v)
+                sd = None if result.day_std is None else result.day_std[d, p]
+                if small and constants.HEATMAP_SHOW_SPREAD and sd is not None and not np.isnan(sd):
+                    text += f"\n±{sd:.2f}"
+                ax.text(p, d, text, ha="center", va="center",
+                        fontsize=11 if small else 6, color="black" if lum > 0.5 else "white")
     ax.set_xlabel("評価時期 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
     ax.set_ylabel("時期のずれ d（学習期間を何段ずらすか。d0 ＝ 直近）")
     _step = max(1, n // 13)  # ラベルが詰まらないよう間引く（26 なら 2 つおき）

@@ -71,6 +71,20 @@ for _p, _k in {"qtbase": 60, "qtcreator": 14, "wikimedia_mediawiki_core": 30, "q
 MATRIX_SETTINGS_POSW = {p: {"size_days": None, "step_days": None} for p in PROJECTS}
 
 
+# 重みあり版の表の形（2026-10-22。design.md §10.1・pretrained_encoders/design.md §15.9）：周期を 3 等分した 3 × 3。
+# 行 d ＝ 近い順で「刻み × d ＋ 1 〜 刻み × d ＋ k 番目」の日（刻み ＝ 周期 ÷ 3。版ごと）。MATRIX_SETTINGS_POSW は size_days（k）だけを書く。
+FRACTION_PARTS = 3
+MERGED_DIRNAME = "all_versions"    # 5 版をまとめた表の出力先（<project>/feature_distance/all_versions/）
+HEATMAP_SHOW_SPREAD = True         # 3 × 3 のセルに「± 評価日の間の標準偏差」を書くか
+SMALL_GRID_MAX = 6                 # この大きさ以下の表は、セルに数字を書く
+
+
+def fraction_grid() -> bool:
+    """今の版の種類で 3 × 3 を使うか（重みあり版だけ）。"""
+    from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre
+    return pre.ENCODER_VARIANT == "posw"
+
+
 def matrix_settings() -> dict:
     """版の種類（pretrained_encoders の ENCODER_VARIANT）に合う MATRIX_SETTINGS（2026-10-22）。"""
     from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre
