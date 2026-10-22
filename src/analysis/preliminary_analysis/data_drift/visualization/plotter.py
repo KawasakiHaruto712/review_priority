@@ -47,7 +47,10 @@ def acc_text(accs: dict | None) -> str:
     def f(key):
         v = (accs or {}).get(key)
         return "—" if v is None or not np.isfinite(v) else f"{v:.3f}"
-    return f"recall@pos={f('recall@pos')}  AUC={f('auc')}"
+    text = f"recall@pos={f('recall@pos')}  AUC={f('auc')}"
+    if accs and "f1_plugin" in accs:            # 2026-10-22：重みあり版は F1（plug-in）も出す（design.md §10.1）
+        text += f"  F1={f('f1_plugin')}"
+    return text
 
 
 def title(project, version, row_label, row, position, group, info: dict, accs: dict | None) -> str:

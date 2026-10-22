@@ -4,9 +4,9 @@
   --mode run（既定） : 保存済みエンコーダを load → seed ごとに全日を埋め込み → 評価日ごとに近い k 日で probe → 保存 → 要約表
   --mode plot        : 保存済み metrics.csv から要約表だけ作り直す
 
-実行:
-    python3 -m src.analysis.preliminary_analysis.feature_space_window.main
-    python3 -m src.analysis.preliminary_analysis.feature_space_window.main --project qtbase
+実行（2026-10-22：run・matrix は --variant 必須。posw ＝ 重みあり版の出力は feature_space_window/posw/ の下。design.md §10.1）:
+    python3 -m src.analysis.preliminary_analysis.feature_space_window.main --variant posw --gpu-share 1.0
+    python3 -m src.analysis.preliminary_analysis.feature_space_window.main --mode rank --metric f1_plugin      # 省略時は重みあり版
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from src.analysis.preliminary_analysis.feature_space_window.visualization import
 from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre_constants
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import variant
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
@@ -34,8 +35,9 @@ def _seeds(project: str, n_seeds: int | None) -> list[int]:
     cutoff = constants.cutoff_for(project)
     saved = store.list_seeds(project, cutoff)
     if not saved:
-        raise RuntimeError(f"[{project}] 事前学習済みのエンコーダがありません（cutoff={cutoff}）。先に "
-                           f"python3 -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders --project {project}")
+        raise RuntimeError(f"[{project}] 事前学習済みのエンコーダがありません（cutoff={cutoff}・版の種類 {pre_constants.ENCODER_VARIANT}）。先に "
+                           f"python3 -m src.analysis.preliminary_analysis.pretrained_encoders.build_encoders "
+                           f"--variant {pre_constants.ENCODER_VARIANT} --project {project}")
     return saved if n_seeds is None else saved[:n_seeds]
 
 
@@ -55,6 +57,8 @@ def run(project: str, versions: list[str], n_seeds: int | None, sizes: list[int]
     seeds = _seeds(project, n_seeds)
     logger.info(f"device = {device}・seed {seeds}・大きさ {sizes}")
     cutoff = constants.cutoff_for(project)
+    for v in version_eval:
+        variant.warn_if_exists(result_writer.version_dir(project, v), f"{project} {v}")   # 上書きの警告（design.md §10.1）
     merged = {v: VersionRows() for v in version_eval}
     for i, k in enumerate(seeds):
         encoder, _general, scaler, _cfg = store.load_pretrained(project, cutoff, k, device)
@@ -82,7 +86,10 @@ def main() -> None:
                     help="リポジトリを並べて回す数（既定：CUDA なら --gpu-share から自動、Mac などは 1。pretrained_encoders/design.md §14.7）")
     ap.add_argument("--gpu-share", type=float, default=parallel.DEFAULT_GPU_SHARE,
                     help="並べたプロセス全体で使ってよい GPU のメモリの割合（既定 0.25 ＝ 1/4。誰も使っていなければ 1.0 まで）")
+    variant.add_argument(ap)
     args = ap.parse_args()
+    # 2026-10-22：run・matrix は --variant 必須（上書きを防ぐ）。plot・rank・report は省略すると重みあり版（design.md §10.1）
+    v = variant.apply(variant.resolve(args.variant, writing=args.mode in ("run", "matrix")), constants)
     projects = list(constants.PROJECTS) if args.project in (None, "all") else [args.project]
     sizes = sorted(args.sizes) if args.sizes else list(constants.SIZES_DAYS)
     if args.mode in ("run", "matrix"):
@@ -90,7 +97,7 @@ def main() -> None:
             logger.warning(f"GPU のメモリを全体の {args.gpu_share:.0%} まで使います（既定の 1/4 を超えています）")
         w, frac = parallel.decide(len(projects), use_gpu=True, gpu_share=args.gpu_share, workers=args.workers)
         if w > 1:               # リポジトリごとに別々のプロセスで並べる（§14.7）。子は --project 1 件・--workers 1 で同じ入口を呼ぶ
-            child = ["--mode", args.mode, "--metric", args.metric]
+            child = ["--mode", args.mode, "--metric", args.metric, "--variant", v]
             if args.versions:
                 child += ["--versions", *args.versions]
             if args.n_seeds:
@@ -98,7 +105,7 @@ def main() -> None:
             if args.sizes:
                 child += ["--sizes", *map(str, args.sizes)]
             failed = parallel.run_children("src.analysis.preliminary_analysis.feature_space_window.main", projects,
-                                           child, w, frac, f"feature_space_window_{args.mode}")
+                                           child, w, frac, variant.log_name(f"feature_space_window_{args.mode}", v))
             sys.exit(1 if failed else 0)
         if frac is not None and not os.environ.get("RP_CUDA_MEMORY_FRACTION"):
             pre_constants.CUDA_MEMORY_FRACTION = frac           # 1 つで回すときは --gpu-share をそのまま使う

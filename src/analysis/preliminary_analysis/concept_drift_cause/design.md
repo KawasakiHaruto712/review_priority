@@ -612,6 +612,20 @@ L のおよそ 1.3 乗で増える（この範囲では 1.7 乗より緩い）�
 
 ---
 
+## 11.6 重みあり版への切り替え（2026-10-22 追加。本人判断。`pretrained_encoders/design.md` §15）
+- **版の種類**：`--variant base`（重みなし版。今までどおり）／`posw`（重みあり版。**既定**）。今回は**切り替えを入れるだけで、回さない**（計算する範囲が未決のため）。
+- **読み先**を版の種類で切り替える：
+  - エンコーダ：重みあり版は `pretrained_encoders/<project>/cutoff_<版>_posw/`
+  - 精度表の probe・`daily_metrics.csv.gz`：重みあり版は RQ1 が `concept_drift_detection/posw/`、RQ2 が `feature_space_window/posw/<project>/feature_distance/`
+  - ~~seed の選び方（§4。recall@pos → AUC → seed 番号の 3 番目）は同じ決まり。重みあり版で F1 を主に見ることになっても、seed の選び方を変えるかは範囲を決めるときに決める~~
+  - （2026-10-22 改めた。本人判断）**seed の選び方は版の種類で変える**：
+    - 重みなし版：今までどおり recall@pos → AUC → seed 番号の昇順に並べた 3 番目（§4）
+    - 重みあり版：**F1（plug-in。`f1_plugin`）→ AUC → seed 番号**の昇順に並べた 3 番目。重みあり版は窓長・大きさ・精度表を F1 で見るので、
+      その日の F1 の値（5 seed の中央値）を出したモデルを見る（§4 の「表の値を出したモデルを見る」と同じ考え方）。欠測の seed を除く扱いは同じ
+    - 特徴量別の分布（`data_drift`）の RQ2 版の seed の選び方も、同じく版の種類で切り替える（同じモデルの学習の日を見るため。`data_drift/design.md` §10.1）
+- **出力先**：重みなし版は今のまま。重みあり版は `data/analysis/preliminary_analysis/concept_drift_cause/posw/` の下に、今と同じ並びで出す。
+- **書き込みをするモード（`compute`）は `--variant` 必須**・出力先に結果があれば上書きの警告・ログのファイル名に版の種類。`extract`・`plot` は付けなければ重みあり版。
+
 ## 12. ディレクトリ・コード構成
 
 ```

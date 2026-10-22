@@ -65,12 +65,25 @@ for _p, _w in {"qtbase": 60, "qtcreator": 30, "wikimedia_mediawiki_core": 14, "q
 for _p, _k in {"qtbase": 60, "qtcreator": 14, "wikimedia_mediawiki_core": 30, "qtdeclarative": 14,
                "go": 14, "typo3_cms": 14}.items():
     MATRIX_SETTINGS[_p]["size_days"] = _k
-RANDOM_SEED = 42              # probe の seed（k 本目のエンコーダ ＝ RANDOM_SEED + k。RQ1 の精度表と同じ）
+
+# 重みあり版（posw）の k と刻み（2026-10-22 追加。design.md §10.1）：k は大きさの分析（重みあり版）の F1（plug-in）の最良、
+# 刻みは重みあり版の RQ1 の窓長（concept_drift_detection の WINDOW_DAYS_POSW）を、本人が結果を見て書く。None のままなら止める。
+MATRIX_SETTINGS_POSW = {p: {"size_days": None, "step_days": None} for p in PROJECTS}
+
+
+def matrix_settings() -> dict:
+    """版の種類（pretrained_encoders の ENCODER_VARIANT）に合う MATRIX_SETTINGS（2026-10-22）。"""
+    from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre
+    return MATRIX_SETTINGS_POSW if pre.ENCODER_VARIANT == "posw" else MATRIX_SETTINGS
+
+
+RANDOM_SEED = 42             # probe の seed（k 本目のエンコーダ ＝ RANDOM_SEED + k。RQ1 の精度表と同じ）
 REPEAT_AGG = "median"          # 評価日ごとの seed 方向の集約
 MIN_TRAIN = 30                 # 学習の k 日の最小レコード数（RQ1 と同じ）
 MIN_EVAL = 30                  # 評価日の最小レコード数（RQ1 と同じ）
 BIN_DAY_ALIGNED = True         # 評価時期の境界を 0 時にそろえる（RQ1 と同じ）
-PLOT_METRICS = ["auc", "recall@pos"]   # ヒートマップを描く指標（CSV・json は全指標。2026-10-21 に recall@pos を足した。design.md §9.2）
+PLOT_METRICS = ["auc", "recall@pos", "f1_plugin"]   # ヒートマップを描く指標（CSV・json は全指標。2026-10-21 に recall@pos を足した。design.md §9.2）
+# （2026-10-22：f1_plugin を足した。重みあり版は F1 で見るため。design.md §10.1）
 HEATMAP_SHOW_CELL_VALUES = False
 HEATMAP_VALUE_FMT = "{:.2f}"
 SAVE_PER_REPEAT = True

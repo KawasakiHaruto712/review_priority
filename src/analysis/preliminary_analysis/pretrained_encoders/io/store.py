@@ -1,7 +1,8 @@
 """事前学習済みエンコーダ＋汎用ヘッド＋Scaler＋config の保存/読込（design.md §6）。
 
 保存レイアウト（下流との約束事）:
-  <OUTPUT_ROOT>/<project>/cutoff_<cutoff>/seed<k>/
+  <OUTPUT_ROOT>/<project>/cutoff_<cutoff>/seed<k>/          （重みなし版）
+  <OUTPUT_ROOT>/<project>/cutoff_<cutoff>_posw/seed<k>/     （重みあり版。2026-10-22。constants.ENCODER_VARIANT で選ぶ）
     encoder.pt / general_head.pt / scaler.json / config.json
 """
 from __future__ import annotations
@@ -14,11 +15,16 @@ import torch
 
 from src.analysis.preliminary_analysis.pretrained_encoders.features.feature_set import MODEL_FEATURES
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
-from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants, variant
+
+
+def _cutoff_dir(project: str, cutoff: str) -> Path:
+    """版の種類で分ける（2026-10-22。design.md §15.2）：重みなし版 cutoff_<版>、重みあり版 cutoff_<版>_posw。"""
+    return constants.OUTPUT_ROOT / project / variant.cutoff_dirname(cutoff, constants.ENCODER_VARIANT)
 
 
 def _seed_dir(project: str, cutoff: str, seed_idx: int) -> Path:
-    return constants.OUTPUT_ROOT / project / f"cutoff_{cutoff}" / f"seed{seed_idx}"
+    return _cutoff_dir(project, cutoff) / f"seed{seed_idx}"
 
 
 def _base_config(project: str, cutoff: str, seed_idx: int) -> dict:
@@ -88,7 +94,7 @@ def check_finite_weights(encoder, head, scaler, project: str, cutoff: str, seed_
 
 def save_nonfinite_record(project: str, cutoff: str, seed_idx: int, info: dict) -> Path:
     """事前学習が非有限で止まった seed の記録を書く（design.md §4 の NaN の点検。モデルは保存しない）。"""
-    base = constants.OUTPUT_ROOT / project / f"cutoff_{cutoff}"
+    base = _cutoff_dir(project, cutoff)
     base.mkdir(parents=True, exist_ok=True)
     path = base / f"seed{seed_idx}_nonfinite.json"
     with open(path, "w", encoding="utf-8") as f:
@@ -98,7 +104,7 @@ def save_nonfinite_record(project: str, cutoff: str, seed_idx: int, info: dict) 
 
 def list_seeds(project: str, cutoff: str) -> list[int]:
     """保存済み seed（0 始まりの反復 index）を昇順で返す。"""
-    base = constants.OUTPUT_ROOT / project / f"cutoff_{cutoff}"
+    base = _cutoff_dir(project, cutoff)
     if not base.exists():
         return []
     return sorted(int(p.name[4:]) for p in base.glob("seed*") if p.name[4:].isdigit())

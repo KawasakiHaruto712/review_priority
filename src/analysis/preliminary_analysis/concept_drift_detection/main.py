@@ -1,7 +1,7 @@
 """レビュー優先順位ドリフト検出（Phase1 / 距離×時期行列の分析）: オーケストレーション（design.md）。
 
-実行:
-    python -m src.analysis.preliminary_analysis.concept_drift_detection.main
+実行（2026-10-22：run は --variant 必須。posw ＝ 重みあり版の出力は concept_drift_detection/posw/ の下。design.md §15）:
+    python -m src.analysis.preliminary_analysis.concept_drift_detection.main --variant posw --gpu-share 1.0
     python -m ...main --project keystone                  # 1 プロジェクトだけ
     python -m ...main --project nova --version 30.0.0     # 1 版だけ
 
@@ -39,6 +39,8 @@ from src.analysis.preliminary_analysis.pretrained_encoders.dataset import record
 from src.analysis.preliminary_analysis.pretrained_encoders.features import feature_builder
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre_constants
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import variant
 from src.utils.bot_detection import BotDetector, host_of
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
@@ -56,6 +58,8 @@ def _resolve_encoders(project: str, device):
     saved = store.list_seeds(project, cutoff)
     target = constants.N_REPEATS
     missing = [k for k in range(target) if k not in saved]
+    # 2026-10-22：重みあり版でも足りなければその場で作る（本人判断。今の版の種類のまま build_and_save が作る。
+    # 並べて回している最中は GPU のメモリの前提が小さいので、足りなければ CUDA のメモリ不足で止まる。design.md §15）
     if missing:
         logger.info(f"事前学習モデルが不足（保存 {len(saved)} / 要求 {target}）。不足 seed{missing} を作成します…")
         build_encoders.build_and_save(project=project, seed_indices=missing)
@@ -139,8 +143,10 @@ def analyze(table, rel_df, project, versions, out_root):
                                           probe_sink=(probes.sink() if probes else None))
 
         base = out_root / project / model_name / version
+        variant.warn_if_exists(base, f"{project} {version}")          # 上書きの警告（design.md §15。2026-10-22）
         meta = {"project": project, "version": version, "model": model_name,
-                "n_repeats": len(encoders), "device": str(device)}   # 回した機械（pretrained_encoders/design.md §14.5）
+                "n_repeats": len(encoders), "device": str(device),   # 回した機械（pretrained_encoders/design.md §14.5）
+                "variant": pre_constants.ENCODER_VARIANT}            # 版の種類（2026-10-22）
         _save_kind(res["probe"], base / "probe", meta)
         _save_kind(res["general"], base / "general", meta)
         _save_kind(res["diff"], base / "diff", meta)
@@ -233,15 +239,17 @@ def _parse_args():
                     help="リポジトリを並べて回す数（既定：CUDA なら --gpu-share から自動、Mac などは 1。pretrained_encoders/design.md §14.7）")
     ap.add_argument("--gpu-share", type=float, default=parallel.DEFAULT_GPU_SHARE,
                     help="並べたプロセス全体で使ってよい GPU のメモリの割合（既定 0.25 ＝ 1/4。誰も使っていなければ 1.0 まで）")
+    variant.add_argument(ap)
     return ap.parse_args()
 
 
 def main() -> None:
     """2026-10-21：CUDA の機械ではリポジトリごとに別々のプロセスで並べて回す（pretrained_encoders/design.md §14.7）。"""
     import os
-    from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre_constants
 
     args = _parse_args()
+    # 2026-10-22：run は --variant 必須（上書きを防ぐ）。plot は省略すると重みあり版（design.md §15）
+    v = variant.apply(variant.resolve(args.variant, writing=(args.mode == "run")), constants)
     projects = list(args.project) if args.project else list(constants.PROJECTS)
     if args.mode == "plot":
         logger.info(f"図を描き直しました: {redraw(projects, args.version)} まとまり")
@@ -250,9 +258,9 @@ def main() -> None:
         logger.warning(f"GPU のメモリを全体の {args.gpu_share:.0%} まで使います（既定の 1/4 を超えています）")
     w, frac = parallel.decide(len(projects), use_gpu=True, gpu_share=args.gpu_share, workers=args.workers)
     if w > 1:
-        child = ["--version", *args.version] if args.version else []
+        child = ["--variant", v] + (["--version", *args.version] if args.version else [])
         failed = parallel.run_children("src.analysis.preliminary_analysis.concept_drift_detection.main", projects,
-                                       child, w, frac, "concept_drift_detection")
+                                       child, w, frac, variant.log_name("concept_drift_detection", v))
         sys.exit(1 if failed else 0)
     if frac is not None and not os.environ.get("RP_CUDA_MEMORY_FRACTION"):
         pre_constants.CUDA_MEMORY_FRACTION = frac

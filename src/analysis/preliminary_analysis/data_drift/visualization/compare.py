@@ -42,7 +42,7 @@ def plot_compare(table: pd.DataFrame, project: str, version: str, labels: dict, 
     d = table[table["group"] == GROUP]
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
     panels = [("abs_delta_mean", "55 特徴量の |δ| の平均"),
-              ("n_ge_bound", f"|δ| ≥ {constants.EFFECT_BOUNDS[0]} の特徴量の数")]
+              ("n_ge_bound", f"|δ| が {constants.EFFECT_BOUNDS[0]} 以上の特徴量の数")]   # 「≥」は日本語のフォントにないため文字で書く
     for ax, (col, ylabel) in zip(axes, panels):
         for kind, sub in d.groupby("kind", sort=False):
             sub = sub.sort_values("row")

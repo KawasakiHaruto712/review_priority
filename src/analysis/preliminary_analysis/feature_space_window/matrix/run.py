@@ -25,6 +25,8 @@ from src.analysis.preliminary_analysis.feature_space_window.matrix.aggregate imp
 from src.analysis.preliminary_analysis.feature_space_window.utils import constants
 from src.analysis.preliminary_analysis.pretrained_encoders.io import store
 from src.analysis.preliminary_analysis.pretrained_encoders.model import set_transformer as st
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import constants as pre
+from src.analysis.preliminary_analysis.pretrained_encoders.utils import variant
 
 logger = logging.getLogger(__name__)
 KIND = "feature_distance"
@@ -36,10 +38,10 @@ def out_root(project: str) -> Path:
 
 def settings_for(project: str) -> tuple[int, int]:
     """(k, 刻み)。どちらも本人が結果を見て constants.MATRIX_SETTINGS に書く（§9.1）。未記入なら止める。"""
-    s = constants.MATRIX_SETTINGS.get(project) or {}
+    s = constants.matrix_settings().get(project) or {}        # 2026-10-22：版の種類で切り替える（重みあり版は MATRIX_SETTINGS_POSW）
     k, step = s.get("size_days"), s.get("step_days")
     if not k or not step:
-        raise ValueError(f"[{project}] constants.MATRIX_SETTINGS に size_days（大きさの分析で選んだ k）と "
+        raise ValueError(f"[{project}] constants.MATRIX_SETTINGS（重みあり版は MATRIX_SETTINGS_POSW）に size_days（大きさの分析で選んだ k）と "
                          f"step_days（RQ1 の精度表と同じ刻み）を書いてください（いま size_days={k}・step_days={step}）")
     return int(k), int(step)
 
@@ -113,8 +115,9 @@ def run_project(project: str, versions: list[str], n_seeds: int | None = None) -
         probe_vals, gen_vals, rows = builder.version_values(res, pos, grid, names)
         mats = assemble(probe_vals, gen_vals, grid, names)
         base = out_root(project) / v
+        variant.warn_if_exists(base, f"{project} {v}")                # 上書きの警告（design.md §10.1。2026-10-22）
         meta = {"project": project, "version": v, "kind": KIND, "size_days": k, "step_days": step,
-                "n_repeats": len(seeds), "device": str(device)}
+                "n_repeats": len(seeds), "device": str(device), "variant": pre.ENCODER_VARIANT}
         for kind in ("probe", "general", "diff"):
             for m, mr in mats[kind].items():
                 writer.write_matrix(mr, meta, base / kind / m)
@@ -127,7 +130,7 @@ def run_project(project: str, versions: list[str], n_seeds: int | None = None) -
         logger.info(f"保存: {base}（{grid}×{grid}）")
     logger.info(f"probe: {save_probes(res, project)}")
     with open(out_root(project) / "run_meta.json", "w", encoding="utf-8") as f:
-        json.dump({"project": project, "kind": KIND, "size_days": k, "step_days": step, "seeds": seeds,
+        json.dump({"project": project, "kind": KIND, "variant": pre.ENCODER_VARIANT, "size_days": k, "step_days": step, "seeds": seeds,
                    "versions": {v: g for v, (_p, g) in grids.items()}, "device": str(device),
                    "cuda_memory_fraction": _fraction(),
                    "machine": {"host": platform.node(), "platform": platform.platform()},

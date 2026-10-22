@@ -210,17 +210,24 @@ _BCE_SUM = nn.BCEWithLogitsLoss(reduction="sum")
 
 
 def batch_backward(encoder: SetEncoder, head: Head, batch: list[TSet], scaler: Scaler, device: torch.device,
-                   micro_sets: int | None) -> float:
+                   micro_sets: int | None, pos_weight: float = 1.0) -> float:
     """1 バッチぶんの勾配を積む（更新はしない）。返り値はバッチ全体の平均の損失。
 
     勾配累積（design.md §4。2026-10-19）：バッチを micro_sets 個の集合ずつに分けて順伝播・逆伝播し、勾配を足し合わせる。
     各かたまりは「かたまりの損失の和 ÷ バッチ全体の有効な Change の数 N」を逆伝播するので、合計はバッチ全体の平均の損失の勾配と
     数学的に同じになる（勾配は和について線形。集合どうしは互いに影響しないので、かたまりごとのパディングの違いも効かない）。
     micro_sets が None ならバッチをまとめて 1 回で計算する。
+
+    2026-10-22 追加（design.md §15.3。重みあり版）：pos_weight ＝ w のとき、正例の項を w 倍した BCE を「重みの合計」（正例 w・負例 1 の和）で割る。
+    入力の集合（文脈）は全件のまま変えない。w ＝ 1 なら重みの合計は n_total で、今までと同じ計算になる。
     """
     n_total = sum(len(s) for s in batch)
     if n_total == 0:
         return float("nan")
+    n_pos = sum(float(np.sum(np.asarray(s.labels, dtype=np.float64))) for s in batch)
+    w_total = (n_total - n_pos) + pos_weight * n_pos            # 重みの合計（w ＝ 1 なら n_total）
+    loss_fn = _BCE_SUM if pos_weight == 1.0 else nn.BCEWithLogitsLoss(
+        reduction="sum", pos_weight=torch.tensor(float(pos_weight), device=device))
     size = len(batch) if micro_sets is None else max(1, int(micro_sets))
     total = 0.0
     for chunk in _iter_batches(batch, size):
@@ -228,7 +235,7 @@ def batch_backward(encoder: SetEncoder, head: Head, batch: list[TSet], scaler: S
         emb = encoder(feats, valid, _context_batch(chunk, feats.shape[1], device))
         logits = head(emb)                    # (B, L)
         m = valid.reshape(-1)
-        loss = _BCE_SUM(logits.reshape(-1)[m], labels.reshape(-1)[m]) / n_total
+        loss = loss_fn(logits.reshape(-1)[m], labels.reshape(-1)[m]) / (n_total if pos_weight == 1.0 else w_total)
         loss.backward()
         total += float(loss.detach())
         del feats, labels, valid, emb, logits, loss   # かたまりの中間の値を次のかたまりの前に手放す
@@ -263,11 +270,12 @@ def _check_finite(encoder: SetEncoder, head: Head, batch: list[TSet], loss: floa
                              f"勾配 {len(what['grad'])} 個・重み {len(what['weight'])} 個）", info)
 
 
-def pretrain(pretrain_sets: list[TSet], scaler: Scaler, seed: int, device: torch.device):
+def pretrain(pretrain_sets: list[TSet], scaler: Scaler, seed: int, device: torch.device, pos_weight: float = 1.0):
     """エンコーダ＋仮ヘッドを「Δ以内レビュー(0/1)」予測で学習し、（凍結）エンコーダと仮ヘッドを返す。
 
     仮ヘッド（＝汎用ヘッド）は評価・保存に使うため破棄せず返す。
     バッチごとに損失・勾配・更新後の重みが有限かを確かめ、非有限なら NonFiniteError で止める（design.md §4。2026-10-20）。
+    pos_weight：損失の正例の重み w（重みあり版。design.md §15.3。2026-10-22）。1.0 なら今までと同じ（重みなし版）。
     """
     torch.manual_seed(seed)
     encoder = SetEncoder(constants.D_MODEL, constants.N_LAYERS, constants.N_HEADS,
@@ -285,7 +293,7 @@ def pretrain(pretrain_sets: list[TSet], scaler: Scaler, seed: int, device: torch
         for b, batch in enumerate(_iter_batches(shuffled, constants.PRETRAIN_BATCH_SETS), start=1):
             # 2026-10-19 改めた：勾配累積（PRETRAIN_MICRO_SETS 個ずつ。design.md §4）。旧版はバッチをまとめて 1 回で計算していた
             opt.zero_grad()
-            loss = batch_backward(encoder, head, batch, scaler, device, constants.PRETRAIN_MICRO_SETS)
+            loss = batch_backward(encoder, head, batch, scaler, device, constants.PRETRAIN_MICRO_SETS, pos_weight)
             opt.step()
             _check_finite(encoder, head, batch, loss, epoch, b)   # 2026-10-20：NaN の点検（§4）
 
@@ -322,6 +330,13 @@ def _flatten(embeds: list[np.ndarray], sets: list[TSet]):
     X = np.concatenate(embeds, axis=0) if embeds else np.zeros((0, constants.D_MODEL), np.float32)
     y = np.array([lab for s in sets for lab in s.labels], dtype=np.float32)
     return X, y
+
+
+def class_balance_weight(sets: list[TSet]) -> float:
+    """w ＝ 負例の数 ÷ 正例の数（Change × 日の件数。design.md §15.3。重みあり版の事前学習の正例の重み）。正例がなければ 1。"""
+    n_pos = sum(float(np.sum(np.asarray(s.labels, dtype=np.float64))) for s in sets)
+    n_all = sum(len(s) for s in sets)
+    return float((n_all - n_pos) / n_pos) if n_pos > 0 else 1.0
 
 
 def train_probe(train_embeds: list[np.ndarray], train_sets: list[TSet], seed: int, device: torch.device) -> Head:

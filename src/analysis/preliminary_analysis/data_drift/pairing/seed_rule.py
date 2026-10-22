@@ -5,13 +5,21 @@
 
 - 欠測（missing ＝ 1）の seed を除く。
 - 残りを recall@pos → AUC → seed 番号の昇順に並べ、(件数 − 1) ÷ 2 番目（切り捨て。0 始まり）を選ぶ（5 個なら 3 番目）。
+  （2026-10-22）重みあり版は F1（plug-in）→ AUC → seed 番号（metrics_for）。
 - 全部欠測（または recall@pos が全部 NaN）なら選ばない（その評価日・行は比べない）。
 """
 from __future__ import annotations
 
 import pandas as pd
 
-SELECT_METRICS = ("recall@pos", "auc")   # 並べる順（concept_drift_cause の SELECT_METRICS と同じ）
+SELECT_METRICS = ("recall@pos", "auc")   # 並べる順（concept_drift_cause の SELECT_METRICS と同じ。重みなし版）
+# 2026-10-22（design.md §10.1・concept_drift_cause/design.md §11.6）：版の種類で並べる指標を変える。重みあり版は F1（plug-in）→ AUC
+SELECT_METRICS_BY_VARIANT = {"base": SELECT_METRICS, "posw": ("f1_plugin", "auc")}
+
+
+def metrics_for(variant_name: str) -> tuple:
+    """版の種類に合う並べる指標（base：recall@pos → AUC、posw：f1_plugin → AUC。最後は seed 番号）。"""
+    return SELECT_METRICS_BY_VARIANT[variant_name]
 
 
 def median_seed(sub: pd.DataFrame, metrics=SELECT_METRICS) -> int | None:
