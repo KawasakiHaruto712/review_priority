@@ -209,6 +209,9 @@ lookback_window/
   0.5 の指標・recall@pos などは今までどおり。汎用ヘッドの基準線にも同じ指標を出す。
 - **窓長の決め方（重みあり版）**：要約表・順位の集計（§11.3）・報告用の表（§11.4）を `--metric f1_plugin` で出し、**F1（plug-in）の平均が最良の窓長**を本人が選ぶ
   （`concept_drift_detection` の重みあり版の窓長に書く）。重みなし版は recall@pos で選んだまま（§16）。
+  （2026-10-22 改めた。本人判断）**`--mode select` で自動で選ぶ**：`summary/summary_f1_plugin.csv` の `Ave` が最良（同点なら `Ave_std` が小さい方）の窓長を、
+  リポジトリごとに `report/selected_window.json`（重みあり版の出力先の下）に書く（値と指標名だけ）。精度表は、手で書いた `WINDOW_DAYS_POSW` があれば優先し、
+  なければこの値を読む（`pretrained_encoders/design.md` §15.5）。先に `--mode plot --metric f1_plugin` で要約表を作っておく。
 - **並べて回す**：リポジトリごとに別々のプロセスで並べる仕組み（`pretrained_encoders/design.md` §14.7 の複製。`--workers`・`--gpu-share`。1 つあたり 1.6 GB）を入れる。
   §16 の実行は 1 つのプロセスで約 6 時間だったので、並べれば最も重いリポジトリの時間（2 時間前後の見込み）で済む。
 - 重みなし版の結果は回し直さない（plug-in の F1 も出し直さない。`--mode recompute` で保存済みの予測から後で出せる）。

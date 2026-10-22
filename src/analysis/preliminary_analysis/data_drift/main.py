@@ -132,6 +132,9 @@ def compare(project: str, versions: list[str]) -> None:
 
     plotter.configure()
     k = (fsw.matrix_settings().get(project) or {}).get("size_days")   # 版の種類に合う k（2026-10-22）
+    if not k and fsw.fraction_grid():                                  # 重みあり版は --mode select の結果（手で書いた値が優先）
+        from src.analysis.preliminary_analysis.feature_space_window.matrix import run as fsw_run
+        k = fsw_run._selected_size_posw().get(project)
     labels = {time_distance.KIND: f"RQ1：時期のずれ（直前 {det.window_for(project)} 日の窓）",
               feature_distance.KIND: f"RQ2：特徴のずれ（近い {k} 日）"}
     out_dir = writer.compare_dir(project)

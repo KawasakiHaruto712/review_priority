@@ -228,6 +228,9 @@ feature_space_window/
 - **大きさ k と刻み（重みあり版）**：`MATRIX_SETTINGS` を版の種類ごとに持つ。重みあり版の k は**大きさの分析（重みあり版）の F1（plug-in）の最良**、
   刻みは**重みあり版の RQ1 の窓長**（`concept_drift_detection` の重みあり版の窓長）を、本人が結果を見て書く。重みなし版は今の値（§9.1）のまま。
 - 順位の集計（§5.1）と報告用の表（§5.2）は `--metric f1_plugin` で出す。
+- （2026-10-22 追加。本人判断）**k は `--mode select` で自動で選ぶ**：`summary/summary_f1_plugin.csv` の `Ave` が最良（同点なら `Ave_std` が小さい方）の大きさを、
+  リポジトリごとに `report/selected_size.json`（重みあり版の出力先の下）に書く（値と指標名だけ）。精度表は、手で書いた `MATRIX_SETTINGS_POSW` の `size_days` があれば優先し、
+  なければこの値を読む。どちらにもなければそのリポジトリだけ止まる（`pretrained_encoders/design.md` §15.5）。
 - （2026-10-22 追加。本人判断）**重みあり版の特徴のずれ×評価時期の精度表は 3 × 3**（定義は `pretrained_encoders/design.md` §15.9）。この分析での中身：
   - 刻み ＝ 周期 ÷ 3（版ごと）。§9.1 の「刻み ＝ RQ1 の窓長」「行の数 ＝ N_v」は重みあり版では使わない。`MATRIX_SETTINGS_POSW` の `step_days` は使わず、`size_days`（k）だけを書く。
   - 行 d ＝ 特徴空間で近い順に「刻み × d ＋ 1 〜 刻み × d ＋ k 番目」の日（d ＝ 0・1・2）。近さの測り方（§3）と seed ごとに選ぶことは同じ。

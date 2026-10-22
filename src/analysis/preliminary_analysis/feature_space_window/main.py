@@ -74,7 +74,7 @@ def run(project: str, versions: list[str], n_seeds: int | None, sizes: list[int]
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="feature_space_window：特徴空間で近い過去の日で probe を学習する（RQ2）")
-    ap.add_argument("--mode", choices=["run", "plot", "rank", "report", "matrix"], default="run",
+    ap.add_argument("--mode", choices=["run", "plot", "rank", "report", "matrix", "select"], default="run",
                     help="rank は順位の集計（§5.1）、report は 6 件をまとめた報告用の表（run・rank の後。§5.2）、"
                          "matrix は特徴のずれ×評価時期の精度表（§9）")
     ap.add_argument("--project", default=None, help="対象（未指定・'all' なら PROJECTS の 6 件を順に）")
@@ -122,6 +122,12 @@ def main() -> None:
         if failed:
             logger.error(f"失敗したリポジトリ：{failed}")
             sys.exit(1)
+        return
+    if args.mode == "select":   # 重みあり版の大きさ k を自動で選ぶ（design.md §10.1。2026-10-22）
+        from src.analysis.preliminary_analysis.feature_space_window.evaluation import select_best
+        out = select_best.select(projects, args.metric, constants.OUTPUT_ROOT, constants.SIZE_LABELS,
+                                 lower_is_better=args.metric in constants.LOWER_IS_BETTER)
+        logger.info(f"選んだ大きさ: {out}" if out else "選べたリポジトリがありません（先に --mode run と --mode plot）")
         return
     if args.mode == "report":   # 6 件をまとめて 1 回（design.md §5.2。2026-10-21）
         from src.analysis.preliminary_analysis.feature_space_window.evaluation.ranking import size_labels_desc
