@@ -81,8 +81,18 @@ IG_TARGETS_TIME = {
                   "14.0.0": {"distances": [0, 2], "positions": [0]}},
     "qtbase": {"6.6.0": {"distances": [0, 1], "positions": [2]}},
 }
-# RQ2：今回は空（計算しない）。中身を入れれば同じ仕組みで回る
-IG_TARGETS_FEATURE = {}
+# RQ2：~~今回は空（計算しない）。中身を入れれば同じ仕組みで回る~~
+# 2026-10-23 改めた（本人判断 (b)。design.md §11.7）：g0 が上回った列と下回った列の両方（各 3 列）。行は g0 と、その列で比べた相手
+IG_TARGETS_FEATURE = {
+    # g0 が上回った列
+    "go": {"go1.21": {"distances": [0, 1], "positions": [0]},
+           "go1.24": {"distances": [0, 2], "positions": [1]}},
+    "qtdeclarative": {"6.7.0": {"distances": [0, 2], "positions": [2]}},
+    # g0 が下回った列
+    "typo3_cms": {"13.1.0": {"distances": [0, 1], "positions": [0]},
+                  "13.3.0": {"distances": [0, 1], "positions": [2]}},
+    "qtcreator": {"14.0.0": {"distances": [0, 1], "positions": [0]}},
+}
 
 # ── IG（§2） ─────────────────────────────────────────
 IG_STEPS = 32            # 積分の段階数。基準点から実際の値までをこの数で刻む
