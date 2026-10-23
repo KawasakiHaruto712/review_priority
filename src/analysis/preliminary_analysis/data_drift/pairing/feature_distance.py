@@ -87,4 +87,8 @@ def for_version(project: str, version: str) -> FeatureDistancePairing:
     td["day"] = _to_date(td["day"])
     td["train_day"] = _to_date(td["train_day"])
     train = {(d, int(r)): sorted(g["train_day"].tolist()) for (d, r), g in td.groupby(["day", "row"])}
-    return FeatureDistancePairing(int(meta["size_days"]), int(meta["step_days"]), rows, positions, seeds, train)
+    # 2026-10-23 直した：重みあり版（3 × 3）は step_days を版ごとの辞書 {版 -> 刻み} で保存する（feature_space_window の matrix/run.py）。
+    # 辞書ならその版の値、数ならそのまま（重みなし版）。旧版は int(meta["step_days"]) で、辞書のとき TypeError で止まっていた
+    step = meta["step_days"]
+    step = step[version] if isinstance(step, dict) else step
+    return FeatureDistancePairing(int(meta["size_days"]), int(step), rows, positions, seeds, train)
