@@ -101,6 +101,36 @@ def _range_for(metric: str) -> tuple[float, float]:
     return _AXIS_RANGE.get(metric, _DEFAULT_RANGE)
 
 
+# ── 図の表記（design.md §10.2。2026-10-24。図の表示だけを変え、計算・保存物は変えない） ──
+# 行は g をやめて d にそろえ、名前は論文の言葉（特徴空間上の距離 d）。列は表示だけ入れ替える：表示の番号 p' ＝ (N_v − 1) − 保存物の p
+# （保存物は p0 ＝ リリース直前＝後期。図は左から p0 ＝ 初期 → 後期）。f1_plugin は図の中だけ F1-score と書く。
+# concept_drift_detection/visualization/plotter.py の同じ部分の複製（行の名前だけ違う）
+ROW_AXIS_LABEL = "特徴空間上の距離 d（d0 ＝ 最も似ている）"
+TABLE_NAME = "特徴空間上の距離 × 評価時期の精度表"
+COL_AXIS_LABEL = "評価時期 p（p0 ＝ リリース初期）"
+_PHASE_NAMES = ("初期", "中期", "後期")          # 3 × 3 のときだけ目盛りに添える
+_METRIC_DISPLAY = {"f1_plugin": "F1-score"}
+
+
+def metric_label(metric: str) -> str:
+    """図に書く指標の名前（f1_plugin → F1-score。差分 *_diff は元の名前に _diff を付けたまま）。"""
+    base, diff = (metric[:-5], "_diff") if metric.endswith("_diff") else (metric, "")
+    return _METRIC_DISPLAY.get(base, base) + diff
+
+
+def display_cols(arr: np.ndarray) -> np.ndarray:
+    """列を表示の向きに並べ替える（[:, 表示の p'] ＝ [:, (N_v − 1) − p]）。1 次元なら要素を逆順にする。"""
+    a = np.asarray(arr)
+    return a[..., ::-1]
+
+
+def col_ticklabels(ticks: list[int], n: int) -> list[str]:
+    """列の目盛り（表示の番号）。3 列のときは「p0（初期）」のように時期を添える。"""
+    if n == len(_PHASE_NAMES):
+        return [f"p{t}（{_PHASE_NAMES[t]}）" for t in ticks]
+    return [f"p{t}" for t in ticks]
+
+
 def plot_heatmap(result: MatrixResult, path: Path, dpi: int = 150) -> None:
     """正方形ヒートマップ（縦=距離 d/滞留期間、横=位置 p、色=指標値）。
 
@@ -113,7 +143,9 @@ def plot_heatmap(result: MatrixResult, path: Path, dpi: int = 150) -> None:
     # カラーバーの値域は指標ごとに固定（ランダム基準に基づく。_AXIS_RANGE 参照）。
     # バージョン間で色が比較可能になる。
     vmin, vmax = _range_for(result.metric)
-    im = ax.imshow(result.value, origin="lower", aspect="auto",
+    value = display_cols(result.value)      # 2026-10-24：列を表示の向き（左＝初期）に並べ替える（§10.2）
+    day_std = None if result.day_std is None else display_cols(result.day_std)
+    im = ax.imshow(value, origin="lower", aspect="auto",
                    cmap=_cmap_for(result.metric), vmin=vmin, vmax=vmax)
     # 各セルの数値表示は既定オフ（26×26 では詰まって読みにくい）。constants で切替可。
     # 2026-10-22：小さい表（重みあり版の 3 × 3）は常に数値を書き、「± 評価日の間の標準偏差」も添える（HEATMAP_SHOW_SPREAD で外せる。§10.1）
@@ -121,25 +153,28 @@ def plot_heatmap(result: MatrixResult, path: Path, dpi: int = 150) -> None:
     if constants.HEATMAP_SHOW_CELL_VALUES or small:
         for d in range(n):
             for p in range(n):
-                v = result.value[d, p]
+                v = value[d, p]
                 if np.isnan(v):
                     continue
                 r, g, b, _ = im.cmap(im.norm(v))  # 表示色に一致
                 lum = 0.299 * r + 0.587 * g + 0.114 * b
                 text = constants.HEATMAP_VALUE_FMT.format(v)
-                sd = None if result.day_std is None else result.day_std[d, p]
+                sd = None if day_std is None else day_std[d, p]
                 if small and constants.HEATMAP_SHOW_SPREAD and sd is not None and not np.isnan(sd):
                     text += f"\n±{sd:.2f}"
                 ax.text(p, d, text, ha="center", va="center",
                         fontsize=11 if small else 6, color="black" if lum > 0.5 else "white")
-    ax.set_xlabel("評価時期 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
-    ax.set_ylabel("特徴のずれ g（近い順に k 日ずつの何番目の群か。g0 ＝ 最も近い）")
+    # ~~ax.set_xlabel("評価時期 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")~~
+    # ~~ax.set_ylabel("特徴のずれ g（近い順に k 日ずつの何番目の群か。g0 ＝ 最も近い）")~~
+    # 2026-10-24 改めた（§10.2）：行は d・論文の言葉・列は表示の番号・F1-score・題から「行列」を外す
+    ax.set_xlabel(COL_AXIS_LABEL)
+    ax.set_ylabel(ROW_AXIS_LABEL)
     _step = max(1, n // 13)  # ラベルが詰まらないよう間引く（26 なら 2 つおき）
     _ticks = list(range(0, n, _step))
-    ax.set_xticks(_ticks); ax.set_xticklabels([f"p{t}" for t in _ticks], fontsize=7)
-    ax.set_yticks(_ticks); ax.set_yticklabels([f"d{t}" for t in _ticks], fontsize=7)
-    ax.set_title(f"{result.metric}（学習×予測 行列）")
-    fig.colorbar(im, ax=ax, label=result.metric)
+    ax.set_xticks(_ticks); ax.set_xticklabels(col_ticklabels(_ticks, n), fontsize=9 if small else 7)
+    ax.set_yticks(_ticks); ax.set_yticklabels([f"d{t}" for t in _ticks], fontsize=9 if small else 7)
+    ax.set_title(f"{metric_label(result.metric)}（{TABLE_NAME}）")
+    fig.colorbar(im, ax=ax, label=metric_label(result.metric))
     fig.tight_layout()
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
@@ -152,17 +187,18 @@ def plot_position_lines(result: MatrixResult, path: Path, dpi: int = 150) -> Non
     n = result.bin_count
     fig, ax = plt.subplots(figsize=(6, 5))
     positions = np.arange(n)
+    value = display_cols(result.value)      # 2026-10-24：列を表示の向きに（§10.2）
     for d in range(n):
-        row = result.value[d]
+        row = value[d]
         if np.isnan(row).all():
             continue
         ax.plot(positions, row, marker="o", label=f"d={d}")
-    ax.set_xlabel("評価時期 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
-    ax.set_ylabel(result.metric)
+    ax.set_xlabel(COL_AXIS_LABEL)
+    ax.set_ylabel(metric_label(result.metric))
     ax.set_ylim(*_range_for(result.metric))  # 指標ごとに値域固定（_AXIS_RANGE。バージョン間で縦軸を比較可能に）
-    ax.set_xticks(positions); ax.set_xticklabels([f"p{p}" for p in range(n)])
-    ax.set_title(f"{result.metric}（特徴のずれ固定の評価時期別）")
-    ax.legend(title="特徴のずれ g", fontsize=8)
+    ax.set_xticks(positions); ax.set_xticklabels(col_ticklabels(list(range(n)), n))
+    ax.set_title(f"{metric_label(result.metric)}（{TABLE_NAME}：距離を固定した評価時期別）")
+    ax.legend(title=ROW_AXIS_LABEL, fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
@@ -188,11 +224,12 @@ def plot_heatmap_relative(result: MatrixResult, path: Path, dpi: int = 150) -> N
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     n = result.bin_count
-    rel = _relative_matrix(result)
+    rel = display_cols(_relative_matrix(result))   # 2026-10-24：列を表示の向きに（§10.2）
     # 凡例（カラーバー）の下端は 0 固定（最良セル=1）。0 からの位置を正しく表す。
     vmin, vmax = 0.0, 1.0
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(rel, origin="lower", aspect="auto", cmap=_GOOD_BAD_CMAP, vmin=vmin, vmax=vmax)
+    small = n <= constants.SMALL_GRID_MAX
     if constants.HEATMAP_SHOW_CELL_VALUES:
         for d in range(n):
             for p in range(n):
@@ -203,14 +240,14 @@ def plot_heatmap_relative(result: MatrixResult, path: Path, dpi: int = 150) -> N
                 lum = 0.299 * r + 0.587 * g + 0.114 * b
                 ax.text(p, d, constants.HEATMAP_VALUE_FMT.format(v), ha="center", va="center",
                         fontsize=6, color="black" if lum > 0.5 else "white")
-    ax.set_xlabel("評価時期 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
-    ax.set_ylabel("特徴のずれ g（近い順に k 日ずつの何番目の群か。g0 ＝ 最も近い）")
+    ax.set_xlabel(COL_AXIS_LABEL)
+    ax.set_ylabel(ROW_AXIS_LABEL)
     _step = max(1, n // 13)  # ラベルが詰まらないよう間引く（26 なら 2 つおき）
     _ticks = list(range(0, n, _step))
-    ax.set_xticks(_ticks); ax.set_xticklabels([f"p{t}" for t in _ticks], fontsize=7)
-    ax.set_yticks(_ticks); ax.set_yticklabels([f"d{t}" for t in _ticks], fontsize=7)
-    ax.set_title(f"{result.metric}（相対: 最良セル=1）")
-    fig.colorbar(im, ax=ax, label=f"{result.metric} 相対（最良=1, 高いほど良い）")
+    ax.set_xticks(_ticks); ax.set_xticklabels(col_ticklabels(_ticks, n), fontsize=9 if small else 7)
+    ax.set_yticks(_ticks); ax.set_yticklabels([f"d{t}" for t in _ticks], fontsize=9 if small else 7)
+    ax.set_title(f"{metric_label(result.metric)}（{TABLE_NAME}。相対: 最良セル=1）")
+    fig.colorbar(im, ax=ax, label=f"{metric_label(result.metric)} 相対（最良=1, 高いほど良い）")
     fig.tight_layout()
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
@@ -221,7 +258,7 @@ def plot_position_lines_relative(result: MatrixResult, path: Path, dpi: int = 15
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     n = result.bin_count
-    rel = _relative_matrix(result)
+    rel = display_cols(_relative_matrix(result))   # 2026-10-24：列を表示の向きに（§10.2）
     fig, ax = plt.subplots(figsize=(6, 5))
     positions = np.arange(n)
     for d in range(n):
@@ -229,12 +266,12 @@ def plot_position_lines_relative(result: MatrixResult, path: Path, dpi: int = 15
         if np.isnan(row).all():
             continue
         ax.plot(positions, row, marker="o", label=f"d={d}")
-    ax.set_xlabel("評価時期 p（リリースの何段前を予測するか。p0 ＝ リリースの直前）")
-    ax.set_ylabel(f"{result.metric} 相対（最良=1）")
+    ax.set_xlabel(COL_AXIS_LABEL)
+    ax.set_ylabel(f"{metric_label(result.metric)} 相対（最良=1）")
     ax.set_ylim(0.0, 1.0)  # 下端は 0 固定（最良=1）
-    ax.set_xticks(positions); ax.set_xticklabels([f"p{p}" for p in range(n)])
-    ax.set_title(f"{result.metric}（相対: 特徴のずれ固定の評価時期別）")
-    ax.legend(title="特徴のずれ g", fontsize=8)
+    ax.set_xticks(positions); ax.set_xticklabels(col_ticklabels(list(range(n)), n))
+    ax.set_title(f"{metric_label(result.metric)}（相対: {TABLE_NAME}：距離を固定した評価時期別）")
+    ax.legend(title=ROW_AXIS_LABEL, fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=dpi)
     plt.close(fig)

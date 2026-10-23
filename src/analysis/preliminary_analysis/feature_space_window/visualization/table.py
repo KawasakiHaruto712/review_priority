@@ -90,7 +90,8 @@ def render_table(val, std, miss, total, metric: str, out_path: Path) -> None:
         cell_text.append(line)
     fig, ax = plt.subplots(figsize=(2.2 * len(cols) + 1, 0.9 * len(rows) + 1))
     ax.axis("off")
-    ax.set_title(f"{metric}：特徴空間で近い k 日 × バージョン（値 ± 標準偏差。右端 Ave＝全評価日の平均±標準偏差）", fontsize=11)
+    # 2026-10-24（design.md §10.2）：図の中だけ f1_plugin を F1-score と書く
+    ax.set_title(f"{constants.METRIC_DISPLAY.get(metric, metric)}：特徴空間で近い k 日 × バージョン（値 ± 標準偏差。右端 Ave＝全評価日の平均±標準偏差）", fontsize=11)
     tbl = ax.table(cellText=cell_text, rowLabels=rows, colLabels=cols, cellLoc="center", rowLoc="center", loc="center")
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(9)

@@ -110,14 +110,27 @@ def _acc_text(info) -> str:
     return f"recall@pos={f('recall_pos')}  AUC={f('auc')}"
 
 
+def disp_position(p, n_cols: int) -> int:
+    """保存物の評価時期 p を図の番号 p' ＝ (列の数 − 1) − p にする（図は p0 ＝ リリース初期。design.md §11.8。2026-10-24）。"""
+    return int(n_cols) - 1 - int(p)
+
+
+def position_text(p, n_cols: int) -> str:
+    """図に書く評価時期（例「p0（初期）」。3 列のときだけ時期を添える）。p は保存物の番号。"""
+    q = disp_position(p, n_cols)
+    names = constants.PHASE_NAMES
+    return f"p{q}（{names[q]}）" if int(n_cols) == len(names) else f"p{q}"
+
+
 def _title(project, version, series, group, distance=None, position=None,
-           info: pd.Series | None = None, row_label: str = "時期のずれ") -> str:
-    """~~距離・位置~~ 2026-10-21 改めた：行は row_label（RQ1「時期のずれ」・RQ2「特徴のずれ」）、列は「評価時期」。"""
+           info: pd.Series | None = None, row_label: str = "時間的な距離 d", n_cols: int = 3) -> str:
+    """~~距離・位置~~ 2026-10-21 改めた：行は row_label（RQ1「時期のずれ」・RQ2「特徴のずれ」）、列は「評価時期」。
+    2026-10-24 改めた（§11.8）：行は論文の言葉（時間的な距離 d／特徴空間上の距離 d）、評価時期は図の番号（p0 ＝ 初期）。"""
     cell = []
     if distance is not None:
         cell.append(f"{row_label}{distance}")
     if position is not None:
-        cell.append(f"評価時期{position}")
+        cell.append(f"評価時期 {position_text(position, n_cols)}")
     head = (f"{project} {version}  {' × '.join(cell)}  "
             f"{SERIES_LABEL.get(series, series)} / {GROUP_LABEL.get(group, group)}")
     if info is None:
@@ -130,7 +143,7 @@ def _title(project, version, series, group, distance=None, position=None,
 
 
 def plot_cell(stats, info, project, version, series, group, distance, position,
-              lim: float, out_path: Path, row_label: str = "時期のずれ") -> bool:
+              lim: float, out_path: Path, row_label: str = "時間的な距離 d", n_cols: int = 3) -> bool:
     """個別セル図を 1 枚描く（§9.4.2）。描けたら True。"""
     row = _row(stats, distance, position)
     if row is None:
@@ -144,7 +157,7 @@ def plot_cell(stats, info, project, version, series, group, distance, position,
                show_values=constants.PLOT_SHOW_VALUES)
     merged = row if irow is None else pd.concat([row, irow.drop(labels=["distance", "position"],
                                                                errors="ignore")])
-    ax.set_title(_title(project, version, series, group, distance, position, merged, row_label), fontsize=9)
+    ax.set_title(_title(project, version, series, group, distance, position, merged, row_label, n_cols), fontsize=9)
     ax.set_xlabel("平均 IG（左＝優先度を下げる / 右＝上げる）", fontsize=8)
     ax.tick_params(axis="x", labelsize=8)
     fig.tight_layout()
@@ -157,10 +170,12 @@ def plot_cell(stats, info, project, version, series, group, distance, position,
 
 
 def plot_grid(stats, info, project, version, series, group, *, fixed: str, fixed_value,
-              panel_values: list, lim: float, out_path: Path, row_label: str = "時期のずれ") -> bool:
+              panel_values: list, lim: float, out_path: Path, row_label: str = "時間的な距離 d",
+              n_cols: int = 3) -> bool:
     """格子一覧を 1 枚描く（§9.4.6）。
 
     fixed が "distance" なら距離を固定して位置を並べ、"position" なら逆。
+    評価時期は保存物の番号で受け取り、図の番号（p0 ＝ 初期）で書く。並べる順は呼ぶ側が決める（§11.8。2026-10-24）。
     中身は個別セル図と同じで、**集約はしない**。ばらつきは描かない（§9.4.4）。
     """
     n = len(panel_values)
@@ -184,7 +199,7 @@ def plot_grid(stats, info, project, version, series, group, *, fixed: str, fixed
         # パネル見出しは 2 行（§9.4.7）。セルの規模が不揃いなので、AUC だけだと
         # 「1 日・正例 1 件のセル」と「7 日・14 件のセル」を同列に比べてしまう（glance で 14 倍の開き）。
         irow = _row(info, d, p)
-        head = f"{'評価時期' if fixed == 'distance' else row_label}{v}"
+        head = f"評価時期 {position_text(v, n_cols)}" if fixed == "distance" else f"{row_label}{v}"
         if irow is not None:
             head += f"  {_acc_text(irow)}"
         label = "正例" if group == "pos" else "負例"
@@ -198,8 +213,8 @@ def plot_grid(stats, info, project, version, series, group, *, fixed: str, fixed
     for j in range(n, rows * cols):
         axes[j // cols][j % cols].axis("off")
 
-    label = row_label if fixed == "distance" else "評価時期"
-    fig.suptitle(f"{project} {version}  {label}{fixed_value} の一覧  "
+    label = f"{row_label}{fixed_value}" if fixed == "distance" else f"評価時期 {position_text(fixed_value, n_cols)}"
+    fig.suptitle(f"{project} {version}  {label} の一覧  "
                  f"{SERIES_LABEL.get(series, series)} / {GROUP_LABEL.get(group, group)}",
                  fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.97))

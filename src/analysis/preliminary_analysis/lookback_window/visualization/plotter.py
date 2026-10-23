@@ -62,9 +62,10 @@ def plot_version(project: str, version: str, metric: str, out_path: Path,
             ax.plot(s.index, s.values, color="black", linestyle="--", linewidth=1.2,
                     marker="", label=f"general (欠測 {miss}/{total})")
 
-    ax.set_title(f"{project} {version}：{metric}（窓長ごと・日次）")
+    # 2026-10-24（design.md §18）：図の中だけ f1_plugin を F1-score と書く
+    ax.set_title(f"{project} {version}：{constants.METRIC_DISPLAY.get(metric, metric)}（窓長ごと・日次）")
     ax.set_xlabel("評価日")
-    ax.set_ylabel(metric)
+    ax.set_ylabel(constants.METRIC_DISPLAY.get(metric, metric))
     ax.legend(fontsize=8, ncol=2)
     ax.grid(True, alpha=0.3)
     fig.autofmt_xdate()

@@ -75,3 +75,5 @@ DRAW_GENERAL_DEFAULT = False   # 汎用ヘッド（チューニングなし）�
 # 全部描くなら list(WINDOWS_DAYS)。例：1d/1w/2M だけなら [1, 7, 60]。
 # `--windows` を渡すとこの既定を上書きできる。
 PLOT_WINDOWS_DAYS = [1, 7, 60]   # 1d / 1w / 2M
+# 図の中だけで使う指標の表示名（design.md §18。2026-10-24）。フォルダ名・ファイル名・ほかの指標は変えない
+METRIC_DISPLAY = {"f1_plugin": "F1-score"}

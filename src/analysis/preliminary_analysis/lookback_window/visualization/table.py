@@ -111,7 +111,8 @@ def render_table(val: pd.DataFrame, std: pd.DataFrame, miss: pd.DataFrame, total
 
     fig, ax = plt.subplots(figsize=(2.2 * len(cols) + 1, 0.9 * len(rows) + 1))
     ax.axis("off")
-    ax.set_title(f"{metric}：窓長 × バージョン（値 ± 標準偏差。右端 Ave＝全評価日の平均±標準偏差）", fontsize=11)
+    # 2026-10-24（design.md §18）：図の中だけ f1_plugin を F1-score と書く
+    ax.set_title(f"{constants.METRIC_DISPLAY.get(metric, metric)}：窓長 × バージョン（値 ± 標準偏差。右端 Ave＝全評価日の平均±標準偏差）", fontsize=11)
     tbl = ax.table(cellText=cell_text, rowLabels=rows, colLabels=cols,
                    cellLoc="center", rowLoc="center", loc="center")
     tbl.auto_set_font_size(False)

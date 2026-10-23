@@ -101,3 +101,5 @@ PLOT_METRICS = ["auc", "recall@pos", "f1_plugin"]   # ヒートマップを描�
 HEATMAP_SHOW_CELL_VALUES = False
 HEATMAP_VALUE_FMT = "{:.2f}"
 SAVE_PER_REPEAT = True
+# 図の中だけで使う指標の表示名（design.md §10.2。2026-10-24）。フォルダ名・ファイル名・ほかの指標は変えない
+METRIC_DISPLAY = {"f1_plugin": "F1-score"}

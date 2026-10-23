@@ -17,6 +17,10 @@ DETECTION_ROOT = detection.OUTPUT_ROOT
 # feature_distance＝RQ2（特徴のずれ×評価時期の精度表。feature_space_window の出力ファイルを読む。コードは import しない）
 KINDS = ("time_distance", "feature_distance")
 ROW_LABEL = {"time_distance": "時期のずれ", "feature_distance": "特徴のずれ"}
+# 2026-10-24（design.md §11.8）：図に書く行の名前は論文の言葉にし、RQ1・RQ2 とも d にそろえる（ROW_LABEL は図以外のために残す）
+ROW_DISPLAY = {"time_distance": "時間的な距離 d", "feature_distance": "特徴空間上の距離 d"}
+# 図の評価時期は表示の番号 p' ＝ (列の数 − 1) − 保存物の p（保存物は p0 ＝ リリース直前）。3 列なら時期の名前を添える
+PHASE_NAMES = ("初期", "中期", "後期")
 FSW_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "feature_space_window"
 
 
