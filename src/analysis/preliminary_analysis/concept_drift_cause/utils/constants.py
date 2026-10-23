@@ -74,11 +74,29 @@ IG_TARGETS = {p: {latest_version(p): dict(ALL_CELLS)} for p in detection.PROJECT
 # neutron/cinder では最新版だが glance では古い版）ので、`--version` で並べるより取り違えが起きない。
 IG_TARGETS_OLDER = {p: {v: dict(ALL_CELLS) for v in older_versions(p)} for p in detection.PROJECTS}
 
+# 2026-10-23（design.md §11.7）：重みあり版は精度表の種類ごとに対象を分ける。上の IG_TARGETS は書き換えずに残す（重みなし版の対象）。
+# RQ1：F1 で d0 が負けた列の、d0 と勝った相手の行だけ（距離・位置は 0 始まり。p0 ＝ リリースの直前の 3 分の 1）
+IG_TARGETS_TIME = {
+    "qtcreator": {"17.0.0": {"distances": [0, 1], "positions": [0]},
+                  "14.0.0": {"distances": [0, 2], "positions": [0]}},
+    "qtbase": {"6.6.0": {"distances": [0, 1], "positions": [2]}},
+}
+# RQ2：今回は空（計算しない）。中身を入れれば同じ仕組みで回る
+IG_TARGETS_FEATURE = {}
+
 # ── IG（§2） ─────────────────────────────────────────
 IG_STEPS = 32            # 積分の段階数。基準点から実際の値までをこの数で刻む
 IG_STEP_CHUNK = 8        # 一度に計算する段階の数（メモリのため。勾配を足すので値には効かない。§2.4。2026-10-20）
 # 基準点は「その評価日の集合の平均」で固定（§2.3）。対象 Change だけを動かし、他は実際の値のまま。
 # 対象出力はロジット（確率ではない。§2.2）。
+
+# 2026-10-23（design.md §11.7。本人判断。§6.4 の「全件」の例外）：評価日ごとに正例は全件、負例は単純無作為抽出（非復元）。
+# 負例の件数 n ＝ ⌈n₀ ÷（1 ＋（n₀ − 1）÷ N）⌉（信頼度 95%・許容誤差 ±5%。有限母集団修正つき）。N ≤ n ならその日は全件。
+# その日に計算する全モデルで同じ Change を使う。乱数の種は project と評価日から決める（attribution/sampling.py）
+IG_SAMPLE_NEG = True
+IG_SAMPLE_N0 = 384
+# 汎用ヘッドの IG を計算するか（§11.7。今回は False＝計算しない。時間をすべて probe に回す）
+IG_GENERAL_HEAD = False
 
 # ── モデルの選択（§4） ───────────────────────────────
 # (評価日, 距離) ごとに、この指標が中央（5 個中 3 番目）だった seed を選ぶ。
@@ -105,6 +123,8 @@ def select_metrics() -> tuple:
 # ── 出力（§9） ───────────────────────────────────────
 IG_DAILY_NAME = "ig_daily.csv.gz"
 IG_META_NAME = "ig_daily_meta.json"
+IG_SAMPLE_NAME = "ig_sample.csv.gz"   # 対象の評価日の全 Change と、IG の計算に使ったか（§11.7。2026-10-23）
+COMPARE_DIRNAME = "compare"          # d0 と相手を並べた表の置き場所（extract/<名前>/ の下。§11.7）
 EXTRACT_DIRNAME = "extract"
 CSV_ENCODING = "utf-8-sig"   # Excel で開いても文字化けしないように BOM 付き
 
@@ -150,9 +170,17 @@ def grid_shape(n_panels: int) -> tuple[int, int]:
     return (-(-n_panels // cols), cols)      # 切り上げ除算
 
 
-def targets_for(project: str) -> dict:
+def targets(kind: str = "time_distance") -> dict:
+    """今の版の種類と精度表の種類に合う対象（project -> version -> 指定）。
+    2026-10-23（design.md §11.7）：重みあり版は IG_TARGETS_TIME（RQ1）／IG_TARGETS_FEATURE（RQ2）、重みなし版は今までどおり IG_TARGETS。"""
+    if pre_variant() == "posw":
+        return IG_TARGETS_FEATURE if kind == "feature_distance" else IG_TARGETS_TIME
+    return IG_TARGETS
+
+
+def targets_for(project: str, kind: str = "time_distance") -> dict:
     """その project の対象（version -> {"distances","positions"}）。"""
-    return dict(IG_TARGETS.get(project, {}))
+    return dict(targets(kind).get(project, {}))
 
 
 def resolve_axis(spec, grid: int) -> list[int]:

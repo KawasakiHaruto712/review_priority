@@ -29,6 +29,7 @@ import pandas as pd
 
 from src.analysis.background_problem.common.data_loader import load_changes, load_release_dates
 from src.analysis.preliminary_analysis.concept_drift_cause.attribution import integrated_gradients as ig
+from src.analysis.preliminary_analysis.concept_drift_cause.attribution import sampling
 from src.analysis.preliminary_analysis.concept_drift_cause.extraction import tables
 from src.analysis.preliminary_analysis.concept_drift_cause.io import ig_store
 from src.analysis.preliminary_analysis.concept_drift_cause.utils import constants
@@ -106,6 +107,14 @@ def _rows(run_id: str, day, position: int, distance, seed: int, head: str, prof:
         row.update({f: float(v) for f, v in zip(FEATURE_NAMES, vec)})
         out.append(row)
     return out
+
+
+def _sample_rows(run_id: str, day, eval_set, items) -> list[dict]:
+    """その日の全 Change を ig_sample の行にする（used ＝ IG の計算に使ったか。items が None なら全件使用）。design.md §11.7。"""
+    used = None if items is None else set(items)
+    return [{"run_id": run_id, "day": day.isoformat(), "change_id": cid, "label": int(lab),
+             "used": used is None or i in used}
+            for i, (cid, lab) in enumerate(zip(eval_set.ids, eval_set.labels))]
 
 
 def _resolve_encoders(project: str, device):
@@ -186,13 +195,17 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
         return 0
 
     eval_days = [d for d in sorted(day_sets) if d in pos_of and pos_of[d] in target_pos]
-    logger.info(f"対象の評価日: {len(eval_days)} 日")
-    rows, missing_probe = [], 0
+    logger.info(f"対象の評価日: {len(eval_days)} 日（負例の標本 {'あり（n₀=' + str(constants.IG_SAMPLE_N0) + '）' if constants.IG_SAMPLE_NEG else 'なし'}"
+                f"・汎用ヘッド {'計算する' if constants.IG_GENERAL_HEAD else '計算しない'}）")
+    rows, sample_rows, missing_probe = [], [], 0
     for n, X in enumerate(eval_days, 1):
         eval_set = day_sets[X]
         p0 = pos_of[X]
         feats_std = st.standardize_feats(scaler, eval_set.feats)
         ctx_block = st.context_block_mask(eval_set)   # 文脈のマスク（pretrained_encoders/design.md §12.4）
+        # 2026-10-23（design.md §11.7）：IG を計算する Change（正例は全件・負例は標本）。その日の全モデルで同じものを使う。文脈は全件のまま
+        items = (sampling.select_items(eval_set.labels, project, X, constants.IG_SAMPLE_N0)
+                 if constants.IG_SAMPLE_NEG else None)
         used_seeds = set()
         for d in distances:
             seed = chosen.get((X.isoformat(), str(d)))
@@ -206,15 +219,19 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
             head = st.head_from_vector(vec, device)
             st.freeze_for_gradients(head)
             prof = ig.day_profiles(encoders[seed][0], head, feats_std, eval_set.labels,
-                                   constants.IG_STEPS, device, ctx_block=ctx_block, step_chunk=constants.IG_STEP_CHUNK)
+                                   constants.IG_STEPS, device, ctx_block=ctx_block, step_chunk=constants.IG_STEP_CHUNK,
+                                   items=items)
             rows += _rows(run_id, X, p0, d, seed, "probe", prof)
             used_seeds.add(seed)
         # 汎用ヘッドは距離に依存しないので、その日に使われた seed の種類ぶんだけ（§5.5）
-        for seed in sorted(used_seeds):
+        # 2026-10-23：計算するかは設定で選ぶ（IG_GENERAL_HEAD。§11.7）
+        for seed in (sorted(used_seeds) if constants.IG_GENERAL_HEAD else []):
             prof = ig.day_profiles(encoders[seed][0], encoders[seed][1], feats_std,
                                    eval_set.labels, constants.IG_STEPS, device, ctx_block=ctx_block,
-                                   step_chunk=constants.IG_STEP_CHUNK)
+                                   step_chunk=constants.IG_STEP_CHUNK, items=items)
             rows += _rows(run_id, X, p0, "general", seed, "general", prof)
+        if used_seeds:      # 1 モデルでも計算した日だけ、その日の全 Change と使ったかを残す（§11.7）
+            sample_rows += _sample_rows(run_id, X, eval_set, items)
         if n % 10 == 0 or n == len(eval_days):
             logger.info(f"  {n}/{len(eval_days)} 日（{len(rows)} 行）")
     if missing_probe:
@@ -229,11 +246,12 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
                                                   "positions": sorted(target_pos),
                                                   "device": str(device),     # 回した機械（pretrained_encoders/design.md §14.5）
                                                   "variant": constants.pre_variant()}))   # 版の種類（2026-10-22）
+    ig_store.write_sample(sample_rows, out_dir)     # 計算に使った Change の ID（2026-10-23。§11.7）
     return len(rows)
 
 
 def specs_for(project: str, versions=None, all_versions: bool = False,
-              older_versions: bool = False) -> dict:
+              older_versions: bool = False, kind: str = "time_distance") -> dict:
     """その project で回す {版 -> 対象セルの指定}。
 
     既定は `constants.IG_TARGETS`（各プロジェクトの最新版）。CLI で上書きできる：
@@ -241,8 +259,9 @@ def specs_for(project: str, versions=None, all_versions: bool = False,
       `--older-versions` … **最新版を除く 4 版**（最新版を回し終えたあとに足す用）
       `--version V ...`  … 指定した版だけ
     IG_TARGETS に載っていない版を指定したときは「全距離 × 全位置」を既定とする。
+    2026-10-23：重みあり版は精度表の種類ごとの対象（IG_TARGETS_TIME／IG_TARGETS_FEATURE。design.md §11.7）。
     """
-    default = constants.targets_for(project)
+    default = constants.targets_for(project, kind)
     known = detection.versions_for(project)
     if all_versions:
         wanted = list(known)
@@ -262,10 +281,12 @@ def compute(projects=None, versions=None, all_versions: bool = False,
     """constants.IG_TARGETS（または引数で絞ったもの）について IG を計算する。"""
     rel_df = load_release_dates()
     run_id = ig_store.new_run_id()
-    targets = list(projects) if projects else list(constants.IG_TARGETS)
+    targets = list(projects) if projects else list(constants.targets(kind))
     logger.info(f"run_id = {run_id}")
+    if not targets:
+        logger.warning(f"対象がありません（{kind} の対象の設定が空です。utils/constants.py）")
     for project in targets:
-        spec_by_version = specs_for(project, versions, all_versions, older_versions)
+        spec_by_version = specs_for(project, versions, all_versions, older_versions, kind)
         if not spec_by_version:
             logger.warning(f"スキップ（対象の版がありません）: {project}")
             continue
@@ -283,9 +304,9 @@ def compute(projects=None, versions=None, all_versions: bool = False,
 def extract(projects=None, versions=None, name: str = "default",
             all_versions: bool = False, older_versions: bool = False, kind: str = "time_distance") -> None:
     """保存済みの ig_daily から セル×特徴量の表を書く（モデルは動かさない）。"""
-    targets = list(projects) if projects else list(constants.IG_TARGETS)
+    targets = list(projects) if projects else list(constants.targets(kind))
     for project in targets:
-        for version in specs_for(project, versions, all_versions, older_versions):
+        for version, spec in specs_for(project, versions, all_versions, older_versions, kind).items():
             out_dir = constants.output_dir(project, version, kind)   # 2026-10-21：種類ごとに分ける（§11.5）
             daily = ig_store.load_daily(out_dir)
             if daily.empty:
@@ -296,6 +317,27 @@ def extract(projects=None, versions=None, name: str = "default",
             paths = tables.write_tables(daily, metrics_df, out_dir / constants.EXTRACT_DIRNAME / name)
             logger.info(f"[{project} {version}] 表を書きました: {len(paths)} ファイル → "
                         f"{out_dir / constants.EXTRACT_DIRNAME / name}")
+            # 2026-10-23（design.md §11.7）：d0 と相手を並べた表（距離と位置を明示した対象だけ）
+            cdir = out_dir / constants.EXTRACT_DIRNAME / name / constants.COMPARE_DIRNAME
+            cpaths = tables.write_compare_tables(daily, spec, cdir, prefix="g" if kind == "feature_distance" else "d")
+            if cpaths:
+                logger.info(f"[{project} {version}] d0 と相手を並べた表: {len(cpaths)} ファイル → {cdir}")
+
+
+def _series_to_plot(daily: pd.DataFrame, project: str, version: str) -> list[str]:
+    """描く系列（constants.PLOT_SERIES）。汎用ヘッドの行がなければ、差分・汎用ヘッド単体の系列を probe 単体に切り替える
+    （2026-10-23。design.md §11.7。汎用ヘッドを計算しなかった実行）。"""
+    series = list(constants.PLOT_SERIES)
+    if (daily["head"] == "general").any():
+        return series
+    out = []
+    for s in series:
+        s = "probe" if s in ("diff", "general") else s
+        if s not in out:
+            out.append(s)
+    if out != series:
+        logger.info(f"[{project} {version}] 汎用ヘッドの行がないため、差分・汎用ヘッドの系列は描かず probe 単体で描きます（{series} → {out}）")
+    return out
 
 
 def plot(projects=None, versions=None, all_versions: bool = False,
@@ -306,9 +348,9 @@ def plot(projects=None, versions=None, all_versions: bool = False,
     `daily_metrics.csv.gz` の 2 つだけで、`--mode extract` の出力には依存しない（§9.4.9）。
     """
     plotter.configure()
-    targets = list(projects) if projects else list(constants.IG_TARGETS)
+    targets = list(projects) if projects else list(constants.targets(kind))
     for project in targets:
-        for version in specs_for(project, versions, all_versions, older_versions):
+        for version in specs_for(project, versions, all_versions, older_versions, kind):
             daily = profiles.load_daily(project, version, kind)
             metrics = profiles.load_metrics(project, version, kind)
             if daily is None or daily.empty or metrics is None:
@@ -317,7 +359,7 @@ def plot(projects=None, versions=None, all_versions: bool = False,
             base = constants.output_dir(project, version, kind) / constants.FIGURE_DIRNAME
             row_label = constants.ROW_LABEL[kind]
 
-            for series in constants.PLOT_SERIES:
+            for series in _series_to_plot(daily, project, version):
                 # 軸はプロジェクト × 系列ごとに共通にするため、群をまたいで先に決める（§9.4.5）
                 built = {}
                 for group in constants.PLOT_GROUPS:
