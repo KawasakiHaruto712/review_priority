@@ -82,12 +82,10 @@ IG_TARGETS_TIME = {
     "qtbase": {"6.6.0": {"distances": [0, 1], "positions": [2]}},
 }
 # RQ2：~~今回は空（計算しない）。中身を入れれば同じ仕組みで回る~~
-# 2026-10-23 改めた（本人判断 (b)。design.md §11.7）：g0 が上回った列と下回った列の両方（各 3 列）。行は g0 と、その列で比べた相手
+# ~~2026-10-23 改めた（本人判断 (b)。design.md §11.7）：g0 が上回った列と下回った列の両方（各 3 列）~~
+# 2026-10-23 再び改めた（本人判断。§11.7）：g0 が下回った 3 列だけ（RQ1 と同じ）。行は g0 と、その列で比べた相手。
+# 取り消した上回った列：go go1.21 p0（g0, g1）・go go1.24 p1（g0, g2）・qtdeclarative 6.7.0 p2（g0, g2）。足せば追記で計算できる
 IG_TARGETS_FEATURE = {
-    # g0 が上回った列
-    "go": {"go1.21": {"distances": [0, 1], "positions": [0]},
-           "go1.24": {"distances": [0, 2], "positions": [1]}},
-    "qtdeclarative": {"6.7.0": {"distances": [0, 2], "positions": [2]}},
     # g0 が下回った列
     "typo3_cms": {"13.1.0": {"distances": [0, 1], "positions": [0]},
                   "13.3.0": {"distances": [0, 1], "positions": [2]}},
