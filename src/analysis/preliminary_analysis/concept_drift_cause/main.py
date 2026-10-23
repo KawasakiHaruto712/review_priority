@@ -324,6 +324,18 @@ def extract(projects=None, versions=None, name: str = "default",
                 logger.info(f"[{project} {version}] d0 と相手を並べた表: {len(cpaths)} ファイル → {cdir}")
 
 
+def _n_columns(project: str, version: str, daily: pd.DataFrame) -> int:
+    """その版の評価時期の列の数（図の番号 p' ＝ 列の数 − 1 − p に使う。design.md §11.8。2026-10-24）。
+    重みあり版は 3 × 3 なので 3。重みなし版は版のサイクルから決まる N_v（精度表と同じ式）。"""
+    if detection.fraction_grid():
+        return detection.FRACTION_PARTS
+    try:
+        cs_R, ce_R, _prev = binning.target_cycles(load_release_dates(), project, version)
+        return detection.grid_for(project, binning.cycle_days(cs_R, ce_R, detection.BIN_DAY_ALIGNED))
+    except Exception:          # 区切りの表が読めないときは、計算した列の最大から決める（後ろの列がないと少なめになる）
+        return int(daily["position"].max()) + 1
+
+
 def _series_to_plot(daily: pd.DataFrame, project: str, version: str) -> list[str]:
     """描く系列（constants.PLOT_SERIES）。汎用ヘッドの行がなければ、差分・汎用ヘッド単体の系列を probe 単体に切り替える
     （2026-10-23。design.md §11.7。汎用ヘッドを計算しなかった実行）。"""
@@ -357,7 +369,9 @@ def plot(projects=None, versions=None, all_versions: bool = False,
                 logger.warning(f"スキップ: {project} {version} {kind}")
                 continue
             base = constants.output_dir(project, version, kind) / constants.FIGURE_DIRNAME
-            row_label = constants.ROW_LABEL[kind]
+            # ~~row_label = constants.ROW_LABEL[kind]~~ 2026-10-24 改めた（design.md §11.8）：論文の言葉・d にそろえる
+            row_label = constants.ROW_DISPLAY[kind]
+            n_cols = _n_columns(project, version, daily)   # 評価時期の列の数（図の番号 p' ＝ 列の数 − 1 − p に使う）
 
             for series in _series_to_plot(daily, project, version):
                 # 軸はプロジェクト × 系列ごとに共通にするため、群をまたいで先に決める（§9.4.5）
@@ -372,28 +386,31 @@ def plot(projects=None, versions=None, all_versions: bool = False,
                     lim = profiles.axis_limit([stats])
                     tag = f"{series}_{group}"
                     dists = sorted(stats["distance"].astype(int).unique())
-                    poss = sorted(stats["position"].astype(int).unique())
+                    # 2026-10-24（§11.8）：評価時期は図の向き（初期 → 後期 ＝ 保存物の番号の大きい順）に並べ、ファイル名も図の番号にする
+                    poss = sorted(stats["position"].astype(int).unique(), reverse=True)
 
                     n_cell = 0
                     for d in dists:
                         for p in poss:
+                            q = plotter.disp_position(p, n_cols)
                             if plotter.plot_cell(stats, info, project, version, series, group,
                                                  d, p, lim,
-                                                 base / "by_cell" / tag / f"d{d:02d}_p{p:02d}.png",
-                                                 row_label=row_label):
+                                                 base / "by_cell" / tag / f"d{d:02d}_p{q:02d}.png",
+                                                 row_label=row_label, n_cols=n_cols):
                                 n_cell += 1
                     n_grid = 0
                     for d in dists:
                         if plotter.plot_grid(stats, info, project, version, series, group,
                                              fixed="distance", fixed_value=d, panel_values=poss,
-                                             lim=lim, row_label=row_label,
+                                             lim=lim, row_label=row_label, n_cols=n_cols,
                                              out_path=base / "by_distance" / tag / f"d{d:02d}.png"):
                             n_grid += 1
                     for p in poss:
+                        q = plotter.disp_position(p, n_cols)
                         if plotter.plot_grid(stats, info, project, version, series, group,
                                              fixed="position", fixed_value=p, panel_values=dists,
-                                             lim=lim, row_label=row_label,
-                                             out_path=base / "by_position" / tag / f"p{p:02d}.png"):
+                                             lim=lim, row_label=row_label, n_cols=n_cols,
+                                             out_path=base / "by_position" / tag / f"p{q:02d}.png"):
                             n_grid += 1
                     logger.info(f"[{project} {version}] {tag}: 個別 {n_cell} 枚 / 一覧 {n_grid} 枚"
                                 f"（軸 ±{lim:.3f}）→ {base}")

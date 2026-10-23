@@ -135,8 +135,11 @@ def compare(project: str, versions: list[str]) -> None:
     if not k and fsw.fraction_grid():                                  # 重みあり版は --mode select の結果（手で書いた値が優先）
         from src.analysis.preliminary_analysis.feature_space_window.matrix import run as fsw_run
         k = fsw_run._selected_size_posw().get(project)
-    labels = {time_distance.KIND: f"RQ1：時期のずれ（直前 {det.window_for(project)} 日の窓）",
-              feature_distance.KIND: f"RQ2：特徴のずれ（近い {k} 日）"}
+    # ~~labels = {time_distance.KIND: f"RQ1：時期のずれ（直前 {det.window_for(project)} 日の窓）",~~
+    # ~~          feature_distance.KIND: f"RQ2：特徴のずれ（近い {k} 日）"}~~
+    # 2026-10-24 改めた（design.md §10.2）：論文の言葉にそろえる
+    labels = {time_distance.KIND: f"時間的な距離（直前 {det.window_for(project)} 日）",
+              feature_distance.KIND: f"特徴空間上の距離（近い {k} 日）"}
     out_dir = writer.compare_dir(project)
     for v in versions:
         cells = {}
@@ -163,7 +166,8 @@ def _parse_cells(cells: list[str] | None) -> list[tuple[int, int]]:
 
 def draw(kind: str, project: str, versions: list[str], cells_arg: list[str] | None, groups) -> None:
     plotter.configure()
-    row_label = PAIRINGS[kind].ROW_LABEL
+    # ~~row_label = PAIRINGS[kind].ROW_LABEL~~ 2026-10-24 改めた（design.md §10.2）：論文の言葉（時間的な距離 d／特徴空間上の距離 d）
+    row_label = constants.ROW_DISPLAY[kind]
     for v in versions:
         try:
             cells = writer.load(kind, project, v, "cells")
@@ -174,18 +178,22 @@ def draw(kind: str, project: str, versions: list[str], cells_arg: list[str] | No
         aucs = _auc_lookup(project, v, kind)
         fig_dir = writer.version_dir(kind, project, v) / "figures"
         rows = sorted(cells["row"].unique().tolist())
-        positions = sorted(cells["position"].unique().tolist())
+        # 2026-10-24（§10.2）：評価時期は図の向き（初期 → 後期 ＝ 保存物の番号の大きい順）に並べ、ファイル名も図の番号にする
+        n_cols = int(counts["position"].max()) + 1
+        positions = sorted(cells["position"].unique().tolist(), reverse=True)
         for g in groups:
             for r in rows:
                 plotter.plot_grid(cells, counts, aucs, project, v, row_label, g, fixed="row", fixed_value=r,
-                                  panel_values=positions, out_path=fig_dir / "grid" / g / f"row{r}.png")
+                                  panel_values=positions, out_path=fig_dir / "grid" / g / f"row{r}.png", n_cols=n_cols)
             for p in positions:
+                q = plotter.disp_position(p, n_cols)
                 plotter.plot_grid(cells, counts, aucs, project, v, row_label, g, fixed="position", fixed_value=p,
-                                  panel_values=rows, out_path=fig_dir / "grid" / g / f"position{p}.png")
-            for r, p in _parse_cells(cells_arg):
+                                  panel_values=rows, out_path=fig_dir / "grid" / g / f"position{q}.png", n_cols=n_cols)
+            for r, p in _parse_cells(cells_arg):          # --cells は保存物の番号で指定する（今までどおり）
                 accs = aucs(r, p) if aucs else None
+                q = plotter.disp_position(p, n_cols)
                 plotter.plot_cell(cells, project, v, row_label, r, p, g, plotter.cell_info(counts, r, p), accs,
-                                  fig_dir / "cell" / g / f"d{r}_p{p}.png")
+                                  fig_dir / "cell" / g / f"d{r}_p{q}.png", n_cols=n_cols)
         logger.info(f"図: {fig_dir}")
 
 

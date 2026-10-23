@@ -49,7 +49,7 @@ def plot_compare(table: pd.DataFrame, project: str, version: str, labels: dict, 
             st = STYLES.get(kind, {})
             ax.plot(sub["row"], sub[col], marker=st.get("marker", "o"), color=st.get("color"), markersize=4,
                     linewidth=1.2, label=labels.get(kind, kind))
-        ax.set_xlabel("ずれの段")
+        ax.set_xlabel("ずれの段 d")       # 2026-10-24：d にそろえる（design.md §10.2）
         ax.set_ylabel(ylabel)
         ax.grid(alpha=0.3)
         if col == "abs_delta_mean":
@@ -58,7 +58,8 @@ def plot_compare(table: pd.DataFrame, project: str, version: str, labels: dict, 
             ax.set_ylim(0, max(1, int(d["n_features"].max()) if len(d) else 1))
     axes[0].legend(fontsize=8, loc="best")
     fig.suptitle(f"{project} {version}　学習に使った日と評価日の、特徴量の分布のずれ（全体の群）", fontsize=11)
-    fig.text(0.5, -0.02, "※ 段の意味が違う：RQ1 の d 段 ＝ 刻み × d 日前の窓、RQ2 の g 段 ＝ 特徴空間で近い順の g 番目の k 日。"
+    # 2026-10-24 改めた（§10.2）：論文の言葉・d にそろえる（旧：RQ1 の d 段・RQ2 の g 段）
+    fig.text(0.5, -0.02, "※ 段の意味が違う：時間的な距離の d 段 ＝ 刻み × d 日前の期間、特徴空間上の距離の d 段 ＝ 近さの順位を刻み × d ずらした N 日。"
                          "各点はその段の全評価日の平均（評価時期はまとめる）",
              ha="center", fontsize=8)
     fig.tight_layout()
