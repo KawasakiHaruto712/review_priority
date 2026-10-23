@@ -103,6 +103,57 @@ def build_table(ig_daily: pd.DataFrame, daily_metrics: pd.DataFrame,
     return df[cols + rest]
 
 
+def build_compare(ig_daily: pd.DataFrame, position: int, ref: int, other: int, group: str,
+                  prefix: str = "d") -> pd.DataFrame:
+    """d0 と相手を並べた表（design.md §11.7。2026-10-23）。probe の生の値、1 つの列（評価時期 p）・1 つの群。
+
+    行は全特徴量、|d0 − 相手| の大きい順。平均と標準偏差は評価日を通したもの（セルの表と同じ）。
+    **平均をとる日は行ごとに値のある日をすべて使う**（両方の行にそろえない。精度表・特徴量別の分布と同じ扱い）。
+    そのため日数を行ごとに載せる。どちらかの行に日がなければ空。
+    """
+    p = ig_daily[(ig_daily["head"] == "probe") & (ig_daily["group"] == group)
+                 & (ig_daily["position"].astype(int) == int(position))]
+    a = p[p["distance"].astype(str) == str(ref)]
+    b = p[p["distance"].astype(str) == str(other)]
+    if a.empty or b.empty:
+        return pd.DataFrame()
+    ra, rb = f"{prefix}{ref}", f"{prefix}{other}"
+
+    def _std(rows):
+        return rows[list(FEATURE_NAMES)].std(axis=0, ddof=1) if len(rows) > 1 else pd.Series(np.nan, index=FEATURE_NAMES)
+
+    df = pd.DataFrame({"feature": list(FEATURE_NAMES),
+                       f"{ra}_mean": a[list(FEATURE_NAMES)].mean(axis=0).values, f"{ra}_std": _std(a).values,
+                       f"{rb}_mean": b[list(FEATURE_NAMES)].mean(axis=0).values, f"{rb}_std": _std(b).values})
+    df[f"diff({ra}-{rb})"] = df[f"{ra}_mean"] - df[f"{rb}_mean"]
+    df[f"{ra}_n_days"] = int(a["day"].nunique())
+    df[f"{rb}_n_days"] = int(b["day"].nunique())
+    order = df[f"diff({ra}-{rb})"].abs().sort_values(ascending=False, kind="stable").index
+    return df.loc[order].reset_index(drop=True)
+
+
+def write_compare_tables(ig_daily: pd.DataFrame, spec: dict, out_dir: Path, prefix: str = "d") -> list[Path]:
+    """対象の指定（距離と位置を明示したもの）から、列ごとに d0 と d0 以外の行を並べた表を書く（design.md §11.7）。
+    距離が "all" の指定（重みなし版の全セル）では作らない。"""
+    dists, poss = spec.get("distances"), spec.get("positions")
+    if dists in (None, "all") or poss in (None, "all") or 0 not in [int(d) for d in dists]:
+        return []
+    out_dir = Path(out_dir)
+    paths = []
+    for pos in [int(v) for v in poss]:
+        for other in [int(d) for d in dists if int(d) != 0]:
+            for group in ("pos", "neg"):
+                df = build_compare(ig_daily, pos, 0, other, group, prefix)
+                if df.empty:
+                    logger.warning(f"該当データなしのため並べた表をスキップ: p{pos} {prefix}0 と {prefix}{other} {group}")
+                    continue
+                out_dir.mkdir(parents=True, exist_ok=True)
+                path = out_dir / f"p{pos}_{prefix}0_vs_{prefix}{other}_{group}.csv"
+                df.to_csv(path, index=False, encoding=constants.CSV_ENCODING)
+                paths.append(path)
+    return paths
+
+
 def write_tables(ig_daily: pd.DataFrame, daily_metrics: pd.DataFrame, out_dir: Path) -> list[Path]:
     """probe_pos / probe_neg / general_pos / general_neg の 4 表を書く（§9.3）。"""
     out_dir = Path(out_dir)

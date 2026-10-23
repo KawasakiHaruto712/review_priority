@@ -73,14 +73,19 @@ def item_attributions(encoder, head, feats_std: np.ndarray, steps: int, device,
 
 
 def day_profiles(encoder, head, feats_std: np.ndarray, labels, steps: int, device,
-                 ctx_block: np.ndarray | None = None, step_chunk: int | None = None) -> dict:
+                 ctx_block: np.ndarray | None = None, step_chunk: int | None = None, items=None) -> dict:
     """1 評価日・1 モデルの {群 -> 15 次元プロファイル} と件数を返す（§3.1）。
 
     群分けは**正解ラベル**（モデルに依存しないので、別のモデル同士でも同じ Change 群を比べられる）。
     群の中は単純平均。
+    items（2026-10-23。design.md §11.7）：IG を計算する Change の位置（標本）。省略時は全件。
+    文脈（モデルへの入力の集合）は items によらず全件のまま。件数は計算した Change の数。
     """
     y = np.asarray(labels, dtype=float)
-    attrs = item_attributions(encoder, head, feats_std, steps, device, ctx_block=ctx_block, step_chunk=step_chunk)
+    if items is not None:
+        y = y[np.asarray(list(items), dtype=int)]
+    attrs = item_attributions(encoder, head, feats_std, steps, device, items=items,
+                              ctx_block=ctx_block, step_chunk=step_chunk)
     pos = attrs[y == 1]
     neg = attrs[y == 0]
     return {

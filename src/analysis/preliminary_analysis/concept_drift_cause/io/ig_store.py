@@ -28,7 +28,12 @@ KEY = ["day", "distance", "seed", "head", "group"]
 COLUMNS = ["run_id", "day", "position", "distance", "seed", "head", "group",
            "n_changes"] + list(FEATURE_NAMES)
 # 実行条件のうち、混ぜると結果が比較できなくなるもの（食い違ったら警告する）
-_CRITICAL = ["ig_steps", "baseline", "target_output", "select_metric"]
+# 2026-10-23：負例の標本の条件も足す（標本と全件の行が混ざると比べられないため。design.md §11.7）
+_CRITICAL = ["ig_steps", "baseline", "target_output", "select_metric", "neg_sample"]
+
+# 計算に使った Change の記録（ig_sample.csv.gz。design.md §11.7。2026-10-23）
+SAMPLE_KEY = ["day", "change_id"]
+SAMPLE_COLUMNS = ["run_id", "day", "change_id", "label", "used"]
 
 
 def new_run_id() -> str:
@@ -49,6 +54,10 @@ def run_conditions(extra: dict = None) -> dict:
             "baseline": "その評価日の集合の平均（対象 Change のみ移動）",
             "target_output": "logit",
             "select_metric": " → ".join(constants.select_metrics()) + " → seed 番号",   # 2026-10-21 改めた（design.md §4）。2026-10-22：版の種類で変わる（§11.6）
+            # 2026-10-23（§11.7）：負例の標本の条件と、汎用ヘッドを計算したか
+            "neg_sample": ({"n0": constants.IG_SAMPLE_N0, "seed": "crc32(project|評価日)"} if constants.IG_SAMPLE_NEG
+                           else "全件"),
+            "general_head": constants.IG_GENERAL_HEAD,
             "git": _git_commit(),
             **(extra or {})}
 
@@ -84,6 +93,36 @@ def write_daily(rows: list[dict], out_dir: Path, run_id: str, conditions: dict) 
     merged.to_csv(path, index=False, compression="gzip")
     _append_meta(out_dir, run_id, conditions, n_new=len(new), n_total=len(merged))
     logger.info(f"IG 日次結果を保存: {path}（新規 {len(new)} 行 / 累計 {len(merged)} 行）")
+    return path
+
+
+def sample_path(out_dir: Path) -> Path:
+    return Path(out_dir) / constants.IG_SAMPLE_NAME
+
+
+def load_sample(out_dir: Path) -> pd.DataFrame:
+    """保存済み ig_sample を読む。無ければ空の DataFrame。"""
+    path = sample_path(out_dir)
+    if not path.exists():
+        return pd.DataFrame(columns=SAMPLE_COLUMNS)
+    return pd.read_csv(path, compression="gzip")
+
+
+def write_sample(rows: list[dict], out_dir: Path) -> Path | None:
+    """対象の評価日の全 Change と、IG の計算に使ったかを ig_sample.csv.gz に**追記**する（design.md §11.7）。
+    同じ (day, change_id) の行は新しい実行で置き換える（ig_daily と同じ）。"""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        return None
+    new = pd.DataFrame(rows, columns=SAMPLE_COLUMNS)
+    old = load_sample(out_dir)
+    merged = new if old.empty else pd.concat([old, new], ignore_index=True)
+    merged = merged.drop_duplicates(subset=SAMPLE_KEY, keep="last").sort_values(SAMPLE_KEY, kind="stable")
+    path = sample_path(out_dir)
+    merged.to_csv(path, index=False, compression="gzip")
+    used = new[new["used"]]
+    logger.info(f"計算に使った Change を保存: {path}（今回 {new['day'].nunique()} 日・{len(new)} 件中 {len(used)} 件を使用）")
     return path
 
 
