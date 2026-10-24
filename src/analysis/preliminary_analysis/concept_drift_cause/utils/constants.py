@@ -84,12 +84,19 @@ IG_TARGETS_TIME = {
     "qtcreator": {"17.0.0": {"distances": [0, 1], "positions": [0]},
                   "14.0.0": {"distances": [0, 2], "positions": [0]}},
     "qtbase": {"6.6.0": {"distances": [0, 1], "positions": [2]}},
+    # 2026-10-24 追加（本人判断。design.md §11.7）：d0 が勝った列も足す。相手は d1・d2 の良い方（typo3 14.0.0 は 2 列とも d2。本人判断 (a)）
+    "go": {"go1.24": {"distances": [0, 1], "positions": [1]}},
+    "typo3_cms": {"14.0.0": {"distances": [0, 2], "positions": [0, 2]}},
 }
 # RQ2：~~今回は空（計算しない）。中身を入れれば同じ仕組みで回る~~
 # ~~2026-10-23 改めた（本人判断 (b)。design.md §11.7）：g0 が上回った列と下回った列の両方（各 3 列）~~
 # 2026-10-23 再び改めた（本人判断。§11.7）：g0 が下回った 3 列だけ（RQ1 と同じ）。行は g0 と、その列で比べた相手。
 # 取り消した上回った列：go go1.21 p0（g0, g1）・go go1.24 p1（g0, g2）・qtdeclarative 6.7.0 p2（g0, g2）。足せば追記で計算できる
 IG_TARGETS_FEATURE = {
+    # 2026-10-24 三たび改めた（本人判断。design.md §11.7）：g0 が上回った列も戻す（行・列は 10/23 に取り消したものと同じ）
+    "go": {"go1.21": {"distances": [0, 1], "positions": [0]},
+           "go1.24": {"distances": [0, 2], "positions": [1]}},
+    "qtdeclarative": {"6.7.0": {"distances": [0, 2], "positions": [2]}},
     # g0 が下回った列
     "typo3_cms": {"13.1.0": {"distances": [0, 1], "positions": [0]},
                   "13.3.0": {"distances": [0, 1], "positions": [2]}},
