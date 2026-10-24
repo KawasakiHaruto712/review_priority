@@ -4,6 +4,8 @@ design.md 参照。モデル・データ構築・特徴・label は `pretrained_
 probe と日次指標は `concept_drift_detection`（距離×時期行列の分析）の保存物から読む。
 ここに置くのは特徴量の寄与度分析固有の設定（対象セル・IG の刻み・出力先）。
 """
+import json
+
 from src.analysis.preliminary_analysis.concept_drift_detection.utils import constants as detection
 from src.config.path import DEFAULT_DATA_DIR
 
@@ -26,15 +28,22 @@ FSW_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "feature_spa
 
 def set_variant_roots(variant_name: str) -> None:
     """読み先（RQ1・RQ2 の精度表の出力）を版の種類に合わせる（2026-10-22。design.md §11.6）。
-    重みなし版は今のまま、重みあり版は各出力先の下の posw/。出力先 OUTPUT_ROOT は utils/variant.apply で切り替える。"""
+    重みなし版は今のまま、重みあり版は各出力先の下の posw/。出力先 OUTPUT_ROOT は utils/variant.apply で切り替える。
+    2026-10-24：選んだ列（selection_comparison の出力）の読み先も切り替える（§11.9）。"""
     from src.analysis.preliminary_analysis.pretrained_encoders.utils import variant
-    global DETECTION_ROOT, FSW_ROOT
+    global DETECTION_ROOT, FSW_ROOT, SELECTION_ROOT
     DETECTION_ROOT = variant.subdir(BASE_DETECTION_ROOT, variant_name)
     FSW_ROOT = variant.subdir(BASE_FSW_ROOT, variant_name)
+    SELECTION_ROOT = variant.subdir(BASE_SELECTION_ROOT, variant_name)
 
 
 BASE_DETECTION_ROOT = DETECTION_ROOT      # 重みなし版の読み先（set_variant_roots の元）
 BASE_FSW_ROOT = FSW_ROOT
+# 2026-10-24（design.md §11.9）：選んだ列（selection_comparison の selected_columns.json）の読み先
+BASE_SELECTION_ROOT = DEFAULT_DATA_DIR / "analysis" / "preliminary_analysis" / "selection_comparison"
+SELECTION_ROOT = BASE_SELECTION_ROOT
+SELECTED_COLUMNS_NAME = "selected_columns.json"
+CROSS_KIND = "cross"                      # 2 つの選び方の間の判断値の表の置き場所（output_dir の kind に使う）
 
 
 def output_dir(project: str, version: str, kind: str):
@@ -145,6 +154,7 @@ IG_DAILY_NAME = "ig_daily.csv.gz"
 IG_META_NAME = "ig_daily_meta.json"
 IG_SAMPLE_NAME = "ig_sample.csv.gz"   # 対象の評価日の全 Change と、IG の計算に使ったか（§11.7。2026-10-23）
 COMPARE_DIRNAME = "compare"          # d0 と相手を並べた表の置き場所（extract/<名前>/ の下。§11.7）
+JUDGMENT_DIRNAME = "judgment"        # 判断値（正例 − 負例）の差で並べた表の置き場所（extract/<名前>/ の下。§11.9。2026-10-24）
 EXTRACT_DIRNAME = "extract"
 CSV_ENCODING = "utf-8-sig"   # Excel で開いても文字化けしないように BOM 付き
 
@@ -190,9 +200,48 @@ def grid_shape(n_panels: int) -> tuple[int, int]:
     return (-(-n_panels // cols), cols)      # 切り上げ除算
 
 
+TARGETS_MODE = "manual"   # 2026-10-24（§11.9）："manual"＝手書きの対象（既定）／"selected"＝selection_comparison が選んだ列（--targets で切り替える）
+
+
+def selected_columns() -> dict:
+    """selection_comparison の selected_columns.json の中身（§11.9）。なければ FileNotFoundError。"""
+    path = SELECTION_ROOT / SELECTED_COLUMNS_NAME
+    if not path.exists():
+        raise FileNotFoundError(f"選んだ列のファイルがありません（先に selection_comparison を回す）: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def selected_targets(kind: str) -> dict:
+    """選んだ列から、その kind の対象 {project -> version -> {"cells": [[行, 列], ...]}}（列は保存物の番号。§11.9）。
+    同じ選び方の中は d ＝ 0 と相手、2 つの選び方の間は d ＝ 0（時間・空間の両方に入れる）。重なりは 1 つにまとめる。"""
+    sel = selected_columns()
+    cells: dict = {}
+
+    def add(c, d):
+        cells.setdefault(c["project"], {}).setdefault(c["version"], set()).add((int(d), int(c["position"])))
+
+    for side in sel["within"].get(kind, {}).values():
+        for c in side:
+            add(c, 0)
+            add(c, c["opponent"])
+    for side in sel.get("cross", {}).values():
+        for c in side:
+            add(c, 0)
+    return {p: {v: {"cells": sorted(s)} for v, s in vs.items()} for p, vs in cells.items()}
+
+
+def selected_cross() -> list[dict]:
+    """2 つの選び方の間で選んだ列（空間が上回った側・時間が上回った側の順）。"""
+    sel = selected_columns()
+    return [dict(c, side=side) for side, cols in sel.get("cross", {}).items() for c in cols]
+
+
 def targets(kind: str = "time_distance") -> dict:
     """今の版の種類と精度表の種類に合う対象（project -> version -> 指定）。
-    2026-10-23（design.md §11.7）：重みあり版は IG_TARGETS_TIME（RQ1）／IG_TARGETS_FEATURE（RQ2）、重みなし版は今までどおり IG_TARGETS。"""
+    2026-10-23（design.md §11.7）：重みあり版は IG_TARGETS_TIME（RQ1）／IG_TARGETS_FEATURE（RQ2）、重みなし版は今までどおり IG_TARGETS。
+    2026-10-24（§11.9）：TARGETS_MODE が "selected" なら、selection_comparison が選んだ列（指定は {"cells": [[行, 列], ...]}）。"""
+    if TARGETS_MODE == "selected":
+        return selected_targets(kind)
     if pre_variant() == "posw":
         return IG_TARGETS_FEATURE if kind == "feature_distance" else IG_TARGETS_TIME
     return IG_TARGETS

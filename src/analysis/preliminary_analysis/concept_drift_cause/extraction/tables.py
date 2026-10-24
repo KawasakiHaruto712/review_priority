@@ -132,26 +132,98 @@ def build_compare(ig_daily: pd.DataFrame, position: int, ref: int, other: int, g
     return df.loc[order].reset_index(drop=True)
 
 
-def write_compare_tables(ig_daily: pd.DataFrame, spec: dict, out_dir: Path, prefix: str = "d") -> list[Path]:
-    """対象の指定（距離と位置を明示したもの）から、列ごとに d0 と d0 以外の行を並べた表を書く（design.md §11.7）。
-    距離が "all" の指定（重みなし版の全セル）では作らない。"""
+def pairs_from_spec(spec: dict) -> list[tuple[int, int]]:
+    """対象の指定から、比べる（列, 相手の行）の組（相手は d0 以外の行）。d0 がない列は作らない。
+    行 × 列の指定（"distances"・"positions"）と、組の一覧（"cells"。2026-10-24。design.md §11.9）の両方に対応する。
+    行・列が "all" の指定（重みなし版の全セル）では作らない。"""
+    if spec.get("cells") is not None:
+        cells = {(int(d), int(p)) for d, p in spec["cells"]}
+        return sorted((p, d) for d, p in cells if d != 0 and (0, p) in cells)
     dists, poss = spec.get("distances"), spec.get("positions")
     if dists in (None, "all") or poss in (None, "all") or 0 not in [int(d) for d in dists]:
         return []
+    return [(int(p), int(d)) for p in poss for d in dists if int(d) != 0]
+
+
+def write_compare_tables(ig_daily: pd.DataFrame, spec: dict, out_dir: Path, prefix: str = "d") -> list[Path]:
+    """対象の指定（距離と位置を明示したもの）から、列ごとに d0 と d0 以外の行を並べた表を書く（design.md §11.7）。
+    距離が "all" の指定（重みなし版の全セル）では作らない。2026-10-24：組の一覧（"cells"）にも対応（pairs_from_spec）。"""
     out_dir = Path(out_dir)
     paths = []
-    for pos in [int(v) for v in poss]:
-        for other in [int(d) for d in dists if int(d) != 0]:
-            for group in ("pos", "neg"):
-                df = build_compare(ig_daily, pos, 0, other, group, prefix)
-                if df.empty:
-                    logger.warning(f"該当データなしのため並べた表をスキップ: p{pos} {prefix}0 と {prefix}{other} {group}")
-                    continue
-                out_dir.mkdir(parents=True, exist_ok=True)
-                path = out_dir / f"p{pos}_{prefix}0_vs_{prefix}{other}_{group}.csv"
-                df.to_csv(path, index=False, encoding=constants.CSV_ENCODING)
-                paths.append(path)
+    for pos, other in pairs_from_spec(spec):
+        for group in ("pos", "neg"):
+            df = build_compare(ig_daily, pos, 0, other, group, prefix)
+            if df.empty:
+                logger.warning(f"該当データなしのため並べた表をスキップ: p{pos} {prefix}0 と {prefix}{other} {group}")
+                continue
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / f"p{pos}_{prefix}0_vs_{prefix}{other}_{group}.csv"
+            df.to_csv(path, index=False, encoding=constants.CSV_ENCODING)
+            paths.append(path)
     return paths
+
+
+# ── 判断値の表（design.md §11.9。2026-10-24。本人と合意した物差し） ──────────────────
+def judgment_values(ig_daily: pd.DataFrame, distance, position: int) -> pd.DataFrame:
+    """1 つのモデル（probe の行 distance・列 position）の、評価日 × 特徴量の判断値（正例での寄与の平均 − 負例での寄与の平均）。
+    正例・負例の両方がある日だけ。"""
+    p = ig_daily[(ig_daily["head"] == "probe") & (ig_daily["distance"].astype(str) == str(distance))
+                 & (ig_daily["position"].astype(int) == int(position))]
+    pos = p[p["group"] == "pos"].set_index(p[p["group"] == "pos"]["day"].astype(str))[list(FEATURE_NAMES)]
+    neg = p[p["group"] == "neg"].set_index(p[p["group"] == "neg"]["day"].astype(str))[list(FEATURE_NAMES)]
+    pos, neg = pos.align(neg, join="inner", axis=0)
+    return pos - neg
+
+
+def build_judgment(a: pd.DataFrame, b: pd.DataFrame, label_a: str, label_b: str) -> pd.DataFrame:
+    """2 つのモデルの判断値を並べた表。差 ＝ b − a。判断値の差の絶対値の大きい順（全特徴量）。
+    平均・標準偏差はそれぞれのモデルに値のある日すべて、検定（ウィルコクソンの符号順位検定・両側）は両方に値のある日。"""
+    from scipy.stats import wilcoxon
+    if a.empty or b.empty:
+        return pd.DataFrame()
+    pa, pb = a.align(b, join="inner", axis=0)
+    rows = []
+    for f in FEATURE_NAMES:
+        diff = (pb[f] - pa[f]).dropna()
+        pv = float(wilcoxon(diff).pvalue) if len(diff) and (diff != 0).any() else np.nan
+        rows.append({"feature": f,
+                     f"{label_a}_mean": float(a[f].mean()), f"{label_a}_std": float(a[f].std(ddof=1)) if len(a) > 1 else np.nan,
+                     f"{label_b}_mean": float(b[f].mean()), f"{label_b}_std": float(b[f].std(ddof=1)) if len(b) > 1 else np.nan,
+                     f"diff({label_b}-{label_a})": float(b[f].mean() - a[f].mean()),
+                     f"{label_a}_n_days": int(len(a)), f"{label_b}_n_days": int(len(b)), "n_paired": int(len(pa)),
+                     "p_value": pv})
+    df = pd.DataFrame(rows)
+    col = f"diff({label_b}-{label_a})"
+    return df.loc[df[col].abs().sort_values(ascending=False, kind="stable").index].reset_index(drop=True)
+
+
+def write_judgment_tables(ig_daily: pd.DataFrame, spec: dict, out_dir: Path) -> list[Path]:
+    """同じ選び方の中：列ごとに d0 と相手の判断値の表（例 p0_d0_vs_d1.csv。番号は保存物の向き。行は論文の記号 d）。"""
+    out_dir = Path(out_dir)
+    paths = []
+    for pos, other in pairs_from_spec(spec):
+        df = build_judgment(judgment_values(ig_daily, 0, pos), judgment_values(ig_daily, other, pos), "d0", f"d{other}")
+        if df.empty:
+            logger.warning(f"該当データなしのため判断値の表をスキップ: p{pos} d0 と d{other}")
+            continue
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"p{pos}_d0_vs_d{other}.csv"
+        df.to_csv(path, index=False, encoding=constants.CSV_ENCODING)
+        paths.append(path)
+    return paths
+
+
+def write_cross_judgment(time_daily: pd.DataFrame, space_daily: pd.DataFrame, position: int, out_dir: Path) -> Path | None:
+    """2 つの選び方の間：時間的な距離の d0 と特徴空間上の距離の d0 の判断値の表（p{列}_time_vs_space.csv）。差 ＝ 空間 − 時間。"""
+    df = build_judgment(judgment_values(time_daily, 0, position), judgment_values(space_daily, 0, position), "time_d0", "space_d0")
+    if df.empty:
+        logger.warning(f"該当データなしのため 2 つの選び方の間の判断値の表をスキップ: p{position}")
+        return None
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"p{int(position)}_time_vs_space.csv"
+    df.to_csv(path, index=False, encoding=constants.CSV_ENCODING)
+    return path
 
 
 def write_tables(ig_daily: pd.DataFrame, daily_metrics: pd.DataFrame, out_dir: Path) -> list[Path]:

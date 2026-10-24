@@ -147,6 +147,19 @@ def _append_meta(out_dir: Path, run_id: str, conditions: dict, n_new: int, n_tot
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
+def same_conditions(out_dir: Path, run_ids: set, conditions: dict) -> bool:
+    """run_ids の実行の条件（_CRITICAL）が、すべて conditions と同じか（design.md §11.9。計算済みの組を飛ばす判定に使う）。
+    記録のない run_id があれば False。"""
+    runs = {str(r.get("run_id")): r for r in _read_meta(out_dir).get("runs", [])}
+    for rid in run_ids:
+        run = runs.get(str(rid))
+        if run is None:
+            return False
+        if any(run.get(k) != conditions.get(k) for k in _CRITICAL):
+            return False
+    return True
+
+
 def _warn_if_conditions_differ(out_dir: Path, conditions: dict) -> None:
     """既存の行と条件が違う実行を検出して警告する（黙って混ざるのを防ぐ。§9.2）。"""
     for run in _read_meta(out_dir).get("runs", []):

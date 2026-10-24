@@ -117,6 +117,25 @@ def _sample_rows(run_id: str, day, eval_set, items) -> list[dict]:
             for i, (cid, lab) in enumerate(zip(eval_set.ids, eval_set.labels))]
 
 
+def _done_cells(existing: pd.DataFrame, out_dir, cell_set: set, chosen: dict, day_sets: dict, pos_of: dict) -> set:
+    """計算済みの（行, 列）の組（design.md §11.9）。
+    その組の計算に要る評価日（集合があり、精度表で seed を選べた日）がすべて ig_daily の probe の行にあり、
+    その行を書いた実行の条件（ig_store._CRITICAL）が今の条件と同じなら、計算済みとする。"""
+    if existing is None or existing.empty:
+        return set()
+    probe = existing[existing["head"] == "probe"]
+    current = ig_store.run_conditions()
+    done = set()
+    for d, p in cell_set:
+        need = {X.isoformat() for X in day_sets if pos_of.get(X) == p and chosen.get((X.isoformat(), str(d))) is not None}
+        rows = probe[(probe["distance"].astype(str) == str(d)) & (probe["position"].astype(int) == p)]
+        if not need or not need <= set(rows["day"].astype(str)):
+            continue
+        if ig_store.same_conditions(out_dir, set(rows["run_id"].astype(str)), current):
+            done.add((d, p))
+    return done
+
+
 def _resolve_encoders(project: str, device):
     """距離×時期行列の分析と同じ 5 個の (エンコーダ, 汎用ヘッド) を load する（作り直さない）。"""
     cutoff = detection.cutoff_for(project)
@@ -167,9 +186,15 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
         return 0
     chosen = select_seeds(daily, constants.select_metrics())     # 2026-10-22：版の種類で並べる指標を変える（design.md §11.6）
 
-    distances = constants.resolve_axis(spec.get("distances"), grid)
-    pspec = spec.get("positions")
-    target_pos = set(constants.resolve_axis(pspec, grid))   # 位置も 0 始まり（p0 ＝ リリースの直前）
+    # 2026-10-24（design.md §11.9）：選んだ列からの対象は「（行, 列）の組の一覧」（spec["cells"]）。手書きの対象は今までどおり行 × 列
+    cell_set = None if spec.get("cells") is None else {(int(d), int(p)) for d, p in spec["cells"]}
+    if cell_set is None:
+        distances = constants.resolve_axis(spec.get("distances"), grid)
+        pspec = spec.get("positions")
+        target_pos = set(constants.resolve_axis(pspec, grid))   # 位置も 0 始まり（p0 ＝ リリースの直前）
+    else:
+        distances = sorted({d for d, _ in cell_set})
+        target_pos = {p for _, p in cell_set}
 
     # 距離×時期行列の分析と同じ手順で 日ごとの集合と位置を作る
     rec_start = (binning.record_start_fraction(ce_R, cycle, window, step, grid, detection.RECORD_MARGIN_DAYS,
@@ -194,6 +219,18 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
         logger.warning(f"スキップ（保存済み probe がありません）: {project} {kind} 窓長 {window} 日")
         return 0
 
+    out_dir = constants.output_dir(project, version, kind)
+    if cell_set is not None:   # 2026-10-24（§11.9）：計算済みの組は飛ばす（同じ条件で、要る評価日がすべてそろっている組）
+        done = _done_cells(ig_store.load_daily(out_dir), out_dir, cell_set, chosen, day_sets, pos_of)
+        if done:
+            logger.info(f"計算済みなので飛ばす（行, 列）: {sorted(done)}")
+        cell_set = cell_set - done
+        if not cell_set:
+            logger.info(f"スキップ（対象の組はすべて計算済み）: {project} {version} {kind}")
+            return 0
+        distances = sorted({d for d, _ in cell_set})
+        target_pos = {p for _, p in cell_set}
+
     eval_days = [d for d in sorted(day_sets) if d in pos_of and pos_of[d] in target_pos]
     logger.info(f"対象の評価日: {len(eval_days)} 日（負例の標本 {'あり（n₀=' + str(constants.IG_SAMPLE_N0) + '）' if constants.IG_SAMPLE_NEG else 'なし'}"
                 f"・汎用ヘッド {'計算する' if constants.IG_GENERAL_HEAD else '計算しない'}）")
@@ -208,6 +245,8 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
                  if constants.IG_SAMPLE_NEG else None)
         used_seeds = set()
         for d in distances:
+            if cell_set is not None and (int(d), int(p0)) not in cell_set:
+                continue                      # 組の一覧にない（行, 列）は計算しない（§11.9）
             seed = chosen.get((X.isoformat(), str(d)))
             if seed is None:
                 continue                      # 距離×時期行列の分析で欠測だった日・距離
@@ -237,13 +276,14 @@ def compute_version(project: str, version: str, spec: dict, *, feat_table, rel_d
     if missing_probe:
         logger.warning(f"probe が見つからず飛ばした (日, 距離): {missing_probe} 件")
 
-    out_dir = constants.output_dir(project, version, kind)
     if out_dir.exists() and any(out_dir.iterdir()):     # IG の出力は追記式（run ごとに別の記録）なので、上書きではなく追記を知らせる（§11.6）
         logger.warning(f"既存の結果に追記します（版の種類 {variant.LABEL.get(constants.pre_variant(), '')}）：{out_dir}")
     ig_store.write_daily(rows, out_dir, run_id,
                          ig_store.run_conditions({"project": project, "version": version, "kind": kind,
                                                   "distances": distances,
                                                   "positions": sorted(target_pos),
+                                                  # 2026-10-24（§11.9）：組の一覧で回したときはその一覧も残す
+                                                  **({"cells": sorted(cell_set)} if cell_set is not None else {}),
                                                   "device": str(device),     # 回した機械（pretrained_encoders/design.md §14.5）
                                                   "variant": constants.pre_variant()}))   # 版の種類（2026-10-22）
     ig_store.write_sample(sample_rows, out_dir)     # 計算に使った Change の ID（2026-10-23。§11.7）
@@ -322,6 +362,31 @@ def extract(projects=None, versions=None, name: str = "default",
             cpaths = tables.write_compare_tables(daily, spec, cdir, prefix="g" if kind == "feature_distance" else "d")
             if cpaths:
                 logger.info(f"[{project} {version}] d0 と相手を並べた表: {len(cpaths)} ファイル → {cdir}")
+            # 2026-10-24（design.md §11.9）：判断値（正例 − 負例）の差で並べた表（同じ選び方の中。d0 と相手）
+            jdir = out_dir / constants.EXTRACT_DIRNAME / name / constants.JUDGMENT_DIRNAME
+            jpaths = tables.write_judgment_tables(daily, spec, jdir)
+            if jpaths:
+                logger.info(f"[{project} {version}] 判断値の表（d0 と相手）: {len(jpaths)} ファイル → {jdir}")
+    if constants.TARGETS_MODE == "selected":     # 2 つの選び方の間の判断値の表は、選んだ列を対象にしたときだけ（§11.9）
+        extract_cross(projects, name)
+
+
+def extract_cross(projects=None, name: str = "default") -> None:
+    """2 つの選び方の間：選んだ列で、時間的な距離の d0 と特徴空間上の距離の d0 の判断値の表を書く（design.md §11.9）。
+    2 つの kind の ig_daily を読む。置き場所は <repo>/set_transformer/cross/<版>/extract/<名前>/judgment/。"""
+    for c in constants.selected_cross():
+        if projects and c["project"] not in projects:
+            continue
+        tdaily = ig_store.load_daily(constants.output_dir(c["project"], c["version"], "time_distance"))
+        sdaily = ig_store.load_daily(constants.output_dir(c["project"], c["version"], "feature_distance"))
+        if tdaily.empty or sdaily.empty:
+            logger.warning(f"スキップ（IG の結果がありません）: {c['project']} {c['version']} 2 つの選び方の間")
+            continue
+        jdir = (constants.output_dir(c["project"], c["version"], constants.CROSS_KIND)
+                / constants.EXTRACT_DIRNAME / name / constants.JUDGMENT_DIRNAME)
+        path = tables.write_cross_judgment(tdaily, sdaily, c["position"], jdir)
+        if path:
+            logger.info(f"[{c['project']} {c['version']} p{c['position']}] 2 つの選び方の間の判断値の表 → {path}")
 
 
 def _n_columns(project: str, version: str, daily: pd.DataFrame) -> int:
@@ -429,6 +494,9 @@ def _parse_args():
     variant.add_argument(ap)          # 2026-10-22：compute は必須、extract・plot は省略すると重みあり版（design.md §11.6）
     ap.add_argument("--kind", choices=list(constants.KINDS), default="time_distance",
                     help="time_distance＝RQ1（時期のずれ）／feature_distance＝RQ2（特徴のずれ。design.md §11.5。2026-10-21）")
+    ap.add_argument("--targets", choices=["manual", "selected"], default="manual",
+                    help="manual＝手書きの対象（IG_TARGETS_TIME など。既定）／selected＝selection_comparison が選んだ列"
+                         "（計算済みの組は飛ばす。extract では 2 つの選び方の間の判断値の表も書く。design.md §11.9。2026-10-24）")
     return ap.parse_args()
 
 
@@ -436,6 +504,7 @@ if __name__ == "__main__":
     args = _parse_args()
     _v = variant.apply(variant.resolve(args.variant, writing=(args.mode == "compute")), constants)
     constants.set_variant_roots(_v)   # 精度表の probe・daily_metrics の読み先も版の種類に合わせる（design.md §11.6）
+    constants.TARGETS_MODE = args.targets      # 2026-10-24（§11.9）：対象を手書きか、選んだ列か
     if args.mode == "compute":
         compute(projects=args.project, versions=args.version, all_versions=args.all_versions,
                 older_versions=args.older_versions, kind=args.kind)
